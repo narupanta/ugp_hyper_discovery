@@ -5,6 +5,7 @@ import numpy as np
 import datetime
 from pathlib import Path
 import time
+from core.material_models import get_material
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'UQInModelDiscovery')))
@@ -120,8 +121,8 @@ class PyTorchGMRModel(nn.Module):
         self.include_log_terms = include_log_terms
         self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
         if self.include_log_terms:
-            self._num_parameters = 14
-            self._parameter_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "CL1", "CL2", "D1", "D2", "D3")
+            self._num_parameters = 13
+            self._parameter_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "CL2", "D1", "D2", "D3")
         else:
             self._num_parameters = 12
             self._parameter_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "D1", "D2", "D3")
@@ -169,10 +170,10 @@ class PyTorchGMRModel(nn.Module):
         J_m1 = J - 1.0
 
         if self.include_log_terms:
-            C10, C01, C20, C11, C02, C30, C21, C12, C03, CL1, CL2, D1, D2, D3 = full_parameters
+            C10, C01, C20, C11, C02, C30, C21, C12, C03, CL2, D1, D2, D3 = full_parameters
             log1 = torch.log(torch.clamp(I1_bar / 3.0, min=1e-8))
             log2 = torch.log(torch.clamp(I2_bar / 3.0, min=1e-8))
-            W_log = CL1 * log1 + CL2 * log2
+            W_log = CL2 * log2
         else:
             C10, C01, C20, C11, C02, C30, C21, C12, C03, D1, D2, D3 = full_parameters
             W_log = 0.0
@@ -195,7 +196,6 @@ class PyTorchGMRModel(nn.Module):
             dW_dI1 = C10 + 2.0 * C20 * I1_m3 + C11 * I2_m3 + 3.0 * C30 * (I1_m3**2) + 2.0 * C21 * I1_m3 * I2_m3 + C12 * (I2_m3**2)
             dW_dI2 = C01 + C11 * I1_m3 + 2.0 * C02 * I2_m3 + C21 * (I1_m3**2) + 2.0 * C12 * I1_m3 * I2_m3 + 3.0 * C03 * (I2_m3**2)
             if self.include_log_terms:
-                dW_dI1 = dW_dI1 + CL1 / I1_bar
                 dW_dI2 = dW_dI2 + CL2 / I2_bar
             dW_dJ = 2.0 * D1 * J_m1 + 4.0 * D2 * (J_m1**3) + 6.0 * D3 * (J_m1**5)
             
@@ -375,7 +375,7 @@ def main():
         mode_str = f"_{args.sample_mode}_g{args.max_gamma}" if args.sample_mode == "standard" else f"_{args.sample_mode}"
         if args.distill_target in ["sef_stress", "sef_cauchy"]:
             mode_str += f"_{args.distill_target}"
-        out_dir = os.path.abspath(os.path.join("distillation", "distilled_models", f"{current_time}_{ugp_model_name}{noise_str}_{args.material_model}{mode_str}_uqmodeldisc"))
+        out_dir = os.path.abspath(os.path.join("distillation", "distilled_models", f"{current_time}_{true_model_name}{noise_str}_{args.material_model}{mode_str}_uqmodeldisc"))
         log_mode = "w"
     os.makedirs(out_dir, exist_ok=True)
     
@@ -544,27 +544,57 @@ def main():
                 
                 param_cols = [c for c in df_tot.columns if c not in ["Unnamed: 0", ""]]
                 tot_means = df_tot.iloc[0][param_cols].values.astype(float)
-                tot_stds = df_tot.iloc[1][param_cols].values.astype(float)
                 first_means = df_first.iloc[0][param_cols].values.astype(float)
-                first_stds = df_first.iloc[1][param_cols].values.astype(float)
                 
-                x = np.arange(len(param_cols))
-                width = 0.35
+                raw_path = os.path.join(csv_dir, "total_sobol_indices_output_0.csv")
+                df_raw = pd.read_csv(raw_path)
+                tot_maxs = df_raw[param_cols].max().values.astype(float)
                 
-                fig, ax = plt.subplots(figsize=(12, 6))
-                ax.bar(x - width/2, first_means, width, yerr=first_stds, label="First-Order ($S_1$)", capsize=4, color="#3498db", alpha=0.85)
-                ax.bar(x + width/2, tot_means, width, yerr=tot_stds, label="Total-Order ($S_T$)", capsize=4, color="#e74c3c", alpha=0.85)
+                sorted_indices = np.argsort(tot_means)[::-1]
+                sorted_param_cols = [param_cols[i] for i in sorted_indices]
+                sorted_tot_means = tot_means[sorted_indices]
+                sorted_tot_maxs = tot_maxs[sorted_indices]
                 
-                ax.set_yscale('log')
-                ax.set_ylim(bottom=1e-5)
+                denominator = max(np.sum(first_means), np.sum(tot_means))
+                if denominator == 0:
+                    denominator = 1.0
+                    
+                norm_tot_means = sorted_tot_means / denominator
+                est_coverage_frac = np.cumsum(sorted_tot_means) / denominator
+                est_coverage_pct = est_coverage_frac * 100.0
                 
-                ax.axhline(args.sobol_threshold, color='black', linestyle='--', linewidth=1.5, label=f"Threshold ({args.sobol_threshold})")
-                ax.set_ylabel('Sobol Sensitivity Index', fontsize=12, fontweight='bold')
-                ax.set_title('Material Parameter Sensitivity (Sobol Indices)', fontsize=14, fontweight='bold')
-                ax.set_xticks(x)
-                ax.set_xticklabels(param_cols, fontsize=11, fontweight='bold')
-                ax.legend(fontsize=11)
-                ax.grid(axis='y', linestyle=':', alpha=0.6)
+                x = np.arange(len(sorted_param_cols))
+                width = 0.25
+                
+                fig, ax1 = plt.subplots(figsize=(14, 7))
+                
+                ax1.bar(x - width, sorted_tot_means, width, label="Mean Total-Order", color="#008080", alpha=0.9)
+                ax1.bar(x, sorted_tot_maxs, width, label="Max Total-Order", color="#20B2AA", alpha=0.9)
+                ax1.bar(x + width, norm_tot_means, width, label="Norm. Total-Order", color="#48D1CC", alpha=0.9)
+                
+                ax1.set_yscale('log')
+                ax1.set_ylim(bottom=max(1e-5, args.sobol_threshold * 0.1))
+                ax1.axhline(args.sobol_threshold, color='black', linestyle='--', linewidth=1.5, label=f"Threshold ({args.sobol_threshold})")
+                
+                ax1.set_ylabel('Sobol Sensitivity Index (Log Scale)', fontsize=12, fontweight='bold')
+                ax1.set_title('Material Parameter Sensitivity (Sobol Indices)', fontsize=14, fontweight='bold')
+                ax1.set_xticks(x)
+                ax1.set_xticklabels(sorted_param_cols, fontsize=11, fontweight='bold')
+                # Removed grid
+                
+                ax2 = ax1.twinx()
+                ax2.plot(x, est_coverage_pct, color='black', marker='o', linestyle='-', linewidth=2, markersize=6, label="Estimated Coverage (EC)")
+                ax2.set_ylabel('Estimated Coverage (%)', color='black', fontsize=12, fontweight='bold')
+                ax2.set_ylim(0, 105)
+                ax2.set_yticks([0, 20, 40, 60, 80, 95, 100])
+                ax2.tick_params(axis='y', labelcolor='black')
+                ax2.axhline(100, color='black', linestyle='-', linewidth=0.8, alpha=0.5)
+                ax2.axhline(95, color='black', linestyle='-', linewidth=0.8, alpha=0.5)
+                
+                lines_1, labels_1 = ax1.get_legend_handles_labels()
+                lines_2, labels_2 = ax2.get_legend_handles_labels()
+                ax1.legend(lines_1 + lines_2, labels_1 + labels_2, fontsize=11, loc='center right', bbox_to_anchor=(1.0, 0.6))
+                
                 plt.tight_layout()
                 sobol_plot_path = os.path.join(out_dir, "sobol_sensitivity_indices.png")
                 plt.savefig(sobol_plot_path, dpi=200)
@@ -775,6 +805,14 @@ def main():
                         "--material_model", args.material_model], check=True)
     except Exception as e:
         print(f"Error running validation plots: {e}")
+
+    # Run deformation sensitivity plot script
+    try:
+        import subprocess
+        subprocess.run(["python3", "plots/plot_deformation_sensitivity.py", 
+                        "--distilled_dir", out_dir], check=True)
+    except Exception as e:
+        print(f"Error running deformation sensitivity plots: {e}")
 
     pipeline_total_time = time.time() - pipeline_start_time
     print("\n========================================================================")

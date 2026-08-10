@@ -33,7 +33,7 @@ def generate_standard_modes(num_points=32, max_gamma=1.0):
     return F_all.reshape(-1, 2, 2)
 
 def generate_standard_modes_interp(num_points=32, max_search_gamma=1.0, min_dev=None, max_dev=None, min_vol=None, max_vol=None):
-    search_points = 2000
+    search_points = 10000
     gamma_search = np.linspace(0.0, max_search_gamma, search_points)
     
     def get_mode_F(mode_idx, g_arr):
@@ -69,7 +69,7 @@ def generate_standard_modes_interp(num_points=32, max_search_gamma=1.0, min_dev=
     
     extractor = IsotropicFeatureExtractor()
     
-    print("\n--- Dynamically determining interpolation transition points (gamma in [0, 1]) ---")
+    print(f"\n--- Dynamically determining interpolation transition points (gamma in [0, {max_search_gamma}]) ---")
     for i in range(6):
         F_search_2x2 = get_mode_F(i, gamma_search)
         F_search_3x3 = np.zeros((search_points, 3, 3))
@@ -195,8 +195,8 @@ def main():
             export_subfolder = "pytorch_export_dataset_f"
             print(f"Sampled {len(indices)} deformations directly from extraction dataset via Farthest Point Sampling.")
     elif args.sample_mode == "standard_interp":
-        print("Generating standard deformation modes strictly within GP interpolation bounds (up to gamma = 1.0)...")
-        f3x3_flat_2x2 = generate_standard_modes_interp(num_points=max(1, args.num_points // 6), max_search_gamma=1.0, min_dev=min_dev, max_dev=max_dev, min_vol=min_vol, max_vol=max_vol)
+        print(f"Generating standard deformation modes strictly within GP interpolation bounds (up to gamma = {args.max_gamma})...")
+        f3x3_flat_2x2 = generate_standard_modes_interp(num_points=max(1, args.num_points // 6), max_search_gamma=args.max_gamma, min_dev=min_dev, max_dev=max_dev, min_vol=min_vol, max_vol=max_vol)
         export_subfolder = "pytorch_export_standard_interp"
     else:
         f3x3_flat_2x2 = generate_standard_modes(num_points=max(1, args.num_points // 6), max_gamma=args.max_gamma)

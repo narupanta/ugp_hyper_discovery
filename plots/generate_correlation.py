@@ -17,8 +17,10 @@ def main():
     # Load samples
     samples_np = np.load(os.path.join(out_dir, "flow_samples.npy"))
     
-    # Assume we know the parameter names for gmr_nolog
-    full_param_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "D1", "D2", "D3")
+    if args.material_model in ["gmr", "gmr_log"]:
+        full_param_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "CL2", "D1", "D2", "D3")
+    else:
+        full_param_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "D1", "D2", "D3")
     df = pd.DataFrame(samples_np, columns=full_param_names)
     
     # Load sensitivity CSV to find active parameters
