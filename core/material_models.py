@@ -383,3 +383,58 @@ class Ogden(BaseMaterialModel):
         )
         
         return dev_terms + vol_terms
+
+@register_material("holzapfel")
+class AnisotropicHolzapfel(BaseMaterialModel):
+    """
+    Anisotropic Holzapfel-Gasser-Ogden material model with 1 fiber orientation.
+    Uses Macauley bracket to ensure fibers do not support compression.
+    """
+    def __init__(self, c10=0.5, d1=1.5, k1=1.0, k2=10.0, kappa=0.0, theta=jnp.pi/6.0, jit_P: bool = True):
+        super().__init__(jit_P=jit_P)
+        self.c10 = c10
+        self.d1 = d1
+        self.k1 = k1
+        self.k2 = k2
+        self.kappa = kappa
+        
+        # Calculate fiber direction vector from angle (theta in XY plane)
+        self.a0 = jnp.array([jnp.cos(theta), jnp.sin(theta), 0.0])
+
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
+        if F.shape[-2:] == (2, 2):
+            F = jnp.array([[F[0, 0], F[0, 1], 0.], 
+                           [F[1, 0], F[1, 1], 0.],
+                           [0.,      0.,     1. ]])
+        C = C_func(F)
+        I1 = I1_func(C)
+        I3 = I3_func(C)
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+        J = jnp.sqrt(I3_safe)
+        
+        # Deviatoric right Cauchy-Green tensor
+        C_bar = I3_safe**(-1/3) * C
+        I1_bar = I1_func(C_bar)
+        
+        # Isotropic matrix response
+        psi_iso = self.c10 * (I1_bar - 3.0)
+        
+        # Volumetric response
+        psi_vol = (1.0 / self.d1) * (J - 1.0)**2
+        
+        # Anisotropic fiber response
+        # Invariant I4_bar: a0 . C_bar . a0
+        # For batched C_bar (..., 3, 3), we do an einsum
+        I4_bar = jnp.einsum('i,...ij,j->...', self.a0, C_bar, self.a0)
+        
+        # Fiber dispersion term
+        E_bar = self.kappa * (I1_bar - 3.0) + (1.0 - 3.0 * self.kappa) * (I4_bar - 1.0)
+        
+        # Macauley bracket (fibers do not support compression)
+        E_active = jnp.maximum(E_bar, 0.0)
+        
+        # Fiber strain energy
+        psi_aniso = (self.k1 / (2.0 * self.k2)) * (jnp.exp(self.k2 * (E_active**2)) - 1.0)
+        
+        return psi_iso + psi_vol + psi_aniso
+

@@ -264,6 +264,8 @@ def main():
     parser.add_argument("--no_sensitivity", dest="do_sensitivity", action="store_false", help="Skip sensitivity analysis")
     parser.add_argument("--sobol_threshold", type=float, default=1e-4, help="Total Sobol index threshold for selecting sensitive parameters")
     parser.add_argument("--sobol_samples_factor", type=int, default=1024, help="Saltelli sample factor for sensitivity analysis")
+    parser.add_argument("--pruning_mode", type=str, default="ec", choices=["ec", "threshold"], help="Pruning mode: 'ec' (Estimated Coverage) or 'threshold' (Fixed Sobol Threshold).")
+    parser.add_argument("--ec_threshold", type=float, default=95.0, help="Estimated Coverage threshold in percent (default: 95.0). Only used if pruning_mode='ec'.")
     parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all"], help="Sample deformation inputs from extraction dataset directly or standard modes (with or without interpolation clipping)")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points for GP joint evaluation and distillation")
     parser.add_argument("--max_gamma", type=float, default=1.0, help="Max deformation intensity gamma when sample_mode is standard")
@@ -314,13 +316,17 @@ def main():
     
     # Map deformation modes to test case identifiers for sensitivity analysis output grouping
     test_cases = torch.zeros(num_points, dtype=torch.int64, device=device)
-    chunk = max(1, num_points // 6)
-    test_cases[0:chunk] = test_case_identifier_uniaxial_tension
-    test_cases[chunk:2*chunk] = test_case_identifier_equibiaxial_tension
-    test_cases[2*chunk:3*chunk] = test_case_identifier_pure_shear
-    test_cases[3*chunk:4*chunk] = test_case_identifier_uniaxial_tension
-    test_cases[4*chunk:5*chunk] = test_case_identifier_equibiaxial_tension
-    test_cases[5*chunk:] = test_case_identifier_pure_shear
+    if args.sample_mode in ["dataset_f", "dataset_all"]:
+        # Heterogeneous full-field data: treat all as a single experimental load case
+        test_cases[:] = test_case_identifier_equibiaxial_tension
+    else:
+        chunk = max(1, num_points // 6)
+        test_cases[0:chunk] = test_case_identifier_uniaxial_tension
+        test_cases[chunk:2*chunk] = test_case_identifier_equibiaxial_tension
+        test_cases[2*chunk:3*chunk] = test_case_identifier_pure_shear
+        test_cases[3*chunk:4*chunk] = test_case_identifier_uniaxial_tension
+        test_cases[4*chunk:5*chunk] = test_case_identifier_equibiaxial_tension
+        test_cases[5*chunk:] = test_case_identifier_pure_shear
 
     # For Sobol sensitivity analysis, prevent SALib NaN variance division at zero-strain origins (F=I)
     # by assigning an identifier (2=Biaxial Tension) ignored by Treloar output 0 screening.
@@ -607,8 +613,51 @@ def main():
         time_records['Stage 2 (Sobol Sensitivity Analysis)'] = t_stage2_dur
         print(f"\n[Time Usage] Stage 2 finished in {t_stage2_dur / 60:.2f} minutes ({t_stage2_dur:.2f} seconds).\n")
 
+        # Custom parameter selection logic
+        try:
+            import pandas as pd
+            csv_dir = os.path.join(out_dir, "sensitivities")
+            stats_path = os.path.join(csv_dir, "total_sobol_indices_statistics_output_0.csv")
+            first_stats_path = os.path.join(csv_dir, "first_sobol_indices_statistics_output_0.csv")
+            
+            if os.path.exists(stats_path) and os.path.exists(first_stats_path):
+                df_tot = pd.read_csv(stats_path).fillna(0.0)
+                df_first = pd.read_csv(first_stats_path).fillna(0.0)
+                
+                param_cols = [c for c in df_tot.columns if c not in ["Unnamed: 0", ""]]
+                tot_means = df_tot.iloc[0][param_cols].values.astype(float)
+                first_means = df_first.iloc[0][param_cols].values.astype(float)
+                
+                sorted_indices = np.argsort(tot_means)[::-1]
+                
+                if args.pruning_mode == "ec":
+                    denominator = max(np.sum(first_means), np.sum(tot_means))
+                    if denominator == 0:
+                        denominator = 1.0
+                    
+                    sorted_tot_means = tot_means[sorted_indices]
+                    est_coverage_pct = np.cumsum(sorted_tot_means) / denominator * 100.0
+                    
+                    cutoff_idx = np.searchsorted(est_coverage_pct, args.ec_threshold)
+                    if cutoff_idx >= len(est_coverage_pct):
+                        cutoff_idx = len(est_coverage_pct) - 1
+                        
+                    selected_indices = sorted_indices[:cutoff_idx + 1].tolist()
+                    print(f"\n[Pruning Mode: EC] Selecting top {cutoff_idx + 1} parameters to reach {args.ec_threshold}% Estimated Coverage.")
+                
+                elif args.pruning_mode == "threshold":
+                    selected_indices = [i for i, mean in enumerate(tot_means) if mean >= args.sobol_threshold]
+                    print(f"\n[Pruning Mode: Threshold] Selecting parameters with Total-Order > {args.sobol_threshold}.")
+                
+                model.deactivate_all_parameters()
+                model.activate_parameters(selected_indices)
+                
+        except Exception as e:
+            print(f"Error during custom parameter selection logic: {e}")
+            print("Falling back to UQModelDisc default selection.")
+
         active_names = model.get_active_parameter_names()
-        print(f"\nSelected sensitive parameters ({len(active_names)}): {active_names}")
+        print(f"Selected sensitive parameters ({len(active_names)}): {active_names}")
         if len(active_names) == 0:
             print("Warning: No parameters exceeded Sobol threshold! Keeping all parameters active.")
             model.activate_parameters(list(range(model.num_parameters)))
