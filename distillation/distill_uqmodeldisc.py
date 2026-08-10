@@ -343,8 +343,24 @@ def main():
     else:
         model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
         parts = model_folder_name.split('_')
-        ugp_model_name = parts[1] if len(parts) > 1 else "unknown"
         
+        true_model_name = "isihara" # We can just hardcode or infer it
+        for p in ["isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4"]:
+            if p in parts:
+                true_model_name = p
+                break
+                
+        true_model = get_material(true_model_name, jit_P=False)
+        
+        true_params = {}
+        if true_model_name == "isihara":
+            true_params = {"C10": true_model.c10, "C01": true_model.c01, "C20": true_model.c20, "D1": true_model.d1}
+        elif true_model_name in ["nh", "neohookean2", "nh2"]:
+            true_params = {"C10": true_model.dev_params[0], "D1": true_model.vol_params[0]}
+        elif true_model_name in ["nh4", "neohookean4"]:
+            true_params = {"C10": true_model.dev_params[0], "D2": true_model.vol_params[1]}
+        elif true_model_name in ["gentthomas"]:
+            true_params = {"C10": true_model.dev_params[0], "CL2": true_model.dev_params[10], "D1": true_model.vol_params[0]}
         source_type = "exp" if any(x in model_folder_name.lower() for x in ["exp", "dic", "18617429"]) else "syn"
         noise_str = f"_{source_type}"
         if len(parts) >= 4:
@@ -362,6 +378,9 @@ def main():
         out_dir = os.path.abspath(os.path.join("distillation", "distilled_models", f"{current_time}_{ugp_model_name}{noise_str}_{args.material_model}{mode_str}_uqmodeldisc"))
         log_mode = "w"
     os.makedirs(out_dir, exist_ok=True)
+    
+    with open(os.path.join(out_dir, "source_extraction_dir.txt"), "w") as f:
+        f.write(args.saved_model_dir)
     
     class TeeLogger(object):
         def __init__(self, filename, mode="w"):
@@ -536,6 +555,9 @@ def main():
                 ax.bar(x - width/2, first_means, width, yerr=first_stds, label="First-Order ($S_1$)", capsize=4, color="#3498db", alpha=0.85)
                 ax.bar(x + width/2, tot_means, width, yerr=tot_stds, label="Total-Order ($S_T$)", capsize=4, color="#e74c3c", alpha=0.85)
                 
+                ax.set_yscale('log')
+                ax.set_ylim(bottom=1e-5)
+                
                 ax.axhline(args.sobol_threshold, color='black', linestyle='--', linewidth=1.5, label=f"Threshold ({args.sobol_threshold})")
                 ax.set_ylabel('Sobol Sensitivity Index', fontsize=12, fontweight='bold')
                 ax.set_title('Material Parameter Sensitivity (Sobol Indices)', fontsize=14, fontweight='bold')
@@ -659,16 +681,100 @@ def main():
         print(f"Saved parameter distributions plot to {plot_path}")
     except Exception as e:
         print(f"Error plotting distribution histograms: {e}")
+
+    # Generate correlation pairplot for active parameters using matplotlib
+    try:
+        from scipy.stats import gaussian_kde
+        
+        # Filter df to only include active parameters
+        active_params_list = [col for col in full_param_names if col in model.parameter_names]
+        
+        if len(active_params_list) > 1:
+            print("Generating parameter correlation pairplot...")
+            df_active = df[active_params_list]
+            
+            # Use a smaller subset of samples if there are too many, to speed up plotting and reduce file size
+            df_sample = df_active.sample(n=min(1000, len(df_active)), random_state=42)
+            
+            n_params = len(active_params_list)
+            fig, axes = plt.subplots(n_params, n_params, figsize=(n_params*2.5, n_params*2.5))
+            
+            for i in range(n_params):
+                for j in range(n_params):
+                    ax = axes[i, j]
+                    col_i = active_params_list[i]
+                    col_j = active_params_list[j]
+                    
+                    if i < j:
+                        # Upper triangle - hide
+                        ax.set_visible(False)
+                    elif i == j:
+                        # Diagonal - Histogram
+                        data = df_sample[col_i].values
+                        ax.hist(data, bins=30, color='#16a085', alpha=0.7, density=True, edgecolor='white', linewidth=0.5)
+                        
+                        mean_val = data.mean()
+                        true_val = true_params.get(col_i, 0.0)
+                        ci_lower = np.percentile(data, 2.5)
+                        ci_upper = np.percentile(data, 97.5)
+                        
+                        ax.axvline(mean_val, color='red', linestyle='-', lw=1.5, alpha=0.8)
+                        ax.axvline(true_val, color='black', linestyle='--', lw=1.5, alpha=0.8)
+                        ax.axvline(ci_lower, color='red', linestyle=':', lw=1.5, alpha=0.8)
+                        ax.axvline(ci_upper, color='red', linestyle=':', lw=1.5, alpha=0.8)
+                        
+                        title_str = f"True: {true_val:.3f} | Mean: {mean_val:.3f}\n95% CI: [{ci_lower:.3f}, {ci_upper:.3f}]"
+                        ax.set_title(title_str, fontsize=9, fontweight='bold', pad=4)
+                        
+                        if i == n_params - 1:
+                            ax.set_xlabel(col_j, fontsize=10, fontweight='bold')
+                        else:
+                            ax.set_xticklabels([])
+                            
+                        # Hide y-axis for diagonal (like seaborn does)
+                        ax.set_yticks([])
+                        if j == 0 and n_params > 1:
+                            ax.set_ylabel(col_i, fontsize=10, fontweight='bold')
+                    else:
+                        # Lower triangle - Scatter
+                        ax.scatter(df_sample[col_j], df_sample[col_i], alpha=0.5, s=15, color='#2980b9', edgecolors='none')
+                        
+                        corr = df_sample[col_j].corr(df_sample[col_i])
+                        ax.annotate(f"r = {corr:.3f}", xy=(0.95, 0.95), xycoords='axes fraction', 
+                                    ha='right', va='top', fontsize=10, fontweight='bold',
+                                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.7))
+                                    
+                        if i == n_params - 1:
+                            ax.set_xlabel(col_j, fontsize=10, fontweight='bold')
+                        else:
+                            ax.set_xticklabels([])
+                        if j == 0:
+                            ax.set_ylabel(col_i, fontsize=10, fontweight='bold')
+                        else:
+                            ax.set_yticklabels([])
+                            
+            fig.suptitle(f"Parameter Correlation Pairplot ({args.material_model})", y=1.02, fontsize=16, fontweight='bold')
+            plt.tight_layout()
+            
+            pairplot_path = os.path.join(out_dir, f"parameter_correlation_{args.material_model}.png")
+            fig.savefig(pairplot_path, dpi=200, bbox_inches='tight')
+            plt.close()
+            print(f"Saved parameter correlation pairplot to {pairplot_path}")
+        else:
+            print("Not enough active parameters to generate a correlation pairplot.")
+            
+    except Exception as e:
+        print(f"Error generating parameter correlation pairplot: {e}")
+
     
     # Run validation plot script
     try:
         import subprocess
         subprocess.run(["python3", "plots/plot_distilled_validation.py", 
-                        "--saved_model_dir", args.saved_model_dir, 
                         "--distilled_dir", out_dir, 
                         "--material_model", args.material_model], check=True)
     except Exception as e:
-        print(f"Error running validation plot: {e}")
+        print(f"Error running validation plots: {e}")
 
     pipeline_total_time = time.time() - pipeline_start_time
     print("\n========================================================================")
