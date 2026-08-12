@@ -410,20 +410,41 @@ class SparseHyperelasticityGP:
         p, w = self._resolve_state(params, weights)
 
         def psi_cov_single(fa, fb):
-            dev1, vol1 = self.feature_extractor.extract(fa)
-            dev2, vol2 = self.feature_extractor.extract(fb)
-            
-            k_d1z = rbf(dev1[None, :], p.dev_z, p.dev_sig, p.dev_ls)
-            k_dz2 = rbf(p.dev_z, dev2[None, :], p.dev_sig, p.dev_ls)
-            k_d1d2 = rbf(dev1[None, :], dev2[None, :], p.dev_sig, p.dev_ls)
-            cov_dev = k_d1d2 - k_d1z @ w.dev_M_mat @ k_dz2
-            
-            k_v1z = rbf(vol1[None, :], p.vol_z, p.vol_sig, p.vol_ls)
-            k_vz2 = rbf(p.vol_z, vol2[None, :], p.vol_sig, p.vol_ls)
-            k_v1v2 = rbf(vol1[None, :], vol2[None, :], p.vol_sig, p.vol_ls)
-            cov_vol = k_v1v2 - k_v1z @ w.vol_M_mat @ k_vz2
-            
-            return (cov_dev + cov_vol).squeeze()
+            if self.is_anisotropic:
+                dev1, vol1, aniso1 = self.feature_extractor.extract(fa)
+                dev2, vol2, aniso2 = self.feature_extractor.extract(fb)
+                
+                k_d1z = rbf(dev1[None, :], p.dev_z, p.dev_sig, p.dev_ls)
+                k_dz2 = rbf(p.dev_z, dev2[None, :], p.dev_sig, p.dev_ls)
+                k_d1d2 = rbf(dev1[None, :], dev2[None, :], p.dev_sig, p.dev_ls)
+                cov_dev = k_d1d2 - k_d1z @ w.dev_M_mat @ k_dz2
+                
+                k_v1z = rbf(vol1[None, :], p.vol_z, p.vol_sig, p.vol_ls)
+                k_vz2 = rbf(p.vol_z, vol2[None, :], p.vol_sig, p.vol_ls)
+                k_v1v2 = rbf(vol1[None, :], vol2[None, :], p.vol_sig, p.vol_ls)
+                cov_vol = k_v1v2 - k_v1z @ w.vol_M_mat @ k_vz2
+
+                k_a1z = rbf(aniso1[None, :], p.aniso_z, p.aniso_sig, p.aniso_ls)
+                k_az2 = rbf(p.aniso_z, aniso2[None, :], p.aniso_sig, p.aniso_ls)
+                k_a1a2 = rbf(aniso1[None, :], aniso2[None, :], p.aniso_sig, p.aniso_ls)
+                cov_aniso = k_a1a2 - k_a1z @ w.aniso_M_mat @ k_az2
+
+                return (cov_dev + cov_vol + cov_aniso).squeeze()
+            else:
+                dev1, vol1 = self.feature_extractor.extract(fa)
+                dev2, vol2 = self.feature_extractor.extract(fb)
+                
+                k_d1z = rbf(dev1[None, :], p.dev_z, p.dev_sig, p.dev_ls)
+                k_dz2 = rbf(p.dev_z, dev2[None, :], p.dev_sig, p.dev_ls)
+                k_d1d2 = rbf(dev1[None, :], dev2[None, :], p.dev_sig, p.dev_ls)
+                cov_dev = k_d1d2 - k_d1z @ w.dev_M_mat @ k_dz2
+                
+                k_v1z = rbf(vol1[None, :], p.vol_z, p.vol_sig, p.vol_ls)
+                k_vz2 = rbf(p.vol_z, vol2[None, :], p.vol_sig, p.vol_ls)
+                k_v1v2 = rbf(vol1[None, :], vol2[None, :], p.vol_sig, p.vol_ls)
+                cov_vol = k_v1v2 - k_v1z @ w.vol_M_mat @ k_vz2
+                
+                return (cov_dev + cov_vol).squeeze()
 
         hessian_cov = jax.jacfwd(jax.jacrev(psi_cov_single, argnums=0), argnums=1)
         return hessian_cov(f1, f2)
@@ -437,11 +458,28 @@ class SparseHyperelasticityGP:
 
     def psi_det(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
-        dev, vol = self.feature_extractor.extract(f)
-        return self.dev_gp_mean(dev[None, :], params=p, weights=w).reshape() + self.vol_gp_mean(vol[None, :], params=p, weights=w).reshape()
-
+        if self.is_anisotropic:
+            dev, vol, aniso = self.feature_extractor.extract(f)
+            return (self.dev_gp_mean(dev[None, :], params=p, weights=w).reshape() + 
+                    self.vol_gp_mean(vol[None, :], params=p, weights=w).reshape() + 
+                    self.aniso_gp_mean(aniso[None, :], params=p, weights=w).reshape())
+        else:
+            dev, vol = self.feature_extractor.extract(f)
+            return self.dev_gp_mean(dev[None, :], params=p, weights=w).reshape() + self.vol_gp_mean(vol[None, :], params=p, weights=w).reshape()
+    
     def piola_det(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
-        return jax.grad(lambda x: self.psi_det(x, params=params, weights=weights))(f)
+        p, w = self._resolve_state(params, weights)
+        def single_psi_det(f_single):
+            if self.is_anisotropic:
+                dev, vol, aniso = self.feature_extractor.extract(f_single)
+                return (self.dev_gp_mean(dev[None, :], params=p, weights=w).reshape() + 
+                        self.vol_gp_mean(vol[None, :], params=p, weights=w).reshape() + 
+                        self.aniso_gp_mean(aniso[None, :], params=p, weights=w).reshape())
+            else:
+                dev, vol = self.feature_extractor.extract(f_single)
+                return self.dev_gp_mean(dev[None, :], params=p, weights=w).reshape() + self.vol_gp_mean(vol[None, :], params=p, weights=w).reshape()
+        piola_det_fn = jax.grad(single_psi_det)
+        return piola_det_fn(f)
 
     def psi_dist(self, f_mesh: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> EnergyDist:
         p, w = self._resolve_state(params, weights)
@@ -506,8 +544,15 @@ class SparseHyperelasticityGP:
             f_mesh = f_mesh[None, ...]
         
         def single_psi_mean(f):
-            dev, vol = self.feature_extractor.extract(f)
-            return (self.dev_gp_mean(dev[None, :], params=p, weights=w) + self.vol_gp_mean(vol[None, :], params=p, weights=w)).reshape()
+            if self.is_anisotropic:
+                dev, vol, aniso = self.feature_extractor.extract(f)
+                return (self.dev_gp_mean(dev[None, :], params=p, weights=w) + 
+                        self.vol_gp_mean(vol[None, :], params=p, weights=w) + 
+                        self.aniso_gp_mean(aniso[None, :], params=p, weights=w)).reshape()
+            else:
+                dev, vol = self.feature_extractor.extract(f)
+                return (self.dev_gp_mean(dev[None, :], params=p, weights=w) + 
+                        self.vol_gp_mean(vol[None, :], params=p, weights=w)).reshape()
 
         piola_mean_fn = jax.vmap(jax.grad(single_psi_mean))
         piola_means = piola_mean_fn(f_mesh)

@@ -56,6 +56,8 @@ class HyperelasticGPTrainer:
             "dev_gp_sigma_scaling": [], "vol_gp_sigma_scaling": [],
             "dev_gp_lengthscales": [], "vol_gp_lengthscales": [], 
             "dev_u_mean": [], "dev_u_var": [], "vol_u_mean": [], "vol_u_var": [], "dev_z": [], "vol_z": [],
+            "aniso_gp_sigma_scaling": [], "aniso_gp_lengthscales": [],
+            "aniso_u_mean": [], "aniso_u_var": [], "aniso_z": [],
             "sigma_free_x": [], "sigma_free_y": [], "sigma_fix_x": [], "sigma_fix_y": [],
             "vol_kappa": []
         }
@@ -102,6 +104,13 @@ class HyperelasticGPTrainer:
         self.params_hist["sigma_fix_x"].append(cur_params.sigma_fix_x)
         self.params_hist["sigma_fix_y"].append(cur_params.sigma_fix_y)
         self.params_hist["vol_kappa"].append(cur_params.vol_kappa)
+        
+        if hasattr(cur_params, "aniso_sig"):
+            self.params_hist["aniso_gp_sigma_scaling"].append(cur_params.aniso_sig)
+            self.params_hist["aniso_gp_lengthscales"].append(cur_params.aniso_ls)
+            self.params_hist["aniso_u_mean"].append(cur_params.aniso_u_mean)
+            self.params_hist["aniso_u_var"].append(cur_params.aniso_u_var)
+            self.params_hist["aniso_z"].append(cur_params.aniso_z)
 
         with open(self.log_file_path, "a") as f:
             f.write(log_message)

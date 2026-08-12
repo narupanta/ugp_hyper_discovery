@@ -81,8 +81,10 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     fig1.savefig(os.path.join(save_path, "inducing_state_evolution.png"))
 
-    # --- FIGURE 2: Kernel Hyperparameters (2x2 Grid) ---
-    fig2, axes2 = plt.subplots(2, 2, figsize=(14, 10))
+    # --- FIGURE 2: Kernel Hyperparameters ---
+    has_aniso = "aniso_gp_lengthscales" in params_hist and len(params_hist["aniso_gp_lengthscales"]) > 0
+    rows = 3 if has_aniso else 2
+    fig2, axes2 = plt.subplots(rows, 2, figsize=(14, 5 * rows))
     fig2.suptitle("Evolution of Kernel Hyperparameters", fontsize=16)
 
     # 0,0: Deviatoric Lengthscales
@@ -101,6 +103,15 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     # 1,1: Volumetric Sigma Scaling
     axes2[1, 1].plot(steps_history, np.array(params_hist["vol_gp_sigma_scaling"]))
     axes2[1, 1].set_title(r"Volumetric Signal Scale ($\sigma_{vol}$)")
+
+    if has_aniso:
+        # 2,0: Anisotropic Lengthscales
+        axes2[2, 0].plot(steps_history, np.array(params_hist["aniso_gp_lengthscales"]))
+        axes2[2, 0].set_title(r"Anisotropic Lengthscales ($\ell_{aniso}$)")
+        
+        # 2,1: Anisotropic Sigma Scaling
+        axes2[2, 1].plot(steps_history, np.array(params_hist["aniso_gp_sigma_scaling"]))
+        axes2[2, 1].set_title(r"Anisotropic Signal Scale ($\sigma_{aniso}$)")
 
     for ax in axes2.flatten():
         ax.set_xlabel("Iteration Step")
