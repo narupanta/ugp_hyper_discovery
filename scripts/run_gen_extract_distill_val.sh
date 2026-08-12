@@ -90,6 +90,8 @@ PRIOR_MEAN=$(get_yaml "['is_include_prior_mean']")
 EXT_ITERS=$(get_yaml "['extraction_n_iterations']")
 EXT_LR=$(get_yaml "['extraction_learning_rate']")
 TRAIN_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(*(d['train_load_steps_indices']))")
+MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('model_mode', 'isotropic'))" 2>/dev/null || echo "isotropic")
+
 
 # 3. Distillation Config
 DIST_MODEL=$(get_yaml "['distilled_material_model']")
@@ -143,7 +145,8 @@ else
         --load_noise "$L_NOISE" \
         --target_load_true_top "$TOP_LOAD" \
         --asym_factor "$ASYM" \
-        --learning_rate "$EXT_LR"
+        --learning_rate "$EXT_LR" \
+        --model_mode "$MODEL_MODE"
     echo "✅ Step 2 (Extraction) completed."
 fi
 

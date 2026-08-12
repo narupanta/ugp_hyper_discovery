@@ -11,7 +11,7 @@ from core.utils import transform_input_features
 from core.dataclass import GPRawParams, GPParams, GPWeights
 from core.material_models import get_material
 from core.trainer import HyperelasticGPTrainer
-from core.features import IsotropicFeatureExtractor
+from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 from core.utils import *
 import datetime
 import os
@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument('--load_noise', type=float, default=0.01)
     parser.add_argument('--target_load_true_top', type=float, default=8.0)
     parser.add_argument('--asym_factor', type=float, default=0.95)
+    parser.add_argument('--model_mode', type=str, default='isotropic')
 
     # Training Config
     parser.add_argument('--number_of_mci_sampling', type=int, default=3)
@@ -109,6 +110,7 @@ if __name__ == "__main__" :
     load_noise = args.load_noise
     target_load_true_top = args.target_load_true_top
     asym_factor = args.asym_factor
+    model_mode = args.model_mode
     number_of_mci_sampling = args.number_of_mci_sampling
     train_load_steps_indices = args.train_load_steps_indices
     n_ip = args.n_ip
@@ -121,7 +123,7 @@ if __name__ == "__main__" :
 
     # Subfolder with datetime
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-    training_config_str = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{n_ip}_{beta}_{is_fixed_reaction_force_noise}_fip{is_fixed_inducing_points}"
+    training_config_str = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{n_ip}_{beta}_{is_fixed_reaction_force_noise}_fip{is_fixed_inducing_points}_{model_mode}"
     save_path = os.path.join(base_save_path, f"{timestamp}_{training_config_str}")
     os.makedirs(save_path, exist_ok=True)
 
@@ -148,12 +150,25 @@ if __name__ == "__main__" :
     psi_true_func = lambda f: true_mat_model.psi(f)
     piola_true_func = lambda f: true_mat_model.P(f)
 
-    extractor = IsotropicFeatureExtractor()
-    dev, vol = jax.vmap(jax.vmap(extractor.extract))(f3x3)
-    I_all = jnp.concatenate([dev, vol], axis=-1)
+    if args.model_mode == "anisotropic":
+        a0 = jnp.asarray(prep_data.get("a0", [1.0, 0.0, 0.0]))
+        extractor = AnisotropicFeatureExtractor(a0)
+        dev, vol, aniso = jax.vmap(jax.vmap(extractor.extract))(f3x3)
+        I_all = jnp.concatenate([dev, vol, aniso], axis=-1)
+        aniso_flat = aniso.reshape(-1, aniso.shape[-1])
+    else:
+        extractor = IsotropicFeatureExtractor()
+        dev, vol = jax.vmap(jax.vmap(extractor.extract))(f3x3)
+        I_all = jnp.concatenate([dev, vol], axis=-1)
+        aniso_flat = None
+
     # get all data inside prep_data
     dev_flat =  dev.reshape(-1, dev.shape[-1]) 
     vol_flat = vol.reshape(-1, vol.shape[-1])
+    
+    aniso_z = None
+    min_aniso = None
+    max_aniso = None
     
     if args.resume_from:
         print(f"Resuming training from: {args.resume_from}")
@@ -161,10 +176,20 @@ if __name__ == "__main__" :
         I_z = jnp.load(os.path.join(resume_dir, "I_z.npy"))
         dev_z = I_z[:, :2]
         vol_z = I_z[:, 2:]
+        if args.model_mode == "anisotropic":
+            aniso_z = I_z[:, 3:] # assuming aniso is 1D
+            min_aniso = jnp.min(aniso_flat, axis=0)
+            max_aniso = jnp.max(aniso_flat, axis=0)
     else:
         dev_z = farthest_point_sampling_with_fixed_point(dev_flat, n_ip, jnp.array([3.0, 3.0]))
         vol_z = farthest_point_sampling_with_fixed_point(vol_flat, n_ip, jnp.array([1.0]))
-        I_z = jnp.concat([dev_z, vol_z], axis = -1)
+        I_z_list = [dev_z, vol_z]
+        if args.model_mode == "anisotropic":
+            aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, jnp.array([0.0]))
+            min_aniso = jnp.min(aniso_flat, axis=0)
+            max_aniso = jnp.max(aniso_flat, axis=0)
+            I_z_list.append(aniso_z)
+        I_z = jnp.concat(I_z_list, axis = -1)
         
     plot_inducing_points(dev_z, vol_z, dev_flat, vol_flat, save_path)
 
@@ -186,6 +211,20 @@ if __name__ == "__main__" :
         raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(1e-8))
         raw_vol_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
         raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+
+        aniso_kwargs = {}
+        if args.model_mode == "anisotropic":
+            raw_aniso_z_fps = inv_softplus(aniso_z)
+            raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
+            raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+            aniso_kwargs = dict(
+                raw_aniso_ls=jax.random.normal(k1, (1,)),
+                raw_aniso_sig=jax.random.normal(k1, ()),
+                raw_aniso_z=raw_aniso_z_fps,
+                raw_aniso_u_mean=raw_aniso_u_mean_init,
+                raw_aniso_u_var=raw_aniso_u_var_init,
+                raw_aniso_kappa=jnp.array(0.0)
+            )
 
         if is_fixed_reaction_force_noise:
             params = GPRawParams(
@@ -212,7 +251,8 @@ if __name__ == "__main__" :
                 log_sigma_free_x=jnp.log(jnp.array(1.0)),
                 log_sigma_free_y=jnp.log(jnp.array(1.0)),
                 log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 0]),
-                log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1])
+                log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1]),
+                **aniso_kwargs
                 )
         else :
             params = GPRawParams(
@@ -239,7 +279,8 @@ if __name__ == "__main__" :
                 log_sigma_free_x=jnp.log(jnp.array(1.0)),
                 log_sigma_free_y=jnp.log(jnp.array(1.0)),
                 log_sigma_fix_x=jax.random.normal(k3, (load_noise_std_steps.shape[0],)),
-                log_sigma_fix_y=jax.random.normal(k4, (load_noise_std_steps.shape[0],))
+                log_sigma_fix_y=jax.random.normal(k4, (load_noise_std_steps.shape[0],)),
+                **aniso_kwargs
             )
     
     min_dev = jnp.min(dev_z, axis=0)
@@ -248,7 +289,20 @@ if __name__ == "__main__" :
     max_vol = jnp.max(vol_z, axis=0)
     main_key = jr.PRNGKey(42)
 
-    model = SparseHyperelasticityGP(params, I_z, min_dev, min_vol, max_dev, max_vol, beta = beta)
+    model = SparseHyperelasticityGP(
+        raw_params=params,
+        I_z=I_z,
+        min_dev=min_dev,
+        min_vol=min_vol,
+        max_dev=max_dev,
+        max_vol=max_vol,
+        sampling_mode="pws",
+        beta=beta,
+        feature_extractor=extractor,
+        min_aniso=min_aniso,
+        max_aniso=max_aniso,
+        aniso_z=aniso_z
+    )
 
 
 
@@ -279,7 +333,13 @@ if __name__ == "__main__" :
     best_params = trainer.train(n_iterations=n_iterations, main_key=main_key, log_info_str=log_info_str)
 
     print("Generating Training Data R2 Plot for all load steps...")
-    learned_gp = SparseHyperelasticityGP(best_params, I_z, min_dev, min_vol, max_dev, max_vol, beta=beta)
+    learned_gp = SparseHyperelasticityGP(
+        raw_params=best_params, I_z=I_z, min_dev=min_dev, min_vol=min_vol, max_dev=max_dev, max_vol=max_vol, beta=beta,
+        feature_extractor=extractor,
+        min_aniso=min_aniso,
+        max_aniso=max_aniso,
+        aniso_z=aniso_z
+    )
     F_train_full_3x3 = jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
     plot_training_r2(learned_gp, true_mat_model, F_train_full_3x3, save_path)
 

@@ -643,6 +643,9 @@ if __name__ == "__main__" :
 
     # save all as npz in /precomputed_vfm/{material_model}_{disp_noise}_{load_noise}/
     precomputed_vfm = dict(mesh_pos = mesh_pos, cells = cells, node_type = d["node_type"], load = load_array, u = u_array, F = F_array, dNdX = dNdX, dA = dA, f_neu = f_neu_array, load_noise_std = load_noise_std, load_noise_std_steps = load_noise_std_steps)
+    if hasattr(true_mat_model, 'a0'):
+        precomputed_vfm['a0'] = true_mat_model.a0
+
     os.makedirs(precomputed_dir, exist_ok=True)
     np.savez_compressed(os.path.join(precomputed_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}.npz"), **precomputed_vfm)
     

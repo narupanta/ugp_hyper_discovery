@@ -16,7 +16,6 @@ class GPRawParams(NamedTuple):
     raw_dev_u_var: jnp.ndarray
     raw_dev_z: jnp.ndarray
 
-
     raw_vol_ls: jnp.ndarray
     raw_vol_sig: jnp.ndarray
     raw_vol_u_mean: jnp.ndarray
@@ -24,15 +23,17 @@ class GPRawParams(NamedTuple):
     raw_vol_z: jnp.ndarray
     raw_vol_kappa: jnp.ndarray
 
-
-
-
     log_sigma_free_x: jnp.ndarray
     log_sigma_free_y: jnp.ndarray
     log_sigma_fix_x: jnp.ndarray
     log_sigma_fix_y: jnp.ndarray
 
-
+    raw_aniso_ls: jnp.ndarray = None
+    raw_aniso_sig: jnp.ndarray = None
+    raw_aniso_u_mean: jnp.ndarray = None
+    raw_aniso_u_var: jnp.ndarray = None
+    raw_aniso_z: jnp.ndarray = None
+    raw_aniso_kappa: jnp.ndarray = None
 
 class GPParams(NamedTuple) :
     dev_ls: jnp.ndarray = None
@@ -48,12 +49,17 @@ class GPParams(NamedTuple) :
     vol_z: jnp.ndarray = None
     vol_kappa: jnp.ndarray = None
 
-
-
     sigma_free_x: jnp.ndarray = None
     sigma_free_y: jnp.ndarray = None
     sigma_fix_x: jnp.ndarray = None
     sigma_fix_y: jnp.ndarray = None
+
+    aniso_ls: jnp.ndarray = None
+    aniso_sig: jnp.ndarray = None
+    aniso_u_mean: jnp.ndarray = None
+    aniso_u_var: jnp.ndarray = None
+    aniso_z: jnp.ndarray = None
+    aniso_kappa: jnp.ndarray = None
 
 class GPWeights(NamedTuple) :
     dev_Kzz: jnp.ndarray
@@ -72,7 +78,13 @@ class GPWeights(NamedTuple) :
     vol_Kzz_inv: jnp.ndarray
     vol_logterm: jnp.ndarray
 
-
+    aniso_Kzz: jnp.ndarray = None
+    aniso_v: jnp.ndarray = None
+    aniso_trace_term: jnp.ndarray = None
+    aniso_mahalanobis_term: jnp.ndarray = None
+    aniso_M_mat: jnp.ndarray = None
+    aniso_Kzz_inv: jnp.ndarray = None
+    aniso_logterm: jnp.ndarray = None
 
 
 class SyntheticData(NamedTuple) :

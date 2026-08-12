@@ -25,7 +25,7 @@ extraction_learning_rate: 0.01
 distilled_material_model: gmr
 distillation_n_iterations: 5000
 distill_target: sef
-sample_mode: standard_interp
+sample_mode: dataset_f
 num_points: 192
 max_gamma: 1.0
 do_sensitivity: 1
