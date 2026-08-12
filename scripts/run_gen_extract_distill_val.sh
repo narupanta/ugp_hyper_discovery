@@ -190,7 +190,7 @@ if [ "$SKIP_VAL" == "true" ]; then
     exit 0
 fi
 
-DISTILLED_DIR=$(ls -td distillation/distilled_models/* 2>/dev/null | head -n 1 || echo "")
+DISTILLED_DIR=$(ls -td distillation/distilled_models/*_${MODEL}* 2>/dev/null | head -n 1 || echo "")
 if [ -z "$DISTILLED_DIR" ] || [ ! -d "$DISTILLED_DIR" ]; then
     echo "❌ Error: Could not locate distilled model directory in distillation/distilled_models/ for validation!"
     exit 1
@@ -199,15 +199,17 @@ echo "ℹ️ Using distilled model at: $DISTILLED_DIR"
 
 echo "--- Step 4: Stochastic Forward Sampling with Distilled Model ---"
 
-# Restrict each process to a sensible number of threads
+# Restrict each process to a sensible number of threads and avoid JAX GPU OOM in parallel execution
 export OMP_NUM_THREADS=4 
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.45
 
 # Start Validation in the background
 python3 validation/forward_fem_distilled_piola_sample.py \
     --model_path "$MODEL_PATH" \
     --distilled_dir "$DISTILLED_DIR" \
     --material_model "$DIST_MODEL" \
-    --n_sample "$VAL_SAMPLES" > validation_distilled.log 2>&1 &
+    --n_sample "$VAL_SAMPLES" > "validation_distilled_${MODEL}.log" 2>&1 &
 PID_VAL=$!
 
 # Start Analysis in the background
@@ -215,13 +217,18 @@ python3 validation/forward_fem_distilled_piola_traction_sample.py \
     --model_path "$MODEL_PATH" \
     --distilled_dir "$DISTILLED_DIR" \
     --material_model "$DIST_MODEL" \
-    --n_sample "$VAL_SAMPLES" > analysis_distilled.log 2>&1 &
+    --n_sample "$VAL_SAMPLES" > "analysis_distilled_${MODEL}.log" 2>&1 &
 PID_ANA=$!
 
 echo "Processes started: Validation (PID: $PID_VAL) and Analysis (PID: $PID_ANA)"
-echo "Logs are being written to validation_distilled.log and analysis_distilled.log..."
+echo "Logs are being written to validation_distilled_${MODEL}.log and analysis_distilled_${MODEL}.log..."
 
 # Wait for both background processes to finish
 wait $PID_VAL $PID_ANA
+
+cp "validation_distilled_${MODEL}.log" validation_distilled.log 2>/dev/null || true
+cp "analysis_distilled_${MODEL}.log" analysis_distilled.log 2>/dev/null || true
+cp "validation_distilled_${MODEL}.log" "$DISTILLED_DIR/" 2>/dev/null || true
+cp "analysis_distilled_${MODEL}.log" "$DISTILLED_DIR/" 2>/dev/null || true
 
 echo "🎉 Full Pipeline (Datagen -> Extraction -> Distillation -> Distilled Forward FEM) Completed Successfully!"

@@ -424,11 +424,15 @@ if __name__ == "__main__" :
             # 2. Setup Problem
             params = selected_samples[i]
             if args.material_model == "isihara":
-                c10, c01, c20, d1 = params
+                c10, c01, c20, d1 = params[:4]
                 mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, d1=d1)
             elif args.material_model in ["gmr", "gmr_log", "gmr_nolog"]:
-                c10, c01, c20, c02, c11, d1 = params
-                mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, c02=c02, c11=c11, d1=d1)
+                dev = params[:-3] if len(params) >= 12 else params[:-1]
+                vol = params[-3:] if len(params) >= 12 else params[-1:]
+                mat = get_material(args.material_model, dev_params=dev, vol_params=vol)
+            elif args.material_model == "ogden":
+                mu, alpha, vol = params[:3], params[3:6], params[6:9]
+                mat = get_material(args.material_model, mu_params=mu, alpha_params=alpha, vol_params=vol)
             else:
                 mat = get_material(args.material_model)
                 
