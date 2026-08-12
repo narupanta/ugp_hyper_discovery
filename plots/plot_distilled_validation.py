@@ -126,8 +126,15 @@ def main():
             vol = theta[6:9]
             mat = get_material("ogden", mu_params=mu, alpha_params=alpha, vol_params=vol, jit_P=False)
         elif args.material_model in ["gmr", "gmr_log", "gmr_nolog"]:
-            dev = theta[:11] if len(theta) >= 14 else theta[:9]
-            vol = theta[11:14] if len(theta) >= 14 else theta[9:12]
+            if len(theta) == 13: # 9 dev + 1 log + 3 vol
+                dev = theta[:10]
+                vol = theta[10:13]
+            elif len(theta) >= 14:
+                dev = theta[:11]
+                vol = theta[11:14]
+            else: # 9 dev + 3 vol (no log term)
+                dev = theta[:9]
+                vol = theta[9:12]
             mat = get_material("gmr", dev_params=dev, vol_params=vol, jit_P=False)
         elif args.material_model == "isihara":
             mat = get_material("isihara", c10=theta[0], c01=theta[1], c20=theta[2], d1=theta[3], jit_P=False)

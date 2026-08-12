@@ -169,10 +169,10 @@ class PyTorchGMRModel(nn.Module):
         self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
         if self.include_log_terms:
             self._num_parameters = 13
-            self._parameter_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "CL2", "D1", "D2", "D3")
+            self._parameter_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$", "$E$", "$D_{1}$", "$D_{2}$", "$D_{3}$")
         else:
             self._num_parameters = 12
-            self._parameter_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "D1", "D2", "D3")
+            self._parameter_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$", "$D_{1}$", "$D_{2}$", "$D_{3}$")
         self._parameter_scales = torch.ones(self._num_parameters, device=device)
         self._device = device
         self._num_points = num_points
@@ -217,10 +217,10 @@ class PyTorchGMRModel(nn.Module):
         J_m1 = J - 1.0
 
         if self.include_log_terms:
-            C10, C01, C20, C11, C02, C30, C21, C12, C03, CL2, D1, D2, D3 = full_parameters
+            C10, C01, C20, C11, C02, C30, C21, C12, C03, E, D1, D2, D3 = full_parameters
             log1 = torch.log(torch.clamp(I1_bar / 3.0, min=1e-8))
             log2 = torch.log(torch.clamp(I2_bar / 3.0, min=1e-8))
-            W_log = CL2 * log2
+            W_log = E * log2
         else:
             C10, C01, C20, C11, C02, C30, C21, C12, C03, D1, D2, D3 = full_parameters
             W_log = 0.0
@@ -243,7 +243,7 @@ class PyTorchGMRModel(nn.Module):
             dW_dI1 = C10 + 2.0 * C20 * I1_m3 + C11 * I2_m3 + 3.0 * C30 * (I1_m3**2) + 2.0 * C21 * I1_m3 * I2_m3 + C12 * (I2_m3**2)
             dW_dI2 = C01 + C11 * I1_m3 + 2.0 * C02 * I2_m3 + C21 * (I1_m3**2) + 2.0 * C12 * I1_m3 * I2_m3 + 3.0 * C03 * (I2_m3**2)
             if self.include_log_terms:
-                dW_dI2 = dW_dI2 + CL2 / I2_bar
+                dW_dI2 = dW_dI2 + E / I2_bar
             dW_dJ = 2.0 * D1 * J_m1 + 4.0 * D2 * (J_m1**3) + 6.0 * D3 * (J_m1**5)
             
             stress = dW_dI1.view(-1, 1, 1) * dI1bar_dF + dW_dI2.view(-1, 1, 1) * dI2bar_dF + dW_dJ.view(-1, 1, 1) * dJ_dF
@@ -407,13 +407,13 @@ def main():
         
         true_params = {}
         if true_model_name == "isihara":
-            true_params = {"C10": true_model.c10, "C01": true_model.c01, "C20": true_model.c20, "D1": true_model.d1}
+            true_params = {"$C_{10}$": true_model.c10, "$C_{01}$": true_model.c01, "$C_{20}$": true_model.c20, "$D_{1}$": true_model.d1}
         elif true_model_name in ["nh", "neohookean2", "nh2"]:
-            true_params = {"C10": true_model.dev_params[0], "D1": true_model.vol_params[0]}
+            true_params = {"$C_{10}$": true_model.dev_params[0], "$D_{1}$": true_model.vol_params[0]}
         elif true_model_name in ["nh4", "neohookean4"]:
-            true_params = {"C10": true_model.dev_params[0], "D2": true_model.vol_params[1]}
+            true_params = {"$C_{10}$": true_model.dev_params[0], "$D_{2}$": true_model.vol_params[1]}
         elif true_model_name in ["gentthomas"]:
-            true_params = {"C10": true_model.dev_params[0], "CL2": true_model.dev_params[10], "D1": true_model.vol_params[0]}
+            true_params = {"$C_{10}$": true_model.dev_params[0], "$E$": true_model.dev_params[9], "$D_{1}$": true_model.vol_params[0]}
         source_type = "exp" if any(x in model_folder_name.lower() for x in ["exp", "dic", "18617429"]) else "syn"
         noise_str = f"_{source_type}"
         if len(parts) >= 4:
@@ -929,6 +929,19 @@ def main():
                         "--distilled_dir", out_dir], check=True)
     except Exception as e:
         print(f"Error running deformation sensitivity plots: {e}")
+
+    # Run invariant sensitivity plot scripts
+    try:
+        active_params_str = ",".join(model.parameter_names)
+        
+        subprocess.run(["python3", "plots/plot_invariant_sensitivity.py", 
+                        "--distilled_dir", out_dir, "--active_params", active_params_str], check=True)
+        subprocess.run(["python3", "plots/plot_invariant_sensitivity_3d_pairs.py", 
+                        "--distilled_dir", out_dir, "--active_params", active_params_str], check=True)
+        subprocess.run(["python3", "plots/plot_invariant_sensitivity_3d_interactive.py", 
+                        "--distilled_dir", out_dir, "--active_params", active_params_str], check=True)
+    except Exception as e:
+        print(f"Error running invariant sensitivity plots: {e}")
 
     pipeline_total_time = time.time() - pipeline_start_time
     print("\n========================================================================")

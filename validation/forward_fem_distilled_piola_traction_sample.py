@@ -427,8 +427,16 @@ if __name__ == "__main__" :
                 c10, c01, c20, d1 = params
                 mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, d1=d1)
             elif args.material_model in ["gmr", "gmr_log", "gmr_nolog"]:
-                c10, c01, c20, c02, c11, d1 = params
-                mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, c02=c02, c11=c11, d1=d1)
+                if len(params) == 13: # 9 dev + 1 log + 3 vol
+                    dev = params[:10]
+                    vol = params[10:13]
+                elif len(params) >= 14:
+                    dev = params[:11]
+                    vol = params[11:14]
+                else: # 9 dev + 3 vol (no log term)
+                    dev = params[:9]
+                    vol = params[9:12]
+                mat = get_material(args.material_model, dev_params=dev, vol_params=vol)
             else:
                 mat = get_material(args.material_model)
                 

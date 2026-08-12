@@ -273,8 +273,7 @@ class GeneralizedMooneyRivlin(BaseMaterialModel):
             self.dev_params[6] * (X**2) * Y + 
             self.dev_params[7] * X * (Y**2) +
             self.dev_params[8] * Y**3 +
-            (self.dev_params[9] * log1 if len(self.dev_params) > 9 else 0.0) +
-            (self.dev_params[10] * log2 if len(self.dev_params) > 10 else 0.0)
+            (self.dev_params[9] * log2 if len(self.dev_params) > 9 else 0.0)
         )
         
         J = jnp.sqrt(I3_safe)
@@ -306,8 +305,8 @@ class GeneralizedMooneyRivlin(BaseMaterialModel):
 class GentThomas(GeneralizedMooneyRivlin):
     def __init__(self, c1=0.5, c2=1.5, jit_P: bool = True):
         # Gent-Thomas derived as a special case of GMR:
-        # C10 = c1 (default 0.5), CL2 = 1.0, D1 = c2 (default 1.5)
-        dev_params = [c1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        # C10 = c1 (default 0.5), E = 1.0, D1 = c2 (default 1.5)
+        dev_params = [c1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         vol_params = [c2, 0.0, 0.0]
         super().__init__(dev_params=dev_params, vol_params=vol_params, jit_P=jit_P)
 
@@ -318,7 +317,7 @@ class NeoHookean4(GeneralizedMooneyRivlin):
     def __init__(self, c10=0.5, d2=1.5, jit_P: bool = True):
         # NeoHookean4 (psi = c10*(I1-3) + d2*(J-1)^4) derived as a special case of GMR:
         # C10 = c10 (default 0.5), D2 = d2 (default 1.5)
-        dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         vol_params = [0.0, d2, 0.0]
         super().__init__(dev_params=dev_params, vol_params=vol_params, jit_P=jit_P)
 
@@ -330,7 +329,7 @@ class NeoHookeanGMR(GeneralizedMooneyRivlin):
     def __init__(self, c10=0.5, d1=1.5, jit_P: bool = True):
         # NeoHookean2 (psi = c10*(I1-3) + d1*(J-1)^2) derived as a special case of GMR:
         # C10 = c10 (default 0.5), D1 = d1 (default 1.5)
-        dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         vol_params = [d1, 0.0, 0.0]
         super().__init__(dev_params=dev_params, vol_params=vol_params, jit_P=jit_P)
 
