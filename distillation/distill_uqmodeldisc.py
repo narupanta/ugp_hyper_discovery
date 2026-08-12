@@ -40,7 +40,7 @@ from uqmodeldisc.models.base import (
     map_parameter_names_to_indices,
 )
 
-def plot_loss_monitoring(npz_path, title_suffix, output_path, window_size=100):
+def plot_loss_monitoring(npz_path, title_suffix, output_path, window_size=100, last_n_iterations=None):
     try:
         import matplotlib.pyplot as plt
         import numpy as np
@@ -53,13 +53,43 @@ def plot_loss_monitoring(npz_path, title_suffix, output_path, window_size=100):
         lip_loss = data['lipschitz']
         iterations = np.arange(1, len(w1_loss) + 1)
         
+        has_grad_penalty = 'grad_penalty' in data
+
         df = pd.DataFrame({'w1': w1_loss, 'lip': lip_loss})
         w1_ma = df['w1'].rolling(window=window_size, min_periods=1).mean().values
         w1_var = df['w1'].rolling(window=window_size, min_periods=1).var().fillna(0).values
         lip_ma = df['lip'].rolling(window=window_size, min_periods=1).mean().values
         lip_var = df['lip'].rolling(window=window_size, min_periods=1).var().fillna(0).values
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+        if has_grad_penalty:
+            grad_penalty = data['grad_penalty']
+            df['gp'] = grad_penalty
+            gp_ma = df['gp'].rolling(window=window_size, min_periods=1).mean().values
+            gp_var = df['gp'].rolling(window=window_size, min_periods=1).var().fillna(0).values
+
+        if last_n_iterations is not None:
+            if len(iterations) <= last_n_iterations:
+                return
+            w1_loss = w1_loss[-last_n_iterations:]
+            lip_loss = lip_loss[-last_n_iterations:]
+            iterations = iterations[-last_n_iterations:]
+            w1_ma = w1_ma[-last_n_iterations:]
+            w1_var = w1_var[-last_n_iterations:]
+            lip_ma = lip_ma[-last_n_iterations:]
+            lip_var = lip_var[-last_n_iterations:]
+            if has_grad_penalty:
+                grad_penalty = grad_penalty[-last_n_iterations:]
+                gp_ma = gp_ma[-last_n_iterations:]
+                gp_var = gp_var[-last_n_iterations:]
+
+        nrows = 3 if has_grad_penalty else 2
+        figsize = (12, 15) if has_grad_penalty else (12, 10)
+        
+        fig, axes = plt.subplots(nrows, 1, figsize=figsize, sharex=True)
+        if nrows == 2:
+            ax1, ax2 = axes
+        else:
+            ax1, ax2, ax3 = axes
         
         # Plot 1: Wasserstein Distance
         ax1.plot(iterations, w1_loss, color='#bdc3c7', alpha=0.4, label='W1 Distance (Raw)')
@@ -80,7 +110,8 @@ def plot_loss_monitoring(npz_path, title_suffix, output_path, window_size=100):
         ax2.plot(iterations, lip_ma, color='#8e44ad', linewidth=2, label=f'Lipschitz Loss (MA, window={window_size})')
         ax2_right = ax2.twinx()
         ax2_right.plot(iterations, lip_var, color='#e67e22', linestyle='--', alpha=0.75, label=f'Lipschitz Variance (window={window_size})')
-        ax2.set_xlabel('Iteration', fontsize=12, fontweight='bold')
+        if not has_grad_penalty:
+            ax2.set_xlabel('Iteration', fontsize=12, fontweight='bold')
         ax2.set_ylabel('Lipschitz Function Loss', fontsize=12, fontweight='bold', color='#8e44ad')
         ax2_right.set_ylabel('Variance / Oscillation', fontsize=11, fontweight='bold', color='#e67e22')
         ax2.set_title(f"Lipschitz Critic Loss & Oscillation Monitoring {title_suffix}", fontsize=14, fontweight='bold')
@@ -89,6 +120,22 @@ def plot_loss_monitoring(npz_path, title_suffix, output_path, window_size=100):
         lines3, labels3 = ax2.get_legend_handles_labels()
         lines4, labels4 = ax2_right.get_legend_handles_labels()
         ax2.legend(lines3 + lines4, labels3 + labels4, loc='upper right', fontsize=10)
+
+        if has_grad_penalty:
+            # Plot 3: Gradient Penalty
+            ax3.plot(iterations, grad_penalty, color='#f5cba7', alpha=0.4, label='Gradient Penalty (Raw)')
+            ax3.plot(iterations, gp_ma, color='#d35400', linewidth=2, label=f'Gradient Penalty (MA, window={window_size})')
+            ax3_right = ax3.twinx()
+            ax3_right.plot(iterations, gp_var, color='#c0392b', linestyle='--', alpha=0.75, label=f'Penalty Variance (window={window_size})')
+            ax3.set_xlabel('Iteration', fontsize=12, fontweight='bold')
+            ax3.set_ylabel('Gradient Penalty', fontsize=12, fontweight='bold', color='#d35400')
+            ax3_right.set_ylabel('Variance / Oscillation', fontsize=11, fontweight='bold', color='#c0392b')
+            ax3.set_title(f"Gradient Penalty Monitoring {title_suffix}", fontsize=14, fontweight='bold')
+            ax3.grid(True, linestyle=':', alpha=0.6)
+            
+            lines5, labels5 = ax3.get_legend_handles_labels()
+            lines6, labels6 = ax3_right.get_legend_handles_labels()
+            ax3.legend(lines5 + lines6, labels5 + labels6, loc='upper right', fontsize=10)
 
         plt.tight_layout()
         plt.savefig(output_path, dpi=200)
@@ -281,7 +328,7 @@ def main():
     if args.sample_mode == "dataset_all":
         export_subfolder = "pytorch_export_dataset_all"
     elif args.sample_mode == "dataset_f":
-        export_subfolder = "pytorch_export_dataset_f"
+        export_subfolder = f"pytorch_export_dataset_f_n{args.num_points}"
     elif args.sample_mode == "standard_interp":
         export_subfolder = "pytorch_export_standard_interp"
     else:
@@ -459,6 +506,16 @@ def main():
             output_path=os.path.join(out_dir, "loss_monitoring_before_sensitivity.png"),
             window_size=min(100, max(10, args.n_iterations // 50))
         )
+        
+        if args.n_iterations >= 100:
+            last_10_percent = max(10, int(0.1 * args.n_iterations))
+            plot_loss_monitoring(
+                os.path.join(out_dir, "loss_history_before_sensitivity.npz"),
+                title_suffix="(Stage 1: Before Sensitivity Analysis - Last 10%)",
+                output_path=os.path.join(out_dir, "loss_monitoring_before_sensitivity_last_10_percent.png"),
+                window_size=min(100, max(10, last_10_percent // 50)),
+                last_n_iterations=last_10_percent
+            )
 
     # Save parameter distribution plot immediately before running sensitivity analysis
     try:
@@ -525,7 +582,7 @@ def main():
                 model=model,
                 parameter_distribution=distribution,
                 num_samples_factor=args.sobol_samples_factor,
-                data_set_label="treloar",
+                data_set_label="custom",
                 inputs=f3x3,
                 test_cases=test_cases,
                 select_model=True,
@@ -697,6 +754,16 @@ def main():
                 output_path=os.path.join(out_dir, "loss_monitoring_after_sensitivity.png"),
                 window_size=min(100, max(10, args.n_iterations // 50))
             )
+            
+            if args.n_iterations >= 100:
+                last_10_percent = max(10, int(0.1 * args.n_iterations))
+                plot_loss_monitoring(
+                    os.path.join(out_dir, "loss_history_after_sensitivity.npz"),
+                    title_suffix="(Stage 3: After Sensitivity Analysis - Last 10%)",
+                    output_path=os.path.join(out_dir, "loss_monitoring_after_sensitivity_last_10_percent.png"),
+                    window_size=min(100, max(10, last_10_percent // 50)),
+                    last_n_iterations=last_10_percent
+                )
         else:
             print("All material parameters were determined to be sensitive! No model reduction needed.")
 

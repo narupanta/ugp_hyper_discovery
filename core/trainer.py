@@ -174,12 +174,27 @@ class HyperelasticGPTrainer:
         # Final plots and post-training evolution validation
         print("Generating training progress evolution plots...")
         for m_step, m_params in milestone_params:
-            plot_model = SparseHyperelasticityGP(m_params, self.I_z, self.min_dev, self.min_vol, self.max_dev, self.max_vol)
+            plot_model = SparseHyperelasticityGP(
+                raw_params=m_params, I_z=self.I_z, min_dev=self.min_dev, min_vol=self.min_vol,
+                max_dev=self.max_dev, max_vol=self.max_vol, beta=self.model.beta,
+                feature_extractor=self.model.feature_extractor,
+                min_aniso=getattr(self.model, 'min_aniso', None),
+                max_aniso=getattr(self.model, 'max_aniso', None),
+                aniso_z=getattr(self.model, 'aniso_z', None)
+            )
             plot_combined_validation(plot_model, self.true_mat_model, self.save_path, m_step)
 
         plot_loss_analysis(self.loss_components_hist, self.params_hist, self.steps_history, self.save_path)
         plot_parameters_hist(self.params_hist, self.steps_history, self.save_path)
-        learned_gp = SparseHyperelasticityGP(self.best_params, self.I_z, self.min_dev, self.min_vol, self.max_dev, self.max_vol, beta=self.model.beta)
+        
+        learned_gp = SparseHyperelasticityGP(
+            raw_params=self.best_params, I_z=self.I_z, min_dev=self.min_dev, min_vol=self.min_vol,
+            max_dev=self.max_dev, max_vol=self.max_vol, beta=self.model.beta,
+            feature_extractor=self.model.feature_extractor,
+            min_aniso=getattr(self.model, 'min_aniso', None),
+            max_aniso=getattr(self.model, 'max_aniso', None),
+            aniso_z=getattr(self.model, 'aniso_z', None)
+        )
         plot_combined_validation(learned_gp, self.true_mat_model, self.save_path, step_idx)
         
         # New Energy Validation Plots

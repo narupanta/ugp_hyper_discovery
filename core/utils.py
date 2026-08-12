@@ -29,6 +29,10 @@ def I3_func(B):
     """Third invariant (determinant)."""
     return jnp.linalg.det(B)
 
+def I4_func(C, a0):
+    """Fourth invariant (pseudo-invariant) I4 = a0 . C a0."""
+    return jnp.einsum('i,...ij,j->...', a0, C, a0)
+
 # -------------------------------
 # Strain energy functions
 # -------------------------------
