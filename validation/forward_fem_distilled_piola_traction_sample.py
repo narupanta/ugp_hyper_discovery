@@ -424,7 +424,7 @@ if __name__ == "__main__" :
             # 2. Setup Problem
             params = selected_samples[i]
             if args.material_model == "isihara":
-                c10, c01, c20, d1 = params
+                c10, c01, c20, d1 = params[:4]
                 mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, d1=d1)
             elif args.material_model in ["gmr", "gmr_log", "gmr_nolog"]:
                 if len(params) == 13: # 9 dev + 1 log + 3 vol
