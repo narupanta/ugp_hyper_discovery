@@ -109,11 +109,19 @@ def invariants(f):
 
 jax.config.update("jax_enable_x64", True)
 
+def get_F_from_invariants(I1_bar, I2_bar, J):
+    coeffs = [1.0, -I1_bar, I2_bar, -1.0]
+    roots = np.roots(coeffs)
+    lambda_sq = np.real(roots)
+    lambda_sq = np.maximum(lambda_sq, 1e-8)
+    lambdas = np.sqrt(lambda_sq) * (J**(1/3))
+    return np.diag(lambdas)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, required=True)
     parser.add_argument("--max_gamma", type=float, default=0.8)
-    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all"], help="Sample deformations from standard modes (with or without interpolation clipping), extraction dataset with FPS, or all extraction dataset points.")
+    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all", "inducing_points"], help="Sample deformations from standard modes (with or without interpolation clipping), extraction dataset with FPS, all extraction dataset points, or directly from inducing points.")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points to evaluate GP over.")
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy"], help="Distillation target mode: solely Strain Energy Function (sef), joint SEF + Piola stress (sef_stress), or joint SEF + Cauchy stress (sef_cauchy).")
     parser.add_argument("--export_subfolder", type=str, default="", help="Custom output subfolder for exported PyTorch matrices.")
@@ -198,6 +206,16 @@ def main():
         print(f"Generating standard deformation modes strictly within GP interpolation bounds (up to gamma = {args.max_gamma})...")
         f3x3_flat_2x2 = generate_standard_modes_interp(num_points=max(1, args.num_points // 6), max_search_gamma=args.max_gamma, min_dev=min_dev, max_dev=max_dev, min_vol=min_vol, max_vol=max_vol)
         export_subfolder = "pytorch_export_standard_interp"
+    elif args.sample_mode == "inducing_points":
+        print(f"Generating F directly from the {len(I_z)} GP inducing points...")
+        f3x3_list = []
+        for i in range(len(I_z)):
+            I1_bar = I_z[i, 0]
+            I2_bar = I_z[i, 1]
+            J = I_z[i, 2]
+            f3x3_list.append(get_F_from_invariants(I1_bar, I2_bar, J))
+        f3x3_flat = np.stack(f3x3_list)
+        export_subfolder = "pytorch_export_inducing_points"
     else:
         f3x3_flat_2x2 = generate_standard_modes(num_points=max(1, args.num_points // 6), max_gamma=args.max_gamma)
         export_subfolder = f"pytorch_export_standard_g{args.max_gamma}" if args.max_gamma != 0.8 else "pytorch_export"
@@ -207,12 +225,13 @@ def main():
     elif args.distill_target in ["sef_stress", "sef_cauchy"]:
         export_subfolder = f"{export_subfolder}_{args.distill_target}"
     
-    # Pad to 3x3 Plane Strain!
-    f3x3_flat = np.zeros((f3x3_flat_2x2.shape[0], 3, 3))
-    for i in range(f3x3_flat_2x2.shape[0]):
-        f3x3_flat[i, :2, :2] = f3x3_flat_2x2[i]
-        f3x3_flat[i, 2, 2] = 1.0
-        
+    if args.sample_mode != "inducing_points":
+        # Pad to 3x3 Plane Strain!
+        f3x3_flat = np.zeros((f3x3_flat_2x2.shape[0], 3, 3))
+        for i in range(f3x3_flat_2x2.shape[0]):
+            f3x3_flat[i, :2, :2] = f3x3_flat_2x2[i]
+            f3x3_flat[i, 2, 2] = 1.0
+            
     f3x3_flat = jnp.array(f3x3_flat)
     
     if args.distill_target == "sef":

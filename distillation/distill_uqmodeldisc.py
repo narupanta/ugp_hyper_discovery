@@ -313,7 +313,7 @@ def main():
     parser.add_argument("--sobol_samples_factor", type=int, default=1024, help="Saltelli sample factor for sensitivity analysis")
     parser.add_argument("--pruning_mode", type=str, default="ec", choices=["ec", "threshold"], help="Pruning mode: 'ec' (Estimated Coverage) or 'threshold' (Fixed Sobol Threshold).")
     parser.add_argument("--ec_threshold", type=float, default=95.0, help="Estimated Coverage threshold in percent (default: 95.0). Only used if pruning_mode='ec'.")
-    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all"], help="Sample deformation inputs from extraction dataset directly or standard modes (with or without interpolation clipping)")
+    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all", "inducing_points"], help="Sample deformation inputs from extraction dataset directly or standard modes (with or without interpolation clipping)")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points for GP joint evaluation and distillation")
     parser.add_argument("--max_gamma", type=float, default=1.0, help="Max deformation intensity gamma when sample_mode is standard")
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy"], help="Target mode: strain energy function (sef), joint SEF + Piola stress (sef_stress), or joint SEF + Cauchy stress (sef_cauchy)")
@@ -331,6 +331,8 @@ def main():
         export_subfolder = f"pytorch_export_dataset_f_n{args.num_points}"
     elif args.sample_mode == "standard_interp":
         export_subfolder = "pytorch_export_standard_interp"
+    elif args.sample_mode == "inducing_points":
+        export_subfolder = "pytorch_export_inducing_points"
     else:
         export_subfolder = f"pytorch_export_standard_g{args.max_gamma}"
     if args.distill_target in ["sef_stress", "sef_cauchy"]:

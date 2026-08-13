@@ -112,18 +112,32 @@ fi
 # 4. Validation Config
 VAL_SAMPLES=$(get_yaml "['val_number_samples']")
 
+# 5. Geometry
+GEOMETRY=$(get_yaml "['geometry']")
+if [ "$GEOMETRY" == "" ] || [ "$GEOMETRY" == "null" ]; then
+    GEOMETRY="block"
+fi
+
 
 if [ "$SKIP_GEN" == "true" ]; then
     echo "⏭️ Skipping Step 1 (Sequential Data Generation) as requested."
 else
-    echo "--- Step 1: Sequential Data Generation ($MODEL) ---"
-    python3 dataset/synthetic/force_control/syn_force_control.py \
+    echo "--- Step 1: Sequential Data Generation ($MODEL) on Geometry: $GEOMETRY ---"
+    
+    if [ "$GEOMETRY" == "holes" ]; then
+        GEN_SCRIPT="dataset/synthetic/force_control/syn_force_control_holes.py"
+    else
+        GEN_SCRIPT="dataset/synthetic/force_control/syn_force_control.py"
+    fi
+
+    python3 $GEN_SCRIPT \
         --model "$MODEL" \
         --disp_noise "$D_NOISE" \
         --load_noise "$L_NOISE" \
         --target_top "$TOP_LOAD" \
         --asym "$ASYM" \
-        --n_steps "$STEPS"
+        --n_steps "$STEPS" \
+        --geometry "$GEOMETRY"
     echo "✅ Step 1 (Data Generation) completed."
 fi
 
@@ -141,6 +155,7 @@ else
         --is_fixed_reaction_force_noise "$FIXED_NOISE" \
         --is_fixed_inducing_points "$FIXED_IP" \
         --n_iterations "$EXT_ITERS" \
+        --geometry "$GEOMETRY" \
         --disp_noise "$D_NOISE" \
         --load_noise "$L_NOISE" \
         --target_load_true_top "$TOP_LOAD" \
@@ -155,7 +170,8 @@ if [ "$SKIP_DISTILL" == "true" ] && [ "$SKIP_VAL" == "true" ]; then
     exit 0
 fi
 
-SAVED_DIR=$(ls -td extraction/extracted_models/*_${MODEL}_* 2>/dev/null | head -n 1 || echo "")
+# Find the most recently created extraction directory matching this recipe and geometry
+SAVED_DIR=$(ls -td extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}* 2>/dev/null | head -1)
 if [ -z "$SAVED_DIR" ] || [ ! -d "$SAVED_DIR" ]; then
     if [ "$SKIP_EXT" == "true" ]; then
         echo "❌ Error: Step 2 was skipped and no extracted model found in extraction/extracted_models/ for $MODEL!"
