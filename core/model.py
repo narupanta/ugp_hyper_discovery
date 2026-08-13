@@ -129,24 +129,16 @@ class SparseHyperelasticityGP:
     def _compute_component_weights(self, z: jnp.ndarray, u_mean: jnp.ndarray, u_var: jnp.ndarray, 
                                    ls: jnp.ndarray, sig: jnp.ndarray) -> Tuple[jnp.ndarray, ...]:
         """Helper to precompute reusable covariance matrices and vectors for GP."""
-        Kzz = rbf(z, z, sig, ls) + 1e-5 * jnp.eye(z.shape[0], dtype=jnp.float64)
-        Kzz = 0.5 * (Kzz + Kzz.T) # Ensure perfect symmetry
-        
-        # Use Cholesky solve for much better numerical stability on PSD matrices
-        import jax.scipy as jsp
-        K_inv = jsp.linalg.solve(Kzz, jnp.eye(z.shape[0], dtype=jnp.float64), assume_a='pos')
-        K_inv = 0.5 * (K_inv + K_inv.T) # Force symmetry to kill numerical drift
+        Kzz = rbf(z, z, sig, ls) + 1e-6 * jnp.eye(z.shape[0], dtype=jnp.float64)
+        K_inv = jnp.linalg.solve(Kzz, jnp.eye(z.shape[0], dtype=jnp.float64))
         
         # We strictly assume a zero-mean prior, so v_diff is just u_mean - 0
         v_diff = u_mean
         
-        S_mat = jnp.diag(u_var)
-        M_mat = K_inv @ (Kzz - S_mat) @ K_inv
-        M_mat = 0.5 * (M_mat + M_mat.T) # Force symmetry
-        
-        trace_term = jnp.trace(K_inv @ S_mat)
+        M_mat = K_inv @ (Kzz - jnp.diag(u_var)) @ K_inv.T
+        trace_term = jnp.trace(K_inv @ jnp.diag(u_var))
         mahalanobis_term = v_diff.T @ K_inv @ v_diff
-        log_term = jnp.log(jnp.linalg.det(Kzz)) - jnp.log(jnp.linalg.det(S_mat))
+        log_term = jnp.log(jnp.linalg.det(Kzz)) - jnp.log(jnp.linalg.det(jnp.diag(u_var)))
         
         return Kzz, K_inv, v_diff, trace_term, mahalanobis_term, M_mat, log_term
 
