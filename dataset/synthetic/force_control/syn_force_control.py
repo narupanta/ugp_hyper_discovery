@@ -206,7 +206,7 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, save_pa
     os.makedirs(save_path, exist_ok=True)
     plt.savefig(os.path.join(save_path, "displacement_analysis.png"), dpi=300, bbox_inches='tight')
 
-def plot_dataset_viz(data, material_model_name, disp_noise_level, load_noise_level, save_path) :
+def plot_dataset_viz(data, dataset_name, save_path) :
     # --- 1. Setup Dummy Data (Simulating FEM Output) ---
     # Create a simple 2x2 rectangular mesh with 4 nodes and 2 triangular elements
     # Node coordinates (Undeformed mesh_pos)
@@ -291,7 +291,7 @@ def plot_dataset_viz(data, material_model_name, disp_noise_level, load_noise_lev
     if not os.path.exists(save_path):
         os.makedirs(save_path)
    
-    plt.savefig(save_path + f"/{material_model_name}_{disp_noise_level}_{load_noise_level}.png", dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, f"{dataset_name}.png"), dpi=300, bbox_inches='tight')
 
 # Usage:
 # plot_force_fields(node_coords, cells, R_nodes)
@@ -301,6 +301,8 @@ def parse_args():
     # Dataset & Model Config
     parser.add_argument('--model_path', type=str, default="20260411T115941_isihara_0.0_0.01_8_0.975_5_40.0_1_0")
     # parser.add_argument('--validation_load_step_indices', type=int, nargs='+', default=[2, 4, 6, 8])
+    parser.add_argument('--n_steps', type=int, default=10, help="Number of load steps")
+    parser.add_argument('--geometry', type=str, default='block', help="Geometry of the specimen")
     parser.add_argument('--n_sample', type=int, default=128)
 
 
@@ -319,6 +321,7 @@ if __name__ == "__main__" :
     parser.add_argument('--mesh_dir', type=str, default="mesh")
     parser.add_argument('--raw_data_dir', type=str, default="dataset/synthetic/force_control")
     parser.add_argument('--precomputed_dir', type=str, default="dataset/preprocessed/syn_f")
+    parser.add_argument('--geometry', type=str, default='block')
     args = parser.parse_args()
 
     material_model_name = args.model
@@ -647,9 +650,11 @@ if __name__ == "__main__" :
     precomputed_vfm = dict(mesh_pos = mesh_pos, cells = cells, node_type = d["node_type"], load = load_array, u = u_array, F = F_array, dNdX = dNdX, dA = dA, f_neu = f_neu_array, load_noise_std = load_noise_std, load_noise_std_steps = load_noise_std_steps)
     if hasattr(true_mat_model, 'a0'):
         precomputed_vfm['a0'] = true_mat_model.a0
-
+    # Saving data
+    precomputed_dir = f"dataset/preprocessed/syn_f"
     os.makedirs(precomputed_dir, exist_ok=True)
-    np.savez_compressed(os.path.join(precomputed_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}.npz"), **precomputed_vfm)
+    dataset_name = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}_{args.geometry}"
+    np.savez_compressed(os.path.join(precomputed_dir, f"{dataset_name}.npz"), **precomputed_vfm)
     
     data = dict(u = u_true, mesh_pos = node_coords, cells = cells, node_type = node_type)
-    plot_dataset_viz(data, material_model_name, disp_noise, load_noise, "dataset_viz_jax")
+    plot_dataset_viz(data, dataset_name, "dataset_viz_jax")
