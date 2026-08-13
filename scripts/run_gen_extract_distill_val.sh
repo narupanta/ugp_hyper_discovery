@@ -8,6 +8,9 @@
 
 set -e
 
+# Prevent JAX from pre-allocating all GPU memory to avoid OOM, especially during JAX-PyTorch interop in distillation
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
 # Configuration File & Argument Parsing
 YAML_INPUT="distill_pipeline_config.yaml"
 SKIP_GEN=false
@@ -220,7 +223,6 @@ echo "--- Step 4: Stochastic Forward Sampling with Distilled Model ---"
 
 # Restrict each process to a sensible number of threads and avoid JAX GPU OOM in parallel execution
 export OMP_NUM_THREADS=4 
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.45
 
 # Start Validation in the background
