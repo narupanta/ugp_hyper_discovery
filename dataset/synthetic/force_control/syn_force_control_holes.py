@@ -310,12 +310,11 @@ def parse_args():
 if __name__ == "__main__" :
     # args = parse_args()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default="isihara")
+    parser.add_argument('--model', type=str, default="nh2")
     parser.add_argument('--disp_noise', type=float, default=0.0)
-    parser.add_argument('--load_noise', type=float, default=0.03)
-    parser.add_argument('--target_top', type=float, default=10.0)
-    parser.add_argument('--asym', type=float, default=0.9)
-    parser.add_argument('--n_steps', type=int, default=21)
+    parser.add_argument('--load_noise', type=float, default=0.0)
+    parser.add_argument('--target_top', type=float, default=0.3)
+    parser.add_argument('--n_steps', type=int, default=10)
     parser.add_argument('--mesh_dir', type=str, default="mesh")
     parser.add_argument('--raw_data_dir', type=str, default="dataset/synthetic/force_control")
     parser.add_argument('--precomputed_dir', type=str, default="dataset/preprocessed/syn_f")
@@ -325,7 +324,6 @@ if __name__ == "__main__" :
     disp_noise = args.disp_noise
     load_noise = args.load_noise
     target_load = args.target_top
-    asym_factor = args.asym
 
     # validation_load_step_indices = args.validation_load_step_indices
     num_steps = args.n_steps
@@ -343,54 +341,49 @@ if __name__ == "__main__" :
 
     # 1. Parameters
     L_x, L_y = 1.0, 1.0
-    R_hole = 0.1
-    mesh_size_far = 0.08  # Coarse at corners
-    mesh_size_near = 0.02  # Very dense at circle
+    mesh_size_far = 0.05
+    mesh_size_near = 0.015
 
     # 2. Geometry
     rect = model.addRectangle(0.0, 0.0, 0.0, L_x, L_y)
-    circle = model.addDisk(0.0, 0.0, 0.0, R_hole, R_hole)
+    import math
+    hole1 = model.addDisk(0.7, 0.7, 0.0, 0.2, 0.18)
+    # thin ellipse in y axis (rx=0.02, ry=0.125 or we can define it and rotate)
+    hole2 = model.addDisk(0.25, 0.3, 0.0, 0.125, 0.02)
+    model.rotate([(2, hole2)], 0.25, 0.3, 0.0, 0.0, 0.0, 1.0, math.pi / 2.0)
 
     # Boolean Cut
-    # returns [(2, tag)], [ [(2, tag)], ... ]
-    out_tags, _ = model.cut([(2, rect)], [(2, circle)])
-    # out_tags = rect
+    out_tags, _ = model.cut([(2, rect)], [(2, hole1), (2, hole2)])
     model.synchronize()
 
     # 3. Automatic Hole Identification
-    # We get all curves (dim=1) and find the one that is part of the hole
     all_curves = gmsh.model.getEntities(1)
     hole_curve_tag = []
 
+    # Get curves that form the boundaries of the holes
     for dim, tag in all_curves:
-        # Get the bounding box of the curve
         min_x, min_y, _, max_x, max_y, _ = gmsh.model.getBoundingBox(dim, tag)
-        # If the curve is within the hole area, it's our target
-        if max_x <= R_hole + 1e-6 and min_x >= -R_hole - 1e-6:
-            if max_y <= R_hole + 1e-6 and min_y >= -R_hole - 1e-6:
-                hole_curve_tag.append(tag)
+        if (min_x > 0.01 and max_x < 0.99 and min_y > 0.01 and max_y < 0.99):
+            hole_curve_tag.append(tag)
 
     # 4. Define Distance Field on the Hole
     gmsh.model.mesh.field.add("Distance", 1)
     gmsh.model.mesh.field.setNumbers(1, "CurvesList", hole_curve_tag)
 
-    # 5. Define Threshold (The "Halo" Effect)
+    # 5. Define Threshold
     gmsh.model.mesh.field.add("Threshold", 2)
     gmsh.model.mesh.field.setNumber(2, "InField", 1)
     gmsh.model.mesh.field.setNumber(2, "SizeMin", mesh_size_near)
     gmsh.model.mesh.field.setNumber(2, "SizeMax", mesh_size_far)
-    gmsh.model.mesh.field.setNumber(2, "DistMin", 0.02) # Fineness stays constant for this distance
-    gmsh.model.mesh.field.setNumber(2, "DistMax", 0.36) # Gradually becomes coarse until this distance
+    gmsh.model.mesh.field.setNumber(2, "DistMin", 0.02)
+    gmsh.model.mesh.field.setNumber(2, "DistMax", 0.3)
 
     gmsh.model.mesh.field.setAsBackgroundMesh(2)
 
-    # 6. Strict Mesh Options
-    # This prevents the outer boundary from dictating the mesh size
     gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
     gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
 
-    # 7. Physical Groups & Generate
     surf_tag = out_tags[0][1]
     gmsh.model.addPhysicalGroup(2, [surf_tag], 1, name="domain")
 
@@ -424,9 +417,9 @@ if __name__ == "__main__" :
             self.fe = self.fes[0]
         def get_surface_maps(self):
             def surface_map_top(u, x, load):
-                return jnp.array([0., -load[0]])
+                return jnp.array([0., -load[0]]) # jax-fem requires negative for tension
             def surface_map_right(u,x,load) :
-                return jnp.array([-load[0], 0.0])
+                return jnp.array([load[0], 0.0])
             return [surface_map_right, surface_map_top]
         def set_params(self, params):
             surface_params = params
@@ -462,8 +455,8 @@ if __name__ == "__main__" :
 
     zero_dbc = lambda point : 0
     dirichlet_bc_info = [
-        [bottom, left] , 
-        [1, 0],
+        [bottom, bottom] , 
+        [0, 1], # X and Y fixed on bottom
         [zero_dbc, zero_dbc]]
     
 
@@ -483,7 +476,7 @@ if __name__ == "__main__" :
     # node_indices = jnp.where(is_top, 4, node_indices)
     # Check if internal (not on any boundary)
     is_internal = jnp.logical_not(is_left | is_right | is_bottom | is_top)
-    is_fix_x = is_left
+    is_fix_x = is_bottom
     is_fix_y = is_bottom
     is_traction_x = is_right
     is_traction_y = is_top
@@ -511,7 +504,7 @@ if __name__ == "__main__" :
                             dim=2,
                             ele_type=ele_type,
                             dirichlet_bc_info=dirichlet_bc_info,
-                            location_fns = [right,top],
+                            location_fns = [right, top],
                             material_model_piola_stress=true_piola_stress_func)
 
     # petsc_options = {
@@ -542,15 +535,14 @@ if __name__ == "__main__" :
     noise_std = load_noise * target_load
     target_load_noisy = target_load + noise_std * jax.random.normal(key)
 
-    # noisy_target_loads = 
     noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1,1)
-    noisy_load_right_base = noisy_load_top_base * asym_factor
-    # Baseline loads shape: (10, 2)
+    noisy_load_right_base = jnp.zeros_like(noisy_load_top_base)
     loads_noisy = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
+    
     loads_top_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1,1)
-    loads_right_true = loads_top_true * asym_factor
-
+    loads_right_true = jnp.zeros_like(loads_top_true)
     target_load_true = jnp.concat([loads_right_true, loads_top_true], axis=1)
+    
     load_noise_std = load_noise * target_load_true
     load_noise_std_steps = load_noise_std * np.linspace(0, 1, num_steps).reshape(-1,1)
     loads_true = jnp.concat([loads_right_true, loads_top_true], axis=1)
@@ -580,7 +572,7 @@ if __name__ == "__main__" :
         return u_array
 
     u_true = solve_fem(problem_true, petsc_options, loads_true)
-    save_raw_dataset_dir = os.path.join(raw_data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}")
+    save_raw_dataset_dir = os.path.join(raw_data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_0.0")
     if not os.path.exists(save_raw_dataset_dir):
         os.makedirs(save_raw_dataset_dir)
     for step in range(u_true.shape[0]) :
@@ -648,8 +640,9 @@ if __name__ == "__main__" :
     if hasattr(true_mat_model, 'a0'):
         precomputed_vfm['a0'] = true_mat_model.a0
 
-    os.makedirs(precomputed_dir, exist_ok=True)
-    np.savez_compressed(os.path.join(precomputed_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}.npz"), **precomputed_vfm)
+    if not os.path.exists(precomputed_dir):
+        os.makedirs(precomputed_dir)
+    np.savez_compressed(os.path.join(precomputed_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_0.0.npz"), **precomputed_vfm)
     
     data = dict(u = u_true, mesh_pos = node_coords, cells = cells, node_type = node_type)
     plot_dataset_viz(data, material_model_name, disp_noise, load_noise, "dataset_viz_jax")

@@ -206,7 +206,7 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, save_pa
     os.makedirs(save_path, exist_ok=True)
     plt.savefig(os.path.join(save_path, "displacement_analysis.png"), dpi=300, bbox_inches='tight')
 
-def plot_dataset_viz(data, material_model_name, disp_noise_level, load_noise_level, save_path) :
+def plot_dataset_viz(data, material_model_name, disp_noise_level, load_noise_level, target_load, asym_factor, save_path) :
     # --- 1. Setup Dummy Data (Simulating FEM Output) ---
     # Create a simple 2x2 rectangular mesh with 4 nodes and 2 triangular elements
     # Node coordinates (Undeformed mesh_pos)
@@ -291,7 +291,7 @@ def plot_dataset_viz(data, material_model_name, disp_noise_level, load_noise_lev
     if not os.path.exists(save_path):
         os.makedirs(save_path)
    
-    plt.savefig(save_path + f"/{material_model_name}_{disp_noise_level}_{load_noise_level}.png", dpi=300, bbox_inches='tight')
+    plt.savefig(save_path + f"/{material_model_name}_{disp_noise_level}_{load_noise_level}_{target_load}_{asym_factor}_right_60deg.png", dpi=300, bbox_inches='tight')
 
 # Usage:
 # plot_force_fields(node_coords, cells, R_nodes)
@@ -313,7 +313,7 @@ if __name__ == "__main__" :
     parser.add_argument('--model', type=str, default="isihara")
     parser.add_argument('--disp_noise', type=float, default=0.0)
     parser.add_argument('--load_noise', type=float, default=0.03)
-    parser.add_argument('--target_top', type=float, default=10.0)
+    parser.add_argument('--target_right', type=float, default=10.0)
     parser.add_argument('--asym', type=float, default=0.9)
     parser.add_argument('--n_steps', type=int, default=21)
     parser.add_argument('--mesh_dir', type=str, default="mesh")
@@ -324,7 +324,7 @@ if __name__ == "__main__" :
     material_model_name = args.model
     disp_noise = args.disp_noise
     load_noise = args.load_noise
-    target_load = args.target_top
+    target_load = args.target_right
     asym_factor = args.asym
 
     # validation_load_step_indices = args.validation_load_step_indices
@@ -482,13 +482,11 @@ if __name__ == "__main__" :
     # node_indices = jnp.where(is_right, 3, node_indices)
     # node_indices = jnp.where(is_top, 4, node_indices)
     # Check if internal (not on any boundary)
-    is_internal = jnp.logical_not(is_left | is_right | is_bottom | is_top)
-    is_fix_x = is_left
-    is_fix_y = is_bottom
-    is_traction_x = is_right
-    is_traction_y = is_top
+    is_internal = ~(is_left | is_bottom | is_right | is_top)
+
+    # Stack into a (N, 5) matrix
     node_type = jnp.stack([
-        is_internal, is_fix_x, is_fix_y, is_traction_x, is_traction_y
+        is_internal, is_left, is_bottom, is_right, is_top
     ], axis=-1).astype(jnp.float32)
     # # 3. Transform to one-hot encoding
     # # Resulting shape: (num_nodes, 5)
@@ -543,12 +541,12 @@ if __name__ == "__main__" :
     target_load_noisy = target_load + noise_std * jax.random.normal(key)
 
     # noisy_target_loads = 
-    noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1,1)
-    noisy_load_right_base = noisy_load_top_base * asym_factor
+    noisy_load_right_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1,1)
+    noisy_load_top_base = noisy_load_right_base * asym_factor
     # Baseline loads shape: (10, 2)
     loads_noisy = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
-    loads_top_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1,1)
-    loads_right_true = loads_top_true * asym_factor
+    loads_right_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1,1)
+    loads_top_true = loads_right_true * asym_factor
 
     target_load_true = jnp.concat([loads_right_true, loads_top_true], axis=1)
     load_noise_std = load_noise * target_load_true
@@ -645,11 +643,8 @@ if __name__ == "__main__" :
 
     # save all as npz in /precomputed_vfm/{material_model}_{disp_noise}_{load_noise}/
     precomputed_vfm = dict(mesh_pos = mesh_pos, cells = cells, node_type = d["node_type"], load = load_array, u = u_array, F = F_array, dNdX = dNdX, dA = dA, f_neu = f_neu_array, load_noise_std = load_noise_std, load_noise_std_steps = load_noise_std_steps)
-    if hasattr(true_mat_model, 'a0'):
-        precomputed_vfm['a0'] = true_mat_model.a0
-
     os.makedirs(precomputed_dir, exist_ok=True)
     np.savez_compressed(os.path.join(precomputed_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}.npz"), **precomputed_vfm)
     
     data = dict(u = u_true, mesh_pos = node_coords, cells = cells, node_type = node_type)
-    plot_dataset_viz(data, material_model_name, disp_noise, load_noise, "dataset_viz_jax")
+    plot_dataset_viz(data, material_model_name, disp_noise, load_noise, target_load, asym_factor, "dataset_viz_jax")

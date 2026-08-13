@@ -52,27 +52,22 @@ def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.n
     sigma_fix_y = jnp.maximum(sigma_fix_y, 1e-3)
 
     # vmap over load steps for the VFM loss
-    free_loss, fix_loss = jax.vmap(vfm_loss, in_axes=(None, None, 0, None, 0, None, None))(
+    free_x_loss, free_y_loss, fix_x_loss, fix_y_loss = jax.vmap(vfm_loss, in_axes=(None, None, 0, None, 0, None, None))(
         cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA
     )
 
-    fix_x_loss = fix_loss[:, 0]
-    fix_y_loss = fix_loss[:, 1]
-    free_x_loss = free_loss[:, :, 0]
-    free_y_loss = free_loss[:, :, 1]
+    n_steps = free_x_loss.shape[0]
+    n_freedofs_x = free_x_loss.shape[1]
+    n_freedofs_y = free_y_loss.shape[1]
 
-    n_steps = free_loss.shape[0]
-    n_freedofs_per_step = free_loss.shape[1]
-    n_freedofs_total = n_steps * n_freedofs_per_step
-
-    free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2) - n_freedofs_total / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
-    free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2) - n_freedofs_total / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
+    free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2) - (n_steps * n_freedofs_x) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
+    free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2) - (n_steps * n_freedofs_y) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
     
     fix_x_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_x**2))) * (fix_x_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_x**2)))
     fix_y_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_y**2))) * (fix_y_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_y**2)))
 
     expected_log_likelihood = free_x_log_likelihood + free_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
-    return expected_log_likelihood, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, jnp.sum(free_loss**2), jnp.sum(fix_loss**2))
+    return expected_log_likelihood, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, jnp.sum(free_x_loss**2) + jnp.sum(free_y_loss**2), jnp.sum(fix_x_loss**2) + jnp.sum(fix_y_loss**2))
 
 
 def vfm_loss(cells: jnp.ndarray, n_nodes: int, f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, 
@@ -86,27 +81,17 @@ def vfm_loss(cells: jnp.ndarray, n_nodes: int, f_neu_nodes: jnp.ndarray, node_ty
 
     # --- Residual R = int(grad v : P) dx  -  int(v·T) ds(Neumann)
     R_nodes = f_int_nodes - f_neu_nodes
-    free_node_in = (node_type[:, 1] != 1) & (node_type[:, 2] != 1)
-    free_node_on_dbc_left = (node_type[:, 1] == 1)
-    free_node_on_dbc_bottom = (node_type[:, 2] == 1)
+    is_fix_x = (node_type[:, 1] == 1)
+    is_fix_y = (node_type[:, 2] == 1)
     
-    # only free DOFs contribute to the residual loss (bc == 0)
-    free_dof_domain_loss = R_nodes[free_node_in]
-    free_dof_on_dbc_left_loss = R_nodes[free_node_on_dbc_left, 1]
-    free_dof_on_dbc_bottom_loss = R_nodes[free_node_on_dbc_bottom, 0]
+    free_x_loss = R_nodes[~is_fix_x, 0]
+    free_y_loss = R_nodes[~is_fix_y, 1]
     
-    neu_nodes_right = (node_type[:, 3] == 1)
-    neu_nodes_top = (node_type[:, 4] == 1)
-    total_traction_force = f_neu_nodes[neu_nodes_right | neu_nodes_top].sum(axis=0)
-    fixed_nodes_loss1 = jnp.sum(R_nodes[node_type[:, 1] == 1, 0]) + total_traction_force[0]
-    fixed_nodes_loss2 = jnp.sum(R_nodes[node_type[:, 2] == 1, 1]) + total_traction_force[1]
+    # Global equilibrium loss (sum of reactions + sum of external forces on free nodes)
+    fix_x_loss = jnp.sum(R_nodes[is_fix_x, 0]) + jnp.sum(f_neu_nodes[~is_fix_x, 0])
+    fix_y_loss = jnp.sum(R_nodes[is_fix_y, 1]) + jnp.sum(f_neu_nodes[~is_fix_y, 1])
 
-    free_x_loss = jnp.concat([free_dof_domain_loss[:, 0], free_dof_on_dbc_bottom_loss]) 
-    free_y_loss = jnp.concat([free_dof_domain_loss[:, 1], free_dof_on_dbc_left_loss])
-
-    free_loss = jnp.stack([free_x_loss, free_y_loss], axis=-1)
-    fix_loss = jnp.stack([fixed_nodes_loss1, fixed_nodes_loss2])
-    return free_loss, fix_loss
+    return free_x_loss, free_y_loss, fix_x_loss, fix_y_loss
 
 
 def neumann_cell_force(coords_el: jnp.ndarray, onehot_types_el: jnp.ndarray, t3: float, t4: float):
@@ -161,22 +146,24 @@ def physical_loss_per_loadstep_force_controlled(u: jnp.ndarray, load: jnp.ndarra
     f_neu_nodes = jnp.zeros((n_nodes, 2), dtype=jnp.float64).at[cells].add(f_neu_cells)
 
     R_nodes = f_int_nodes - f_neu_nodes
-    free_node_in = (node_type[:, 1] != 1) & (node_type[:, 2] != 1)
-    free_node_on_dbc_left = (node_type[:, 1] == 1)
-    free_node_on_dbc_bottom = (node_type[:, 2] == 1)
+    # is_fix_x is node_type[:, 1]
+    # is_fix_y is node_type[:, 2]
     
-    free_dof_domain_loss = R_nodes[free_node_in]
-    free_dof_on_dbc_left_loss = R_nodes[free_node_on_dbc_left, 1]
-    free_dof_on_dbc_bottom_loss = R_nodes[free_node_on_dbc_bottom, 0]
+    is_fix_x = (node_type[:, 1] == 1)
+    is_fix_y = (node_type[:, 2] == 1)
     
+    is_free_x = ~is_fix_x
+    is_free_y = ~is_fix_y
+
+    free_x_loss = R_nodes[is_free_x, 0]
+    free_y_loss = R_nodes[is_free_y, 1]
+    
+    # Evaluate global equilibrium for the fixed DOFs using the applied traction DOFs
     neu_nodes_right = (node_type[:, 3] == 1)
     neu_nodes_top = (node_type[:, 4] == 1)
     total_traction_force = f_neu_nodes[neu_nodes_right | neu_nodes_top].sum(axis=0)
-    fixed_nodes_loss1 = jnp.sum(R_nodes[node_type[:, 1] == 1, 0]) + total_traction_force[0]
-    fixed_nodes_loss2 = jnp.sum(R_nodes[node_type[:, 2] == 1, 1]) + total_traction_force[1]
-
-    free_x_loss = jnp.concat([free_dof_domain_loss[:, 0], free_dof_on_dbc_bottom_loss]) 
-    free_y_loss = jnp.concat([free_dof_domain_loss[:, 1], free_dof_on_dbc_left_loss])
+    fixed_nodes_loss1 = jnp.sum(R_nodes[is_fix_x, 0]) + total_traction_force[0]
+    fixed_nodes_loss2 = jnp.sum(R_nodes[is_fix_y, 1]) + total_traction_force[1]
 
     free_loss = jnp.stack([free_x_loss, free_y_loss], axis=-1)
     fix_loss = jnp.stack([fixed_nodes_loss1, fixed_nodes_loss2])

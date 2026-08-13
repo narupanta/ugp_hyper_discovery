@@ -21,8 +21,11 @@ raw_dataset/
 *.pt
 /extracted_model/
 /distilled_model/
-/dataset/synthetic
-/dataset/precomputed_vfm
+# Ignore preprocessed and precomputed data folders, but keep code
+/dataset/preprocessed/
+/dataset/precomputed_vfm/
+/dataset/synthetic/**/mesh/
+/dataset/synthetic/**/dataset_viz_jax/
 /extraction/extracted_models/
 /distillation/distilled_models/
 /distillation/distillation_models/
