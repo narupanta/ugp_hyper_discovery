@@ -260,6 +260,15 @@ def main():
     np.save(os.path.join(out_dir, "f3x3.npy"), np.array(f3x3_flat))
     
     print(f"Exported GP Target Mean ({mean_psi.shape}) and Cov ({cov_psi.shape}) to {out_dir}")
+    
+    # Automatically generate the GP sample plot if it's the SEF target
+    if args.distill_target == "sef":
+        import subprocess
+        print(f"Automatically generating GP sample visualizations for {out_dir}...")
+        try:
+            subprocess.run(["python3", "plots/plot_gp_samples.py", "--export_dir", out_dir], check=True)
+        except Exception as e:
+            print(f"Failed to automatically plot GP samples: {e}")
 
 if __name__ == "__main__":
     main()
