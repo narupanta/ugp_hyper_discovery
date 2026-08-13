@@ -70,17 +70,22 @@ def main():
                   "Uniaxial Compression", "Equibiaxial Compression", "Simple Shear"]
 
     # Calculate true model values if available
-    true_psi = None
     if get_material is not None and args.model_name:
         true_model = get_material(args.model_name, jit_P=False)
-        true_psi = np.zeros(len(f3x3))
-        for i in range(len(f3x3)):
-            # Fallback to pure numpy extraction just in case
-            try:
-                import jax.numpy as jnp
-                true_psi[i] = true_model.psi(jnp.array(f3x3[i]))
-            except:
-                pass
+        try:
+            import jax
+            import jax.numpy as jnp
+            jax.config.update("jax_enable_x64", True)
+            
+            # Efficiently compute true energy over all deformations
+            true_psi = np.array(jax.vmap(true_model.psi)(jnp.array(f3x3)))
+            
+            # Subtract baseline energy at identity (in case it's non-zero)
+            psi_identity = true_model.psi(jnp.eye(3))
+            true_psi = true_psi - float(psi_identity)
+        except Exception as e:
+            print(f"Failed to compute true energy via JAX: {e}")
+            true_psi = None
                 
     num_modes = 6
     pts_per_mode = len(f3x3) // num_modes

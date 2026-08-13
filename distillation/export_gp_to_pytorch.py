@@ -266,7 +266,8 @@ def main():
         import subprocess
         print(f"Automatically generating GP sample visualizations for {out_dir}...")
         try:
-            subprocess.run(["python3", "plots/plot_gp_samples.py", "--export_dir", out_dir], check=True)
+            model_name = os.path.basename(os.path.normpath(args.saved_model_dir)).split("_")[1]
+            subprocess.run(["python3", "plots/plot_gp_samples.py", "--export_dir", out_dir, "--model_name", model_name], check=True)
         except Exception as e:
             print(f"Failed to automatically plot GP samples: {e}")
 
