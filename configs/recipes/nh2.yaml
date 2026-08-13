@@ -9,6 +9,7 @@ load_noise: 0.01
 target_load_true_top: 1.5
 asym_factor: 0.95
 n_loadsteps: 10
+geometry: holes
 
 # 2. UGP Extraction (Training) Config
 number_of_mci_sampling: 32

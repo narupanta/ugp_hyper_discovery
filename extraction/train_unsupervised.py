@@ -52,7 +52,8 @@ def parse_args():
     # Handling the List [1, 5, 9] to cover the 10 steps range
     parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[1, 5, 9])
     parser.add_argument('--n_iterations', type=int, default=1000)
-    parser.add_argument('--learning_rate', type=float, default=0.01)
+    parser.add_argument('--learning_rate', type=float, default=5e-2, help="Learning rate for Adam optimizer")
+    parser.add_argument('--geometry', type=str, default='block', help="Geometry of the specimen")
     
     # Resume training
     parser.add_argument('--resume_from', type=str, default="", help="Name of the extraction/extracted_models folder to resume from")
@@ -123,14 +124,14 @@ if __name__ == "__main__" :
 
     # Subfolder with datetime
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-    training_config_str = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{n_ip}_{beta}_{is_fixed_reaction_force_noise}_fip{is_fixed_inducing_points}_{model_mode}"
+    training_config_str = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{n_ip}_{beta}_{is_fixed_reaction_force_noise}_fip{is_fixed_inducing_points}_{model_mode}_{args.geometry}"
     save_path = os.path.join(base_save_path, f"{timestamp}_{training_config_str}")
     os.makedirs(save_path, exist_ok=True)
 
     # load precomputed dataset
     from core.datasetclass import DatasetFactory
     data_dir = "dataset/preprocessed/syn_f" if os.path.exists("dataset/preprocessed/syn_f") else "dataset/precomputed_vfm" 
-    prep_dataset_path = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}.npz")
+    prep_dataset_path = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{args.geometry}.npz")
     
     dataset = DatasetFactory.create("dataset/precomputed_vfm", data_path=prep_dataset_path)
     prep_data = dataset.get_data()
