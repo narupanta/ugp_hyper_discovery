@@ -221,7 +221,12 @@ def main():
         mean_psi = np.array(mean_psi)
         cov_psi = np.array(cov_psi)
         batch_size = mean_psi.shape[0]
-        cov_psi = cov_psi + 1e-6 * np.eye(batch_size)
+        
+        # Rebuild perfectly smooth positive-definite matrix
+        cov_psi = 0.5 * (cov_psi + cov_psi.T)
+        w, v = np.linalg.eigh(cov_psi)
+        w = np.clip(w, a_min=1e-8, a_max=None)
+        cov_psi = v @ np.diag(w) @ v.T
     elif args.distill_target in ["sef_stress", "sef_cauchy"]:
         print(f"Drawing 2048 GP Pathwise realizations for joint SEF + {args.distill_target.upper()} covariance estimation over {f3x3_flat.shape[0]} points...")
         keys = jax.random.split(jax.random.PRNGKey(42), 2048)
