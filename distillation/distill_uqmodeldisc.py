@@ -345,17 +345,19 @@ def main():
     mean_psi = torch.tensor(np.load(os.path.join(export_dir, "mean_psi.npy")), dtype=torch.float64, device=device)
     cov_psi = torch.tensor(np.load(os.path.join(export_dir, "cov_psi.npy")), dtype=torch.float64, device=device)
     cov_psi = (cov_psi + cov_psi.T) / 2.0
+    
     # Ensure strict positive-definiteness without artificial diagonal inflation (eigenvalue clipping)
     L, V = torch.linalg.eigh(cov_psi)
-    if (L <= 1e-8).any():
-        min_eig = L.min().item()
-        print(f"Adjusting non-positive numerical eigenvalues (min eigen: {min_eig:.3e}) to ensure positive-definiteness without diagonal jitter...")
+    min_eig = L.min().item()
+    if min_eig < 1e-8:
+        print(f"Adjusting numerical eigenvalues (min eigen: {min_eig:.3e}) to ensure perfectly smooth, positive-definite paths...")
         L = torch.clamp(L, min=1e-8)
         cov_psi = V @ torch.diag(L) @ V.T
         cov_psi = (cov_psi + cov_psi.T) / 2.0
         try:
             torch.linalg.cholesky(cov_psi)
         except RuntimeError:
+            print("Fallback: Cholesky failed after spectral clip. Adding trace jitter.")
             cov_psi += 1e-6 * torch.eye(cov_psi.shape[0], dtype=torch.float64, device=device)
     f3x3 = torch.tensor(np.load(os.path.join(export_dir, "f3x3.npy")), dtype=torch.float64, device=device)
 

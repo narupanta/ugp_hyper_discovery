@@ -53,12 +53,10 @@ def main():
     f3x3 = np.load(f3x3_path)
     num_orig_points = f3x3.shape[0]
     
-    # UQInModelDiscovery hardcodes dropping these exact indices for the sensitivity analysis
-    dropped_indices = [0, 25, 39]
+    # UQInModelDiscovery evaluates all points passed to it except for the origins (F=I).
+    # distill_uqmodeldisc.py masks out ALL zero-strain origins by setting their test case to 2 (biaxial tension)
+    # which is not in the list of relevant test cases (0, 1, 3).
     keep_mask = np.ones(num_orig_points, dtype=bool)
-    keep_mask[dropped_indices] = False
-    
-    # Furthermore, distill_uqmodeldisc.py masks out ALL zero-strain origins (F=I) by setting their test case to 2
     identity_matrix = np.eye(3)
     is_zero_strain = np.max(np.max(np.abs(f3x3 - identity_matrix), axis=2), axis=1) < 1e-6
     keep_mask[is_zero_strain] = False
