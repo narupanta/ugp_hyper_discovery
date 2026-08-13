@@ -11,7 +11,7 @@ asym_factor: 0.95
 n_loadsteps: 10
 
 # 2. UGP Extraction (Training) Config
-number_of_mci_sampling: 8
+number_of_mci_sampling: 32
 train_load_steps_indices: [1, 5, 9]
 n_ip: 5
 beta: 1.0
@@ -30,7 +30,7 @@ num_points: 192
 max_gamma: 1.0
 do_sensitivity: 1
 sobol_threshold: 0.001
-sobol_samples_factor: 1024
+sobol_samples_factor: 4096
 
 # 4. Validation Config
 run_validation: 1

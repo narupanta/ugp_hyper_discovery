@@ -22,8 +22,8 @@ extraction_n_iterations: 50000
 extraction_learning_rate: 0.01
 
 # 3. Distillation (Uncertainty-Aware Model Discovery) Config
-distilled_material_model: gmr
-distillation_n_iterations: 50
+distilled_material_model: gmr_nolog
+distillation_n_iterations: 5000
 distill_target: sef
 sample_mode: dataset_f
 num_points: 512
