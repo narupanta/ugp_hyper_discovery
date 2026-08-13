@@ -111,7 +111,10 @@ def main():
                         
         # Plot True
         if true_psi is not None:
-            ax.plot(gamma, true_psi[start_idx:end_idx], 'k--', lw=1.5, label="True Model")
+            true_val = true_psi[start_idx:end_idx]
+            ax.plot(gamma, true_val, 'k--', lw=1.5, label="True Model")
+            if np.max(true_val) > 0:
+                ax.set_ylim(-0.1 * np.max(true_val), 1.5 * np.max(true_val))
 
         ax.set_title(name)
         ax.set_xlabel(r"Stretch $\gamma$")

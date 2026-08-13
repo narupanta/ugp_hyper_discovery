@@ -48,3 +48,8 @@ This repository combines JAX (for fast GPU Gaussian Process inference & hyperela
 - **The NumPy Intermediary Bridge:** When transferring GP predictive posteriors (mean and uncertainty variance) to PyTorch discovery scripts (e.g., `distill_uqmodeldisc.py`, `distill_parameters_wasserstein.py`):
   1. Evaluate JAX models and convert all resulting arrays to standard host NumPy arrays using `np.array(jax_arr)`.
   2. Either save intermediates to structured `.npy` / `.npz` files (matching the design in `export_gp_to_pytorch.py`) or decouple script executions between extraction and PyTorch distillation.
+
+---
+
+## 6. Execution Environment (Docker)
+- **Always Run Python in Docker:** All Python scripts must be executed within a Docker container rather than using the local Python environment. There is an existing container named `ugp_disc_hyperelastic`. Always use `docker exec` to run commands inside this existing container first (e.g., `docker exec ugp_disc_hyperelastic python <script>`).
