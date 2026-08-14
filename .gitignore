@@ -23,6 +23,7 @@ raw_dataset/
 /distilled_model/
 # Ignore preprocessed and precomputed data folders, but keep code
 /dataset/preprocessed/
+/dataset/experiment
 /dataset/precomputed_vfm/
 /dataset/synthetic/**/mesh/
 /dataset/synthetic/**/dataset_viz_jax/

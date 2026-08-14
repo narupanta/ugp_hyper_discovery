@@ -322,6 +322,7 @@ if __name__ == "__main__" :
     parser.add_argument('--raw_data_dir', type=str, default="dataset/synthetic/force_control")
     parser.add_argument('--precomputed_dir', type=str, default="dataset/preprocessed/syn_f")
     parser.add_argument('--geometry', type=str, default='block')
+    parser.add_argument('--mesh_size', type=float, default=0.08)
     args = parser.parse_args()
 
     material_model_name = args.model
@@ -347,8 +348,8 @@ if __name__ == "__main__" :
     # 1. Parameters
     L_x, L_y = 1.0, 1.0
     R_hole = 0.1
-    mesh_size_far = 0.08  # Coarse at corners
-    mesh_size_near = 0.02  # Very dense at circle
+    mesh_size_far = args.mesh_size
+    mesh_size_near = args.mesh_size / 4.0
 
     # 2. Geometry
     rect = model.addRectangle(0.0, 0.0, 0.0, L_x, L_y)

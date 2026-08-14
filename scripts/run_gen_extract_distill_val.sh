@@ -17,19 +17,39 @@ SKIP_GEN=false
 SKIP_EXT=false
 SKIP_DISTILL=false
 SKIP_VAL=false
+EXTRACTION_DIR_OVERRIDE=""
 
-for arg in "$@"; do
-    if [ "$arg" == "--skip-gen" ] || [ "$arg" == "--no-gen" ] || [ "$arg" == "--skip-generation" ]; then
-        SKIP_GEN=true
-    elif [ "$arg" == "--skip-ext" ] || [ "$arg" == "--no-ext" ] || [ "$arg" == "--skip-extraction" ]; then
-        SKIP_EXT=true
-    elif [ "$arg" == "--skip-distill" ] || [ "$arg" == "--no-distill" ] || [ "$arg" == "--skip-distillation" ]; then
-        SKIP_DISTILL=true
-    elif [ "$arg" == "--skip-val" ] || [ "$arg" == "--no-val" ] || [ "$arg" == "--skip-validation" ]; then
-        SKIP_VAL=true
-    elif [[ "$arg" != --* ]]; then
-        YAML_INPUT="$arg"
-    fi
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --skip-gen|--no-gen|--skip-generation)
+            SKIP_GEN=true
+            shift
+            ;;
+        --skip-ext|--no-ext|--skip-extraction)
+            SKIP_EXT=true
+            shift
+            ;;
+        --skip-distill|--no-distill|--skip-distillation)
+            SKIP_DISTILL=true
+            shift
+            ;;
+        --skip-val|--no-val|--skip-validation)
+            SKIP_VAL=true
+            shift
+            ;;
+        --extraction-dir)
+            EXTRACTION_DIR_OVERRIDE="$2"
+            shift 2
+            ;;
+        -*)
+            echo "Warning: Unknown option: $1"
+            shift
+            ;;
+        *)
+            YAML_INPUT="$1"
+            shift
+            ;;
+    esac
 done
 
 # Recipe shortcut resolution (e.g. 'isihara', 'gentthomas', 'nh2', 'nh4')
@@ -82,6 +102,10 @@ L_NOISE=$(get_yaml "['load_noise']")
 ASYM=$(get_yaml "['asym_factor']")
 TOP_LOAD=$(get_yaml "['target_load_true_top']")
 STEPS=$(get_yaml "['n_loadsteps']")
+MESH_SIZE=$(get_yaml "['mesh_size']")
+if [ "$MESH_SIZE" == "None" ] || [ "$MESH_SIZE" == "" ] || [ "$MESH_SIZE" == "null" ]; then
+    MESH_SIZE="0.08" # default fallback
+fi
 
 # 2. UGP Extraction Config
 MCI_SAMPLING=$(get_yaml "['number_of_mci_sampling']")
@@ -140,7 +164,8 @@ else
         --target_top "$TOP_LOAD" \
         --asym "$ASYM" \
         --n_steps "$STEPS" \
-        --geometry "$GEOMETRY"
+        --geometry "$GEOMETRY" \
+        --mesh_size "$MESH_SIZE"
     echo "✅ Step 1 (Data Generation) completed."
 fi
 
@@ -173,8 +198,12 @@ if [ "$SKIP_DISTILL" == "true" ] && [ "$SKIP_VAL" == "true" ]; then
     exit 0
 fi
 
-# Find the most recently created extraction directory matching this recipe and geometry
-SAVED_DIR=$(ls -td extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}* 2>/dev/null | head -1)
+# Find the most recently created extraction directory matching this recipe and geometry or use override
+if [ -n "$EXTRACTION_DIR_OVERRIDE" ]; then
+    SAVED_DIR="$EXTRACTION_DIR_OVERRIDE"
+else
+    SAVED_DIR=$(ls -td extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}* 2>/dev/null | head -1)
+fi
 if [ -z "$SAVED_DIR" ] || [ ! -d "$SAVED_DIR" ]; then
     if [ "$SKIP_EXT" == "true" ]; then
         echo "❌ Error: Step 2 was skipped and no extracted model found in extraction/extracted_models/ for $MODEL!"

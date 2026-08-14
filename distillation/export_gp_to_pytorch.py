@@ -140,8 +140,9 @@ def main():
     
     gp_model = SparseHyperelasticityGP(gp_params, I_z, min_dev, min_vol, max_dev, max_vol, beta=1.0)
     
-    # Generate points
-    if args.sample_mode in ["dataset_f", "dataset_all"]:
+    # Try to load the dataset for background plotting and dataset_* modes
+    dataset_F_flat_2x2 = None
+    try:
         model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
         parts = model_folder_name.split('_')
         if len(parts) >= 6:
@@ -151,41 +152,41 @@ def main():
             target_load = parts[4]
             asym_factor = parts[5]
             dataset_filename = f"{ugp_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}.npz"
-        else:
-            raise ValueError(f"Could not parse dataset parameters from model folder name: {model_folder_name}")
             
-        prep_dataset_path = os.path.join("dataset/preprocessed/syn_f", dataset_filename)
-        if not os.path.exists(prep_dataset_path):
-            prep_dataset_path = os.path.join("dataset/precomputed_vfm", dataset_filename)
-            
-        if not os.path.exists(prep_dataset_path):
-            raise FileNotFoundError(f"Dataset file not found at {prep_dataset_path}")
-            
-        print(f"Loading direct extraction input data from {prep_dataset_path}...")
-        prep_data = np.load(prep_dataset_path)
-        F_all_steps_2x2 = prep_data["F"]
-        
-        # Filter to strictly the load steps that were used during unsupervised GP extraction
-        log_file = os.path.join(args.saved_model_dir, "optimization_log.txt")
-        load_steps = None
-        if os.path.exists(log_file):
-            with open(log_file, "r", encoding="utf-8") as lf:
-                first_line = lf.readline()
-                if "[" in first_line and "]" in first_line:
-                    steps_str = first_line.split("]")[0].split("[")[1].strip()
-                    if steps_str:
-                        load_steps = [int(x.strip()) for x in steps_str.split(",") if x.strip().isdigit()]
-        
-        if load_steps and len(load_steps) > 0 and max(load_steps) < F_all_steps_2x2.shape[0]:
-            print(f"Filtering dataset deformations exclusively to extraction training load steps: {load_steps}")
-            F_train_full_2x2 = F_all_steps_2x2[load_steps]
-        else:
-            print(f"Warning: Could not parse specific valid load steps from {log_file}; using default extraction load steps [2, 10, 20].")
-            default_steps = [2, 10, 20]
-            valid_steps = [s for s in default_steps if s < F_all_steps_2x2.shape[0]]
-            F_train_full_2x2 = F_all_steps_2x2[valid_steps] if len(valid_steps) > 0 else F_all_steps_2x2
-            
-        F_flat_2x2 = F_train_full_2x2.reshape(-1, 2, 2)
+            prep_dataset_path = os.path.join("dataset/preprocessed/syn_f", dataset_filename)
+            if not os.path.exists(prep_dataset_path):
+                prep_dataset_path = os.path.join("dataset/precomputed_vfm", dataset_filename)
+                
+            if os.path.exists(prep_dataset_path):
+                prep_data = np.load(prep_dataset_path)
+                F_all_steps_2x2 = prep_data["F"]
+                
+                log_file = os.path.join(args.saved_model_dir, "optimization_log.txt")
+                load_steps = None
+                if os.path.exists(log_file):
+                    with open(log_file, "r", encoding="utf-8") as lf:
+                        first_line = lf.readline()
+                        if "[" in first_line and "]" in first_line:
+                            steps_str = first_line.split("]")[0].split("[")[1].strip()
+                            if steps_str:
+                                load_steps = [int(x.strip()) for x in steps_str.split(",") if x.strip().isdigit()]
+                
+                if load_steps and len(load_steps) > 0 and max(load_steps) < F_all_steps_2x2.shape[0]:
+                    F_train_full_2x2 = F_all_steps_2x2[load_steps]
+                else:
+                    default_steps = [2, 10, 20]
+                    valid_steps = [s for s in default_steps if s < F_all_steps_2x2.shape[0]]
+                    F_train_full_2x2 = F_all_steps_2x2[valid_steps] if len(valid_steps) > 0 else F_all_steps_2x2
+                    
+                dataset_F_flat_2x2 = F_train_full_2x2.reshape(-1, 2, 2)
+    except Exception as e:
+        print(f"Could not load background dataset for plotting: {e}")
+
+    # Generate points
+    if args.sample_mode in ["dataset_f", "dataset_all"]:
+        if dataset_F_flat_2x2 is None:
+            raise ValueError(f"Dataset loading failed, cannot use {args.sample_mode}.")
+        F_flat_2x2 = dataset_F_flat_2x2
         
         if args.sample_mode == "dataset_all":
             print(f"Using exactly ALL {len(F_flat_2x2)} observed deformation points from extraction load steps (no FPS!).")
@@ -289,6 +290,89 @@ def main():
             subprocess.run(["python3", "plots/plot_gp_samples.py", "--export_dir", out_dir, "--model_name", model_name], check=True)
         except Exception as e:
             print(f"Failed to automatically plot GP samples: {e}")
+
+    # === ADDITIONAL EXPORT PLOTS ===
+    import matplotlib.pyplot as plt
+    print("Generating export summary plots (Invariant Space & Energy Distributions)...")
+    try:
+        extractor = IsotropicFeatureExtractor()
+        dev_feat, vol_feat = jax.vmap(extractor.extract)(f3x3_flat)
+        dev_feat, vol_feat = np.array(dev_feat), np.array(vol_feat)
+        
+        # 1. Invariant Space Plot
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        
+        if dataset_F_flat_2x2 is not None:
+            ds_f3x3 = np.zeros((dataset_F_flat_2x2.shape[0], 3, 3))
+            ds_f3x3[:, :2, :2] = dataset_F_flat_2x2
+            ds_f3x3[:, 2, 2] = 1.0
+            ds_dev, ds_vol = jax.vmap(extractor.extract)(jnp.array(ds_f3x3))
+            ds_dev, ds_vol = np.array(ds_dev), np.array(ds_vol)
+            
+            ds_i1_m3 = ds_dev[:, 0] - 3.0
+            ds_i2_m3 = ds_dev[:, 1] - 3.0
+            ds_j_m1_sq = (ds_vol[:, 0] - 1.0)**2
+            
+            axes[0].scatter(ds_i1_m3, ds_i2_m3, c='gray', alpha=0.3, s=10, label='Extraction Dataset', marker='s')
+            axes[1].scatter(ds_i1_m3, ds_j_m1_sq, c='gray', alpha=0.3, s=10, label='Extraction Dataset', marker='s')
+            axes[2].scatter(ds_i2_m3, ds_j_m1_sq, c='gray', alpha=0.3, s=10, label='Extraction Dataset', marker='s')
+            
+        i1_m3 = dev_feat[:, 0] - 3.0
+        i2_m3 = dev_feat[:, 1] - 3.0
+        j_m1_sq = (vol_feat[:, 0] - 1.0)**2
+        
+        axes[0].scatter(i1_m3, i2_m3, c='red', s=25, label=f'Export Points ({args.sample_mode})', zorder=5, marker='x')
+        axes[1].scatter(i1_m3, j_m1_sq, c='red', s=25, label=f'Export Points ({args.sample_mode})', zorder=5, marker='x')
+        axes[2].scatter(i2_m3, j_m1_sq, c='red', s=25, label=f'Export Points ({args.sample_mode})', zorder=5, marker='x')
+        
+        axes[0].set_xlabel("$\\bar{I}_1 - 3$")
+        axes[0].set_ylabel("$\\bar{I}_2 - 3$")
+        axes[0].set_title("Deviatoric Space")
+        axes[0].legend()
+        axes[0].grid(True, linestyle='--', alpha=0.6)
+        
+        axes[1].set_xlabel("$\\bar{I}_1 - 3$")
+        axes[1].set_ylabel("$(J - 1)^2$")
+        axes[1].set_title("$\\bar{I}_1$ vs Volumetric")
+        axes[1].legend()
+        axes[1].grid(True, linestyle='--', alpha=0.6)
+        
+        axes[2].set_xlabel("$\\bar{I}_2 - 3$")
+        axes[2].set_ylabel("$(J - 1)^2$")
+        axes[2].set_title("$\\bar{I}_2$ vs Volumetric")
+        axes[2].legend()
+        axes[2].grid(True, linestyle='--', alpha=0.6)
+        
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "export_invariant_space.png"), dpi=150)
+        plt.close(fig)
+        
+        # 2. Distribution Plot
+        dev_psi_mean = np.array(jax.vmap(gp_model.dev_gp_mean)(jnp.array(dev_feat)))
+        vol_psi_mean = np.array(jax.vmap(gp_model.vol_gp_mean)(jnp.array(vol_feat)))
+        total_psi_mean = dev_psi_mean + vol_psi_mean
+        
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+        
+        axes[0].hist(total_psi_mean, bins=30, color='blue', alpha=0.7, edgecolor='black')
+        axes[0].set_title("Total Mean Energy Distribution")
+        axes[0].set_xlabel("Strain Energy (SEF)")
+        axes[0].set_ylabel("Count")
+        
+        axes[1].hist(dev_psi_mean, bins=30, color='purple', alpha=0.7, edgecolor='black')
+        axes[1].set_title("Deviatoric Mean Energy Distribution")
+        axes[1].set_xlabel("Deviatoric Energy")
+        
+        axes[2].hist(vol_psi_mean, bins=30, color='green', alpha=0.7, edgecolor='black')
+        axes[2].set_title("Volumetric Mean Energy Distribution")
+        axes[2].set_xlabel("Volumetric Energy")
+        
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "export_energy_distribution.png"), dpi=150)
+        plt.close(fig)
+        print("Successfully saved invariant space and energy distribution plots.")
+    except Exception as e:
+        print(f"Failed to generate extra export plots: {e}")
 
 if __name__ == "__main__":
     main()
