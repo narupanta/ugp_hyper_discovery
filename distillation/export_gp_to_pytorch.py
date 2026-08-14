@@ -151,13 +151,22 @@ def main():
             load_noise = parts[3]
             target_load = parts[4]
             asym_factor = parts[5]
-            dataset_filename = f"{ugp_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}.npz"
+            geometry = parts[-1]
+            dataset_filename_geom = f"{ugp_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}_{geometry}.npz"
+            dataset_filename_nogeom = f"{ugp_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}.npz"
             
-            prep_dataset_path = os.path.join("dataset/preprocessed/syn_f", dataset_filename)
-            if not os.path.exists(prep_dataset_path):
-                prep_dataset_path = os.path.join("dataset/precomputed_vfm", dataset_filename)
+            prep_dataset_path = None
+            for fname in [dataset_filename_geom, dataset_filename_nogeom]:
+                p1 = os.path.join("dataset/preprocessed/syn_f", fname)
+                p2 = os.path.join("dataset/precomputed_vfm", fname)
+                if os.path.exists(p1):
+                    prep_dataset_path = p1
+                    break
+                elif os.path.exists(p2):
+                    prep_dataset_path = p2
+                    break
                 
-            if os.path.exists(prep_dataset_path):
+            if prep_dataset_path is not None:
                 prep_data = np.load(prep_dataset_path)
                 F_all_steps_2x2 = prep_data["F"]
                 
