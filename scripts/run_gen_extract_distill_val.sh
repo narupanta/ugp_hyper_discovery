@@ -220,17 +220,49 @@ if [ "$SKIP_DISTILL" == "true" ]; then
     echo "⏭️ Skipping Step 3 (Distillation) as requested."
 else
     echo "--- Step 3: Distillation ($DIST_MODEL candidate expression, $DIST_ITERS iterations) ---"
-    python3 distillation/distill_uqmodeldisc.py \
-        --saved_model_dir "$SAVED_DIR" \
-        --material_model "$DIST_MODEL" \
-        --n_iterations "$DIST_ITERS" \
-        --distill_target "$DIST_TARGET" \
-        --sample_mode "$SAMPLE_MODE" \
-        --num_points "$NUM_POINTS" \
-        --max_gamma "$MAX_GAMMA" \
-        --sobol_threshold "$SOBOL_THRESHOLD" \
-        --sobol_samples_factor "$SOBOL_FACTOR" \
-        $SENSITIVITY_FLAG
+    if [ "$DIST_TARGET" == "sef_split" ]; then
+        echo "Distilling DEV component..."
+        python3 distillation/distill_uqmodeldisc.py \
+            --saved_model_dir "$SAVED_DIR" \
+            --material_model "$DIST_MODEL" \
+            --n_iterations "$DIST_ITERS" \
+            --distill_target "$DIST_TARGET" \
+            --component "dev" \
+            --sample_mode "$SAMPLE_MODE" \
+            --num_points "$NUM_POINTS" \
+            --max_gamma "$MAX_GAMMA" \
+            --sobol_threshold "$SOBOL_THRESHOLD" \
+            --sobol_samples_factor "$SOBOL_FACTOR" \
+            $SENSITIVITY_FLAG &
+            
+        echo "Distilling VOL component..."
+        python3 distillation/distill_uqmodeldisc.py \
+            --saved_model_dir "$SAVED_DIR" \
+            --material_model "$DIST_MODEL" \
+            --n_iterations "$DIST_ITERS" \
+            --distill_target "$DIST_TARGET" \
+            --component "vol" \
+            --sample_mode "$SAMPLE_MODE" \
+            --num_points "$NUM_POINTS" \
+            --max_gamma "$MAX_GAMMA" \
+            --sobol_threshold "$SOBOL_THRESHOLD" \
+            --sobol_samples_factor "$SOBOL_FACTOR" \
+            $SENSITIVITY_FLAG &
+            
+        wait
+    else
+        python3 distillation/distill_uqmodeldisc.py \
+            --saved_model_dir "$SAVED_DIR" \
+            --material_model "$DIST_MODEL" \
+            --n_iterations "$DIST_ITERS" \
+            --distill_target "$DIST_TARGET" \
+            --sample_mode "$SAMPLE_MODE" \
+            --num_points "$NUM_POINTS" \
+            --max_gamma "$MAX_GAMMA" \
+            --sobol_threshold "$SOBOL_THRESHOLD" \
+            --sobol_samples_factor "$SOBOL_FACTOR" \
+            $SENSITIVITY_FLAG
+    fi
     echo "✅ Step 3 (Distillation) completed."
 fi
 

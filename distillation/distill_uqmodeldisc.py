@@ -162,10 +162,11 @@ class EnergyOutputSelector:
         return outputs
 
 class PyTorchGMRModel(nn.Module):
-    def __init__(self, num_points, device, distill_target="sef", include_log_terms=True):
+    def __init__(self, num_points, device, include_log_terms=False, distill_target="sef", component="total"):
         super().__init__()
-        self.distill_target = distill_target
         self.include_log_terms = include_log_terms
+        self.distill_target = distill_target
+        self.component = component
         self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
         if self.include_log_terms:
             self._num_parameters = 13
@@ -232,7 +233,11 @@ class PyTorchGMRModel(nn.Module):
         
         W_vol = D1 * J_m1**2 + D2 * J_m1**4 + D3 * J_m1**6
 
-        energy = W_dev + W_vol
+        energy = 0.0
+        if self.component in ["total", "dev"]:
+            energy += W_dev
+        if self.component in ["total", "vol"]:
+            energy += W_vol
         if self.distill_target in ["sef_stress", "sef_cauchy"]:
             F_inv_T = torch.linalg.inv(inputs).transpose(1, 2)
             dJ_dF = J.view(-1, 1, 1) * F_inv_T
@@ -246,9 +251,16 @@ class PyTorchGMRModel(nn.Module):
                 dW_dI2 = dW_dI2 + E / I2_bar
             dW_dJ = 2.0 * D1 * J_m1 + 4.0 * D2 * (J_m1**3) + 6.0 * D3 * (J_m1**5)
             
+            if self.component == "dev":
+                dW_dJ = 0.0 * dW_dJ
+            elif self.component == "vol":
+                dW_dI1 = 0.0 * dW_dI1
+                dW_dI2 = 0.0 * dW_dI2
+                
             stress = dW_dI1.view(-1, 1, 1) * dI1bar_dF + dW_dI2.view(-1, 1, 1) * dI2bar_dF + dW_dJ.view(-1, 1, 1) * dJ_dF
             if self.distill_target == "sef_cauchy":
                 stress = torch.matmul(stress, inputs.transpose(1, 2)) / J.view(-1, 1, 1)
+            
             p00 = stress[:, 0, 0]
             p11 = stress[:, 1, 1]
             p01 = stress[:, 0, 1]
@@ -316,7 +328,8 @@ def main():
     parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all", "inducing_points"], help="Sample deformation inputs from extraction dataset directly or standard modes (with or without interpolation clipping)")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points for GP joint evaluation and distillation")
     parser.add_argument("--max_gamma", type=float, default=1.0, help="Max deformation intensity gamma when sample_mode is standard")
-    parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy"], help="Target mode: strain energy function (sef), joint SEF + Piola stress (sef_stress), or joint SEF + Cauchy stress (sef_cauchy)")
+    parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"], help="Target mode: strain energy function (sef), joint SEF + Piola stress (sef_stress), joint SEF + Cauchy stress (sef_cauchy), or separate DEV and VOL energy (sef_split)")
+    parser.add_argument("--component", type=str, default="total", choices=["total", "dev", "vol"], help="Component to distill (used with sef_split)")
     parser.add_argument("--load_existing_sensitivities", action="store_true", help="Skip Sobol resampling and directly load existing sensitivity CSVs from out_dir")
     args = parser.parse_args()
 
@@ -339,13 +352,20 @@ def main():
         export_subfolder += f"_{args.distill_target}"
         
     export_dir = os.path.join(args.saved_model_dir, export_subfolder)
-    if not os.path.exists(export_dir) or not os.path.exists(os.path.join(export_dir, "mean_psi.npy")):
+    if args.distill_target == "sef_split":
+        mean_file = f"mean_{args.component}.npy"
+        cov_file  = f"cov_{args.component}.npy"
+    else:
+        mean_file = "mean_psi.npy"
+        cov_file  = "cov_psi.npy"
+
+    if not os.path.exists(export_dir) or not os.path.exists(os.path.join(export_dir, mean_file)):
         import subprocess
-        print(f"'{export_dir}' not found. Exporting GP to PyTorch first (sample_mode: {args.sample_mode}, max_gamma: {args.max_gamma}, distill_target: {args.distill_target})...")
+        print(f"'{export_dir}' or '{mean_file}' not found. Exporting GP to PyTorch first (sample_mode: {args.sample_mode}, max_gamma: {args.max_gamma}, distill_target: {args.distill_target})...")
         subprocess.run(["python3", "distillation/export_gp_to_pytorch.py", "--saved_model_dir", args.saved_model_dir, "--sample_mode", args.sample_mode, "--num_points", str(args.num_points), "--max_gamma", str(args.max_gamma), "--distill_target", args.distill_target, "--export_subfolder", export_subfolder], check=True)
         
-    mean_psi = torch.tensor(np.load(os.path.join(export_dir, "mean_psi.npy")), dtype=torch.float64, device=device)
-    cov_psi = torch.tensor(np.load(os.path.join(export_dir, "cov_psi.npy")), dtype=torch.float64, device=device)
+    mean_psi = torch.tensor(np.load(os.path.join(export_dir, mean_file)), dtype=torch.float64, device=device)
+    cov_psi = torch.tensor(np.load(os.path.join(export_dir, cov_file)), dtype=torch.float64, device=device)
     cov_psi = (cov_psi + cov_psi.T) / 2.0
     
     # Ensure strict positive-definiteness without artificial diagonal inflation (eigenvalue clipping)
@@ -387,7 +407,7 @@ def main():
 
     mock_gp = MockGP(mean_psi, cov_psi, device=device)
     include_log = args.material_model not in ["gmr_nolog", "gmr_no_log"]
-    model = PyTorchGMRModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log)
+    model = PyTorchGMRModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log, component=args.component)
     full_param_names_master = model.parameter_names
     output_selector = EnergyOutputSelector(num_outputs=mean_psi.shape[0])
 
@@ -430,8 +450,10 @@ def main():
         
         current_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
         mode_str = f"_{args.sample_mode}_g{args.max_gamma}" if args.sample_mode == "standard" else f"_{args.sample_mode}"
-        if args.distill_target in ["sef_stress", "sef_cauchy"]:
+        if args.distill_target in ["sef_stress", "sef_cauchy", "sef_split"]:
             mode_str += f"_{args.distill_target}"
+            if args.distill_target == "sef_split":
+                mode_str += f"_{args.component}"
         out_dir = os.path.abspath(os.path.join("distillation", "distilled_models", f"{current_time}_{true_model_name}{noise_str}_{args.material_model}{mode_str}_uqmodeldisc"))
         log_mode = "w"
     os.makedirs(out_dir, exist_ok=True)

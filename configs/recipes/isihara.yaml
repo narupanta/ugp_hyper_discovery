@@ -6,10 +6,11 @@
 material_model_name: isihara
 disp_noise: 0.0001
 load_noise: 0.01
-target_load_true_top: 8.0
-asym_factor: 0.95
+target_load_true_top: 4.0
+asym_factor: 0.0
 n_loadsteps: 10
-
+geometry: holes
+mesh_size: 0.08
 # 2. UGP Extraction (Training) Config
 number_of_mci_sampling: 8
 train_load_steps_indices: [1, 5, 9]
@@ -23,9 +24,9 @@ extraction_learning_rate: 0.01
 
 # 3. Distillation (Uncertainty-Aware Model Discovery) Config
 distilled_material_model: gmr_nolog
-distillation_n_iterations: 5000
-distill_target: sef
-sample_mode: dataset_f
+distillation_n_iterations: 50
+distill_target: sef_split
+sample_mode: dataset_all
 num_points: 512
 max_gamma: 10.0
 do_sensitivity: 1

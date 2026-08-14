@@ -123,7 +123,7 @@ def main():
     parser.add_argument("--max_gamma", type=float, default=0.8)
     parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all", "inducing_points"], help="Sample deformations from standard modes (with or without interpolation clipping), extraction dataset with FPS, all extraction dataset points, or directly from inducing points.")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points to evaluate GP over.")
-    parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy"], help="Distillation target mode: solely Strain Energy Function (sef), joint SEF + Piola stress (sef_stress), or joint SEF + Cauchy stress (sef_cauchy).")
+    parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"], help="Distillation target mode: solely Strain Energy Function (sef), joint SEF + Piola stress (sef_stress), joint SEF + Cauchy stress (sef_cauchy), or separate DEV and VOL energy (sef_split).")
     parser.add_argument("--export_subfolder", type=str, default="", help="Custom output subfolder for exported PyTorch matrices.")
     args = parser.parse_args()
 
@@ -256,6 +256,25 @@ def main():
         w, v = np.linalg.eigh(cov_psi)
         w = np.clip(w, a_min=1e-8, a_max=None)
         cov_psi = v @ np.diag(w) @ v.T
+    elif args.distill_target == "sef_split":
+        feats = jax.vmap(gp_model.feature_extractor.extract)(f3x3_flat)
+        dev_feats, vol_feats = feats[0], feats[1]
+        
+        mean_dev = np.array(gp_model.dev_gp_mean(dev_feats))
+        cov_dev = np.array(gp_model.dev_psi_joint_cov(f3x3_flat))
+        
+        mean_vol = np.array(gp_model.vol_gp_mean(vol_feats))
+        cov_vol = np.array(gp_model.vol_psi_joint_cov(f3x3_flat))
+        
+        cov_dev = 0.5 * (cov_dev + cov_dev.T)
+        w, v = np.linalg.eigh(cov_dev)
+        w = np.clip(w, a_min=1e-8, a_max=None)
+        cov_dev = v @ np.diag(w) @ v.T
+
+        cov_vol = 0.5 * (cov_vol + cov_vol.T)
+        w, v = np.linalg.eigh(cov_vol)
+        w = np.clip(w, a_min=1e-8, a_max=None)
+        cov_vol = v @ np.diag(w) @ v.T
     elif args.distill_target in ["sef_stress", "sef_cauchy"]:
         print(f"Drawing 2048 GP Pathwise realizations for joint SEF + {args.distill_target.upper()} covariance estimation over {f3x3_flat.shape[0]} points...")
         keys = jax.random.split(jax.random.PRNGKey(42), 2048)
@@ -284,11 +303,18 @@ def main():
     out_dir = os.path.join(args.saved_model_dir, export_subfolder)
     os.makedirs(out_dir, exist_ok=True)
     
-    np.save(os.path.join(out_dir, "mean_psi.npy"), np.array(mean_psi))
-    np.save(os.path.join(out_dir, "cov_psi.npy"), np.array(cov_psi))
-    np.save(os.path.join(out_dir, "f3x3.npy"), np.array(f3x3_flat))
-    
-    print(f"Exported GP Target Mean ({mean_psi.shape}) and Cov ({cov_psi.shape}) to {out_dir}")
+    if args.distill_target == "sef_split":
+        np.save(os.path.join(out_dir, "mean_dev.npy"), np.array(mean_dev))
+        np.save(os.path.join(out_dir, "cov_dev.npy"), np.array(cov_dev))
+        np.save(os.path.join(out_dir, "mean_vol.npy"), np.array(mean_vol))
+        np.save(os.path.join(out_dir, "cov_vol.npy"), np.array(cov_vol))
+        np.save(os.path.join(out_dir, "f3x3.npy"), np.array(f3x3_flat))
+        print(f"Exported GP Target Mean and Cov for DEV and VOL to {out_dir}")
+    else:
+        np.save(os.path.join(out_dir, "mean_psi.npy"), np.array(mean_psi))
+        np.save(os.path.join(out_dir, "cov_psi.npy"), np.array(cov_psi))
+        np.save(os.path.join(out_dir, "f3x3.npy"), np.array(f3x3_flat))
+        print(f"Exported GP Target Mean ({mean_psi.shape}) and Cov ({cov_psi.shape}) to {out_dir}")
     
     # Automatically generate the GP sample plot if it's the SEF target
     if args.distill_target == "sef":

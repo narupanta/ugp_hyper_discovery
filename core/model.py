@@ -405,6 +405,28 @@ class SparseHyperelasticityGP:
         cov_full = 0.5 * (cov_full + cov_full.T) # Guarantee symmetry
         return cov_full
 
+    def dev_psi_joint_cov(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
+        p, w = self._resolve_state(params, weights)
+        if f.ndim == 2:
+            f = f[None, ...]
+        feats = jax.vmap(self.feature_extractor.extract)(f)
+        dev = feats[0]
+        k_dz = rbf(dev, p.dev_z, p.dev_sig, p.dev_ls)
+        k_dd = rbf(dev, dev, p.dev_sig, p.dev_ls)
+        cov_mat_dev = k_dd - k_dz @ w.dev_M_mat @ k_dz.T
+        return 0.5 * (cov_mat_dev + cov_mat_dev.T)
+
+    def vol_psi_joint_cov(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
+        p, w = self._resolve_state(params, weights)
+        if f.ndim == 2:
+            f = f[None, ...]
+        feats = jax.vmap(self.feature_extractor.extract)(f)
+        vol = feats[1]
+        k_vz = rbf(vol, p.vol_z, p.vol_sig, p.vol_ls)
+        k_vv = rbf(vol, vol, p.vol_sig, p.vol_ls)
+        cov_mat_vol = k_vv - k_vz @ w.vol_M_mat @ k_vz.T
+        return 0.5 * (cov_mat_vol + cov_mat_vol.T)
+
     def piola_gp_cov_pair(self, f1: jnp.ndarray, f2: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         """Computes double-differentiation cross-covariance between two deformation gradient tensors."""
         p, w = self._resolve_state(params, weights)
