@@ -104,7 +104,7 @@ def plot_fem_verification(I1_bar_true, I2_bar_true, J_true,
     
     # Save files
     os.makedirs(save_path, exist_ok=True)
-    fig1.savefig(os.path.join(save_path, "fem_deployment_accuracy_r2.png"), dpi=600)
+    fig1.savefig(os.path.join(save_path, "fem_deployment_accuracy_r2.pdf"), dpi=600)
     # --- FIGURE 2: Invariant Space Coverage ---
     # Inducing points indices: 0:I1_bar, 1:I2_bar, 2:J
     # z_i1 = inducing_points[:, 0]
@@ -139,7 +139,7 @@ def plot_fem_verification(I1_bar_true, I2_bar_true, J_true,
     axes2[2].set_title(r'$\bar{I}_2 - 3$ vs $(J - 1)^2$')
     fig2.suptitle("Training and testing invariant space", fontsize=20)
     fig2.tight_layout()
-    fig2.savefig(os.path.join(save_path, "invariant_space_coverage.png"), dpi=600)
+    fig2.savefig(os.path.join(save_path, "invariant_space_coverage.pdf"), dpi=600)
 
 
 
@@ -204,7 +204,7 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, save_pa
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
     os.makedirs(save_path, exist_ok=True)
-    plt.savefig(os.path.join(save_path, "displacement_analysis.png"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, "displacement_analysis.pdf"), dpi=300, bbox_inches='tight')
 
 def plot_dataset_viz(data, dataset_name, save_path) :
     # --- 1. Setup Dummy Data (Simulating FEM Output) ---
@@ -291,7 +291,7 @@ def plot_dataset_viz(data, dataset_name, save_path) :
     if not os.path.exists(save_path):
         os.makedirs(save_path)
    
-    plt.savefig(os.path.join(save_path, f"{dataset_name}.png"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, f"{dataset_name}.pdf"), dpi=300, bbox_inches='tight')
 
 # Usage:
 # plot_force_fields(node_coords, cells, R_nodes)
@@ -563,23 +563,50 @@ if __name__ == "__main__" :
     def solve_fem(problem, petsc_options, loads) :
         u_list = []
         u = jnp.zeros_like(problem.mesh[0].points)
-        for i, load in enumerate(loads):
-            print("load step ", i, "= ", load)
-            shape_right = (len(problem.boundary_inds_list[0]), problem.fes[0].num_face_quads, 1)
-            shape_top = (len(problem.boundary_inds_list[1]), problem.fes[0].num_face_quads, 1)
+        current_load = jnp.zeros(2)
 
-            problem.internal_vars_surfaces = [
-                [
-                    jnp.full(fill_value=load[0], shape=shape_right),
-                ],
-                [
-                    jnp.full(fill_value=load[1], shape=shape_top)
-                ]
-            ]
-            u_= solver(problem, solver_options={'petsc_solver': petsc_options,
-                                                    'initial_guess': u})
-            u = u_[0]
+        for i, target_load in enumerate(loads):
+            print("load step ", i, "= ", target_load)
+            success = False
+            current_u = u
+            
+            # Adaptive sub-stepping loop
+            num_substeps = 1
+            while not success:
+                try:
+                    temp_u = current_u
+                    for sub_i in range(1, num_substeps + 1):
+                        fraction = sub_i / num_substeps
+                        intermediate_load = current_load + fraction * (target_load - current_load)
+                        
+                        shape_right = (len(problem.boundary_inds_list[0]), problem.fes[0].num_face_quads, 1)
+                        shape_top = (len(problem.boundary_inds_list[1]), problem.fes[0].num_face_quads, 1)
+
+                        problem.internal_vars_surfaces = [
+                            [
+                                jnp.full(fill_value=intermediate_load[0], shape=shape_right),
+                            ],
+                            [
+                                jnp.full(fill_value=intermediate_load[1], shape=shape_top)
+                            ]
+                        ]
+                        
+                        u_= solver(problem, solver_options={'petsc_solver': petsc_options,
+                                                                'initial_guess': temp_u})
+                        temp_u = u_[0]
+                        
+                    # If we make it here, the step succeeded
+                    u = temp_u
+                    success = True
+                except Exception as e:
+                    print(f"Convergence failed at load {target_load}! Halving the load step (Sub-steps: {num_substeps * 2})")
+                    num_substeps *= 2
+                    if num_substeps > 32:
+                        raise RuntimeError(f"Failed to converge on load step {i} even with 32 sub-steps.")
+            
+            current_load = target_load
             u_list.append(u)
+        
         u_array = jnp.stack(u_list, axis=0)  
         return u_array
 

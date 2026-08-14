@@ -82,7 +82,7 @@ def generate_dic_displacement_plot():
     plt.tight_layout(rect=[0, 0.02, 1, 0.95])
     
     os.makedirs('plots/figures', exist_ok=True)
-    out_path = 'plots/figures/experimental_displacement_field_18617429.png'
+    out_path = 'plots/figures/experimental_displacement_field_18617429.pdf'
     plt.savefig(out_path, bbox_inches='tight')
     plt.close(fig)
     print(f"Successfully generated plot and saved to {out_path}!")

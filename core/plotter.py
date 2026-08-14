@@ -35,7 +35,7 @@ def plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_pa
     ax3_twin.legend(loc='upper right')
 
     plt.tight_layout()
-    fig1.savefig(os.path.join(save_path, "loss_and_physics.png"))
+    fig1.savefig(os.path.join(save_path, "loss_and_physics.pdf"))
 
 def plot_parameters_hist(params_hist, steps_history, save_path):
     # --- FIGURE 1: Inducing Variables & Positions (2x3 Grid) ---
@@ -79,7 +79,7 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    fig1.savefig(os.path.join(save_path, "inducing_state_evolution.png"))
+    fig1.savefig(os.path.join(save_path, "inducing_state_evolution.pdf"))
 
     # --- FIGURE 2: Kernel Hyperparameters ---
     has_aniso = "aniso_gp_lengthscales" in params_hist and len(params_hist["aniso_gp_lengthscales"]) > 0
@@ -119,7 +119,7 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
         ax.set_ylabel("Value")
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    fig2.savefig(os.path.join(save_path, "hyperparameters_evolution.png"))
+    fig2.savefig(os.path.join(save_path, "hyperparameters_evolution.pdf"))
 
     # Optional: If you want to track the physics noise parameter separately:
 
@@ -131,7 +131,7 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     plt.title(r"Physics Residual Noise ($\sigma_{physic}$)")
     plt.yscale('log')
     plt.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(save_path, "physics_noise_evolution.png"))
+    plt.savefig(os.path.join(save_path, "physics_noise_evolution.pdf"))
 
     fig3, axes3 = plt.subplots(1, 2, figsize=(16, 6))
     fig3.suptitle("Evolution of Trend Function (Mean) Parameters", fontsize=16)
@@ -161,7 +161,7 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     axes3[1].grid(True, alpha=0.3)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    fig3.savefig(os.path.join(save_path, "trend_parameters_evolution.png"))
+    fig3.savefig(os.path.join(save_path, "trend_parameters_evolution.pdf"))
 
 def plot_r2_strain_energy_function(psi_pred, psi_true, psi_dev_pred, psi_dev_true, psi_vol_pred, psi_vol_true, save_path) :
     plt.figure(figsize=(8, 6))
@@ -206,7 +206,7 @@ def plot_r2_strain_energy_function(psi_pred, psi_true, psi_dev_pred, psi_dev_tru
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
     # Save to your timestamped folder
-    energy_plot_path = os.path.join(save_path, "energy_parity_combined.png")
+    energy_plot_path = os.path.join(save_path, "energy_parity_combined.pdf")
     plt.savefig(energy_plot_path)
     print(f"Energy parity plots saved to: {energy_plot_path}")
 
@@ -298,7 +298,7 @@ def plot_r2_strain_energy_function(psi_pred, psi_true, psi_dev_pred, psi_dev_tru
 #             ax.legend()
 
 #     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-#     save_file = os.path.join(save_path, f"material_modes_validation_{step}.png")
+#     save_file = os.path.join(save_path, f"material_modes_validation_{step}.pdf")
 #     plt.savefig(save_file)
 #     print(f"Loading mode validation plots saved to: {save_file}")
 
@@ -456,7 +456,7 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
             if i == 0: ax.legend(loc="upper left", framealpha=0.9)
 
     plt.tight_layout()
-    save_file = os.path.join(save_path, f"clamped_validation_{step}.png")
+    save_file = os.path.join(save_path, f"clamped_validation_{step}.pdf")
     plt.savefig(save_file, bbox_inches='tight')
     plt.close()
     print(f"Clamped limits plot saved to: {save_file}")
@@ -549,7 +549,7 @@ def plot_ut_ebt_ps_uc_ebc_ss(learned_gp, true_model, save_path, step):
             ax.legend()
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    save_file = os.path.join(save_path, f"material_modes_validation_{step}.png")
+    save_file = os.path.join(save_path, f"material_modes_validation_{step}.pdf")
     plt.savefig(save_file)
     print(f"Loading mode validation plots saved to: {save_file}")
 
@@ -635,7 +635,7 @@ def plot_stress_validation(gp_model, true_model, save_path):
         axes[i].legend()
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(os.path.join(save_path, "piola_stress_validation.png"))
+    plt.savefig(os.path.join(save_path, "piola_stress_validation.pdf"))
 
 def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path):
     # Setup Figure 1: Inducing points in Feature Space
@@ -659,7 +659,7 @@ def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path):
     axes1[1].set_title("Volumetric Inducing Points")
     axes1[1].legend()
     
-    fig1.savefig(os.path.join(save_path, "inducing_points_features.png"))
+    fig1.savefig(os.path.join(save_path, "inducing_points_features.pdf"))
 
     # --- Setup Figure 2: Standard Load Paths ---
     fig2, axes2 = plt.subplots(1, 3, figsize=(18, 5))
@@ -733,7 +733,7 @@ def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path):
         ax.grid(True, alpha=0.2)
         
     plt.tight_layout()
-    fig2.savefig(os.path.join(save_path, "standard_loading_paths.png"))
+    fig2.savefig(os.path.join(save_path, "standard_loading_paths.pdf"))
 
 
 def plot_stress_validation(gp_model, true_model, save_path):
@@ -818,7 +818,7 @@ def plot_stress_validation(gp_model, true_model, save_path):
         axes[i].legend()
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(os.path.join(save_path, "piola_stress_validation.png"))
+    plt.savefig(os.path.join(save_path, "piola_stress_validation.pdf"))
 
 def plot_deterministic_against_true() :
     raise NotImplementedError
@@ -941,7 +941,7 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
                 ax.legend(loc="upper left", framealpha=0.9)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(save_path, "energy_decomposition.png"), bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, "energy_decomposition.pdf"), bbox_inches='tight')
     plt.close()
 
 # --- FIGURE 2: R2 Plot on Training Data ---
@@ -996,5 +996,5 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path):
     ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(save_path, "training_r2_energy.png"), bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, "training_r2_energy.pdf"), bbox_inches='tight')
     plt.close()

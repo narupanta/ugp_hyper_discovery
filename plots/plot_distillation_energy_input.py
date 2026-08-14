@@ -56,7 +56,7 @@ def main():
             ax.legend(loc='upper left')
             
     plt.tight_layout()
-    save_file = os.path.join(args.saved_model_dir, "distillation_energy_input.png")
+    save_file = os.path.join(args.saved_model_dir, "distillation_energy_input.pdf")
     plt.savefig(save_file, bbox_inches='tight', dpi=150)
     print(f"Saved plot to {save_file}")
 

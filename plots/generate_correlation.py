@@ -133,7 +133,7 @@ def main():
         fig.suptitle(f"Parameter Correlation Pairplot ({args.material_model})", y=1.02, fontsize=16, fontweight='bold')
         plt.tight_layout()
         
-        pairplot_path = os.path.join(out_dir, f"parameter_correlation_{args.material_model}.png")
+        pairplot_path = os.path.join(out_dir, f"parameter_correlation_{args.material_model}.pdf")
         fig.savefig(pairplot_path, dpi=200, bbox_inches='tight')
         plt.close()
         print(f"Saved parameter correlation pairplot to {pairplot_path}")

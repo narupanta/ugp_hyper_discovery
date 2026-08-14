@@ -379,7 +379,7 @@ def main():
         axes[2].grid(True, linestyle='--', alpha=0.6)
         
         fig.tight_layout()
-        fig.savefig(os.path.join(out_dir, "export_invariant_space.png"), dpi=150)
+        fig.savefig(os.path.join(out_dir, "export_invariant_space.pdf"), dpi=150)
         plt.close(fig)
         
         # 2. Distribution Plot
@@ -403,7 +403,7 @@ def main():
         axes[2].set_xlabel("Volumetric Energy")
         
         fig.tight_layout()
-        fig.savefig(os.path.join(out_dir, "export_energy_distribution.png"), dpi=150)
+        fig.savefig(os.path.join(out_dir, "export_energy_distribution.pdf"), dpi=150)
         plt.close(fig)
         print("Successfully saved invariant space and energy distribution plots.")
     except Exception as e:

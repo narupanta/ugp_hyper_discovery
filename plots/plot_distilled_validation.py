@@ -51,8 +51,12 @@ def main():
     
     if saved_model_dir is None:
         source_file = os.path.join(distilled_dir, "source_extraction_dir.txt")
+        dev_source_file = os.path.join(distilled_dir, "dev_source_extraction_dir.txt")
         if os.path.exists(source_file):
             with open(source_file, "r") as f:
+                saved_model_dir = f.read().strip()
+        elif os.path.exists(dev_source_file):
+            with open(dev_source_file, "r") as f:
                 saved_model_dir = f.read().strip()
         else:
             raise ValueError(f"saved_model_dir must be provided if {source_file} does not exist.")
@@ -184,7 +188,7 @@ def main():
     fig_width = 8
     fig_height = 12
     
-    def generate_energy_plot(samples_list, true_psi_list, title_prefix, save_name, gp_mean_list=None, gp_var_list=None):
+    def generate_energy_plot(samples_list, true_psi_list, title_prefix, save_name, gp_mean_list=None, gp_var_list=None, ylabel=r"Strain Energy ($\Psi$)"):
         fig_psi, axes_psi = plt.subplots(3, 2, figsize=(fig_width, fig_height), sharex=True)
         
         for i, name in enumerate(mode_names):
@@ -199,9 +203,17 @@ def main():
                 gp_psi_lower = gp_mean_list[i] - 1.96 * jnp.sqrt(gp_var_list[i])
                 gp_psi_upper = gp_mean_list[i] + 1.96 * jnp.sqrt(gp_var_list[i])
                 gp_cov_psi = jnp.mean((true_psi_list[i] >= gp_psi_lower) & (true_psi_list[i] <= gp_psi_upper))
+                
+                rmse_psi_gp = jnp.sqrt(jnp.mean((gp_mean_list[i] - true_psi_list[i]) ** 2))
+                ss_tot_psi = jnp.sum((true_psi_list[i] - jnp.mean(true_psi_list[i])) ** 2)
+                r2_psi_gp = 1 - jnp.sum((true_psi_list[i] - gp_mean_list[i]) ** 2) / (ss_tot_psi + 1e-12)
+                
                 ax_psi.fill_between(gamma, gp_psi_lower, gp_psi_upper, color='gray', alpha=0.3, label="GP Posterior (95% CI)")
+                ax_psi.plot(gamma, gp_mean_list[i], color='gray', lw=1.5, ls='-', label="GP Mean", zorder=4)
             else:
                 gp_cov_psi = 0.0
+                rmse_psi_gp = 0.0
+                r2_psi_gp = 0.0
             
             # Since GP metrics aren't separated in plotting, we just plot true and distilled samples for dev/vol
             nf_psi_lower = jnp.percentile(samples_list[i], 2.5, axis=0)
@@ -213,8 +225,8 @@ def main():
             ss_tot_psi = jnp.sum((true_psi_list[i] - jnp.mean(true_psi_list[i])) ** 2)
             r2_psi = 1 - jnp.sum((true_psi_list[i] - dist_psi_mean) ** 2) / (ss_tot_psi + 1e-12)
             
-            ax_psi.plot(gamma, samples_list[i].T, color="orange", lw=0.6, alpha=0.35, zorder=2)
-            ax_psi.plot([], [], color="orange", lw=2.0, label=f"Distilled Samples")
+            ax_psi.plot(gamma, samples_list[i].T, color="blue", lw=0.6, alpha=0.35, zorder=2)
+            ax_psi.plot([], [], color="blue", lw=2.0, label=f"Distilled Samples")
             
             annotation_dist_psi = (
                 "Distilled Samples\n" +
@@ -223,9 +235,24 @@ def main():
                 fr"$R^2$: {r2_psi:.4f}"
             )
             
-            ax_psi.annotate(annotation_dist_psi, xy=(0.02, 0.95), xycoords='axes fraction', 
-                            ha='left', va='top', fontsize=9, fontweight='bold',
-                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="orange", lw=1.5, alpha=0.8), zorder=6)
+            if gp_mean_list is not None and gp_var_list is not None:
+                annotation_gp_psi = (
+                    "GP Extraction\n" +
+                    fr"$\mathrm{{EC}}_{{95\%}}$: {gp_cov_psi:.1%}" + "\n" + 
+                    f"RMSE: {rmse_psi_gp:.4f}\n" +
+                    fr"$R^2$: {r2_psi_gp:.4f}"
+                )
+                ax_psi.annotate(annotation_gp_psi, xy=(0.02, 0.95), xycoords='axes fraction', 
+                                ha='left', va='top', fontsize=9, fontweight='bold',
+                                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", lw=1.5, alpha=0.8), zorder=6)
+                
+                ax_psi.annotate(annotation_dist_psi, xy=(0.42, 0.95), xycoords='axes fraction', 
+                                ha='left', va='top', fontsize=9, fontweight='bold',
+                                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="blue", lw=1.5, alpha=0.8), zorder=6)
+            else:
+                ax_psi.annotate(annotation_dist_psi, xy=(0.02, 0.95), xycoords='axes fraction', 
+                                ha='left', va='top', fontsize=9, fontweight='bold',
+                                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="blue", lw=1.5, alpha=0.8), zorder=6)
 
             y_min_psi, y_max_psi = jnp.min(true_psi_list[i]), jnp.max(true_psi_list[i])
             pad_psi = (y_max_psi - y_min_psi) * 0.1 if y_max_psi != y_min_psi else 1.0
@@ -233,7 +260,7 @@ def main():
             ax_psi.set_xlim(0, gamma.max())
             ax_psi.set_title(f"($m={i+1}$) {name}", fontsize=11)
             if col == 0:
-                ax_psi.set_ylabel(r"Strain Energy ($\Psi$)", fontsize=11)
+                ax_psi.set_ylabel(ylabel, fontsize=11)
             if row == 2:
                 ax_psi.set_xlabel(r"Stretch Measure ($\gamma$)", fontsize=11)
             else:
@@ -246,8 +273,7 @@ def main():
 
         handles_psi, labels_psi = axes_psi[0, 0].get_legend_handles_labels()
         fig_psi.legend(handles_psi, labels_psi, loc='lower center', ncol=2, bbox_to_anchor=(0.5, 0.0), fontsize=10, framealpha=1.0)
-        fig_psi.suptitle(title_prefix, fontsize=14, y=0.92)
-        fig_psi.tight_layout(rect=[0, 0.05, 1, 0.91])
+        fig_psi.tight_layout(rect=[0, 0.05, 1, 1])
         save_file = os.path.join(distilled_dir, save_name)
         fig_psi.savefig(save_file, bbox_inches='tight', dpi=200)
         plt.close(fig_psi)
@@ -271,9 +297,9 @@ def main():
                 # Fallback to total energy if model cannot be split
                 psi_true_dev.append(jax.vmap(true_model.psi)(F_mode))
                 psi_true_vol.append(jax.vmap(true_model.psi)(F_mode))
-        generate_energy_plot(dist_psi_dev_samples, psi_true_dev, "DEV Energy", f"distilled_validation_energy_dev_{args.material_model}.png", dev_psi_dist_mean, dev_psi_dist_var)
-        generate_energy_plot(dist_psi_vol_samples, psi_true_vol, "VOL Energy", f"distilled_validation_energy_vol_{args.material_model}.png", vol_psi_dist_mean, vol_psi_dist_var)
-        generate_energy_plot(dist_psi_samples, psi_true, "TOTAL Energy", f"distilled_validation_energy_total_{args.material_model}.png", psi_dist_mean, psi_dist_var)
+        generate_energy_plot(dist_psi_dev_samples, psi_true_dev, "DEV Energy", f"distilled_validation_energy_dev_{args.material_model}.pdf", dev_psi_dist_mean, dev_psi_dist_var, ylabel=r"Deviatoric SEF ($\Psi_{\mathrm{dev}}$)")
+        generate_energy_plot(dist_psi_vol_samples, psi_true_vol, "VOL Energy", f"distilled_validation_energy_vol_{args.material_model}.pdf", vol_psi_dist_mean, vol_psi_dist_var, ylabel=r"Volumetric SEF ($\Psi_{\mathrm{vol}}$)")
+        generate_energy_plot(dist_psi_samples, psi_true, "TOTAL Energy", f"distilled_validation_energy_total_{args.material_model}.pdf", psi_dist_mean, psi_dist_var)
     
     fig_psi, axes_psi = plt.subplots(3, 2, figsize=(fig_width, fig_height), sharex=True)
     fig_p, axes_p = plt.subplots(3, 2, figsize=(fig_width, fig_height), sharex=True)
@@ -311,10 +337,10 @@ def main():
         rmse_psi_gp = jnp.sqrt(jnp.mean((psi_dist_mean[i] - psi_true[i]) ** 2))
         r2_psi_gp = 1 - jnp.sum((psi_true[i] - psi_dist_mean[i]) ** 2) / (ss_tot_psi + 1e-12)
         
-        ax_psi.plot(gamma, dist_psi_samples[i].T, color="orange", lw=0.6, alpha=0.35, zorder=2)
-        ax_psi.plot([], [], color="orange", lw=2.0, label=f"Distilled Samples ({args.material_model.upper()})")
-        ax_psi.plot(gamma, psi_dist_mean[i], color="purple", lw=1.5, label="GP Mean", zorder=4)
-        ax_psi.fill_between(gamma, gp_psi_lower, gp_psi_upper, color="purple", alpha=0.25, zorder=3, label="GP 95% CI")
+        ax_psi.plot(gamma, dist_psi_samples[i].T, color="blue", lw=0.6, alpha=0.35, zorder=2)
+        ax_psi.plot([], [], color="blue", lw=2.0, label=f"Distilled Samples ({args.material_model.upper()})")
+        ax_psi.plot(gamma, psi_dist_mean[i], color="gray", lw=1.5, label="GP Mean", zorder=4)
+        ax_psi.fill_between(gamma, gp_psi_lower, gp_psi_upper, color="gray", alpha=0.3, zorder=3, label="GP Posterior (95% CI)")
         
         annotation_gp_psi = (
             "GP Extraction\n" +
@@ -330,10 +356,10 @@ def main():
         )
         ax_psi.annotate(annotation_gp_psi, xy=(0.02, 0.95), xycoords='axes fraction', 
                         ha='left', va='top', fontsize=9, fontweight='bold',
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="purple", lw=1.5, alpha=0.8), zorder=6)
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", lw=1.5, alpha=0.8), zorder=6)
         ax_psi.annotate(annotation_dist_psi, xy=(0.42, 0.95), xycoords='axes fraction', 
                         ha='left', va='top', fontsize=9, fontweight='bold',
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="orange", lw=1.5, alpha=0.8), zorder=6)
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="blue", lw=1.5, alpha=0.8), zorder=6)
         
         y_min, y_max = jnp.min(psi_true[i]), jnp.max(psi_true[i])
         pad = (y_max - y_min) * 0.1 if y_max != y_min else 0.1
@@ -367,10 +393,10 @@ def main():
         rmse_p_gp = jnp.sqrt(jnp.mean((p_mean_comp - p_true_comp) ** 2))
         r2_p_gp = 1 - jnp.sum((p_true_comp - p_mean_comp) ** 2) / (ss_tot_p + 1e-12)
         
-        ax_p.plot(gamma, p_samples_comp.T, color="orange", lw=0.6, alpha=0.35, zorder=2)
-        ax_p.plot([], [], color="orange", lw=2.0, label=f"Distilled Samples ({args.material_model.upper()})")
-        ax_p.plot(gamma, p_mean_comp, color="purple", lw=1.5, label="GP Mean", zorder=4)
-        ax_p.fill_between(gamma, gp_p_lower, gp_p_upper, color="purple", alpha=0.25, zorder=3, label="GP 95% CI")
+        ax_p.plot(gamma, p_samples_comp.T, color="blue", lw=0.6, alpha=0.35, zorder=2)
+        ax_p.plot([], [], color="blue", lw=2.0, label=f"Distilled Samples ({args.material_model.upper()})")
+        ax_p.plot(gamma, p_mean_comp, color="gray", lw=1.5, label="GP Mean", zorder=4)
+        ax_p.fill_between(gamma, gp_p_lower, gp_p_upper, color="gray", alpha=0.3, zorder=3, label="GP Posterior (95% CI)")
                          
         annotation_gp_p = (
             "GP Extraction\n" +
@@ -386,10 +412,10 @@ def main():
         )
         ax_p.annotate(annotation_gp_p, xy=(0.02, 0.95), xycoords='axes fraction', 
                         ha='left', va='top', fontsize=9, fontweight='bold',
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="purple", lw=1.5, alpha=0.8), zorder=6)
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", lw=1.5, alpha=0.8), zorder=6)
         ax_p.annotate(annotation_dist_p, xy=(0.42, 0.95), xycoords='axes fraction', 
                         ha='left', va='top', fontsize=9, fontweight='bold',
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="orange", lw=1.5, alpha=0.8), zorder=6)
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="blue", lw=1.5, alpha=0.8), zorder=6)
 
         y_min_p, y_max_p = jnp.min(p_true_comp), jnp.max(p_true_comp)
         pad_p = (y_max_p - y_min_p) * 0.1 if y_max_p != y_min_p else 1.0
@@ -425,7 +451,7 @@ def main():
         handles_psi, labels_psi = axes_psi[0, 0].get_legend_handles_labels()
         fig_psi.legend(handles_psi, labels_psi, loc='lower center', ncol=2, bbox_to_anchor=(0.5, 0.0), fontsize=10, framealpha=1.0)
         fig_psi.tight_layout(rect=[0, 0.05, 1, 1])
-        save_file_psi = os.path.join(distilled_dir, f"distilled_validation_energy_{args.material_model}.png")
+        save_file_psi = os.path.join(distilled_dir, f"distilled_validation_energy_{args.material_model}.pdf")
         fig_psi.savefig(save_file_psi, bbox_inches='tight', dpi=200)
         plt.close(fig_psi)
         print(f"Validation Energy plot saved to: {save_file_psi}")
@@ -436,7 +462,7 @@ def main():
     handles_p, labels_p = axes_p[0, 0].get_legend_handles_labels()
     fig_p.legend(handles_p, labels_p, loc='lower center', ncol=2, bbox_to_anchor=(0.5, 0.0), fontsize=10, framealpha=1.0)
     fig_p.tight_layout(rect=[0, 0.05, 1, 1])
-    save_file_p = os.path.join(distilled_dir, f"distilled_validation_stress_{args.material_model}.png")
+    save_file_p = os.path.join(distilled_dir, f"distilled_validation_stress_{args.material_model}.pdf")
     fig_p.savefig(save_file_p, bbox_inches='tight', dpi=200)
     plt.close(fig_p)
     print(f"Validation Stress plot saved to: {save_file_p}")

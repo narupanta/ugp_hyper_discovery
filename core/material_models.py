@@ -335,6 +335,15 @@ class NeoHookeanGMR(GeneralizedMooneyRivlin):
 
 
 
+@register_material("c20_d10_d05")
+@register_material("c20d10d05")
+class CustomGT(GeneralizedMooneyRivlin):
+    def __init__(self, c10=2.0, d1=1.0, d2=0.5, jit_P: bool = True):
+        # Custom Ground Truth Model: C10=2.0, D1=1.0, D2=0.5
+        dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        vol_params = [d1, d2, 0.0]
+        super().__init__(dev_params=dev_params, vol_params=vol_params, jit_P=jit_P)
+
 @register_material("ogden")
 class Ogden(BaseMaterialModel):
     def __init__(self, mu_params, alpha_params, vol_params, jit_P: bool = True):

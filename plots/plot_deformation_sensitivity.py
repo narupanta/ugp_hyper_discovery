@@ -138,7 +138,7 @@ def main():
     fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 1.05), ncol=len(params)//2 + 1, fontsize=12, title="Parameters", title_fontsize=14)
     
     plt.tight_layout()    
-    plot_path = os.path.join(args.distilled_dir, f"{img_prefix}deformation_sensitivity_modes.png")
+    plot_path = os.path.join(args.distilled_dir, f"{img_prefix}deformation_sensitivity_modes.pdf")
     fig.savefig(plot_path, dpi=200, bbox_inches='tight')
     plt.close(fig)
     print(f"Deformation sensitivity plot saved to {plot_path}")

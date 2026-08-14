@@ -29,7 +29,7 @@ def main():
     parser.add_argument("--dataset", type=str, default="dataset/preprocessed/syn_f/isihara_0.0001_0.01_8.0_0.95.npz")
     parser.add_argument("--export_file", type=str, default="extraction/extracted_models/20260714T093804_isihara_0.0001_0.01_8.0_0.95_5_80.0_1/pytorch_export_dataset_f/f3x3.npy", help="Path to exported f3x3.npy to visualize exact sampled points")
     parser.add_argument("--num_samples", type=int, default=192)
-    parser.add_argument("--save_path", type=str, default="distillation/distilled_models/20260727T081506_isihara_gmr_dataset_f_uqmodeldisc/input_invariant_space.png")
+    parser.add_argument("--save_path", type=str, default="distillation/distilled_models/20260727T081506_isihara_gmr_dataset_f_uqmodeldisc/input_invariant_space.pdf")
     args = parser.parse_args()
 
     print(f"Loading dataset {args.dataset}...")

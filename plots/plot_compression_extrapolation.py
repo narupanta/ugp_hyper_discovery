@@ -138,7 +138,7 @@ def main():
                 ax.legend(loc="upper left")
 
     plt.tight_layout()
-    save_file = "compression_extrapolation_gamma10.png"
+    save_file = "compression_extrapolation_gamma10.pdf"
     plt.savefig(save_file, bbox_inches='tight', dpi=150)
     plt.close()
     print(f"Validation plot saved to: {save_file}")

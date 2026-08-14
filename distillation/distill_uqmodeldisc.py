@@ -638,7 +638,7 @@ def main():
             output_subdirectory=args.component,
             project_directory=project_dir,
             device=device,
-            stage_tag="before_sensitivity",
+            stage_tag=pfx("before_sensitivity"),
         )
         t_stage1_dur = time.time() - t0_stage1
         time_records['Stage 1 (Initial Distillation)'] = t_stage1_dur
@@ -652,18 +652,18 @@ def main():
         )
 
         plot_loss_monitoring(
-            os.path.join(out_dir, pfx("loss_history_before_sensitivity.npz")),
+            os.path.join(out_dir, f"loss_history_{pfx('before_sensitivity')}.npz"),
             title_suffix=f"(Stage 1: Before Sensitivity Analysis - {args.component.upper()})" if args.distill_target == "sef_split" else "(Stage 1: Before Sensitivity Analysis)",
-            output_path=os.path.join(out_dir, pfx("loss_monitoring_before_sensitivity.png")),
+            output_path=os.path.join(out_dir, pfx("loss_monitoring_before_sensitivity.pdf")),
             window_size=min(100, max(10, args.n_iterations // 50))
         )
         
         if args.n_iterations >= 100:
             last_10_percent = max(10, int(0.1 * args.n_iterations))
             plot_loss_monitoring(
-                os.path.join(out_dir, pfx("loss_history_before_sensitivity.npz")),
+                os.path.join(out_dir, f"loss_history_{pfx('before_sensitivity')}.npz"),
                 title_suffix=f"(Stage 1: Before Sensitivity Analysis - Last 10% - {args.component.upper()})" if args.distill_target == "sef_split" else "(Stage 1: Before Sensitivity Analysis - Last 10%)",
-                output_path=os.path.join(out_dir, pfx("loss_monitoring_before_sensitivity_last_10_percent.png")),
+                output_path=os.path.join(out_dir, pfx("loss_monitoring_before_sensitivity_last_10_percent.pdf")),
                 window_size=min(100, max(10, last_10_percent // 50)),
                 last_n_iterations=last_10_percent
             )
@@ -696,7 +696,7 @@ def main():
         for j in range(len(full_param_names_pre), len(axes_pre)):
             axes_pre[j].set_visible(False)
         plt.tight_layout()
-        pre_plot_path = os.path.join(out_dir, pfx(f"distributions_before_sensitivity_{args.material_model}.png"))
+        pre_plot_path = os.path.join(out_dir, pfx(f"distributions_before_sensitivity_{args.material_model}.pdf"))
         plt.savefig(pre_plot_path, dpi=200)
         plt.close()
         print(f"Saved pre-sensitivity distribution plot to {pre_plot_path}")
@@ -816,7 +816,7 @@ def main():
                 ax1.legend(lines_1 + lines_2, labels_1 + labels_2, fontsize=11, loc='center right', bbox_to_anchor=(1.0, 0.6))
                 
                 plt.tight_layout()
-                sobol_plot_path = os.path.join(out_dir, pfx("sobol_sensitivity_indices.png"))
+                sobol_plot_path = os.path.join(out_dir, pfx("sobol_sensitivity_indices.pdf"))
                 plt.savefig(sobol_plot_path, dpi=200)
                 plt.close()
                 print(f"Saved Sobol sensitivity bar plot to {sobol_plot_path}")
@@ -901,25 +901,25 @@ def main():
                 output_subdirectory=args.component,
                 project_directory=project_dir,
                 device=device,
-                stage_tag="after_sensitivity",
+                stage_tag=pfx("after_sensitivity"),
             )
             t_stage3_dur = time.time() - t0_stage3
             time_records['Stage 3 (Re-Distillation Pruned Model)'] = t_stage3_dur
             print(f"\n[Time Usage] Stage 3 finished in {t_stage3_dur / 60:.2f} minutes ({t_stage3_dur:.2f} seconds).\n")
             
             plot_loss_monitoring(
-                os.path.join(out_dir, pfx("loss_history_after_sensitivity.npz")),
+                os.path.join(out_dir, f"loss_history_{pfx('after_sensitivity')}.npz"),
                 title_suffix=f"(Stage 2: After Sensitivity Analysis - {args.component.upper()})" if args.distill_target == "sef_split" else "(Stage 2: After Sensitivity Analysis)",
-                output_path=os.path.join(out_dir, pfx("loss_monitoring_after_sensitivity.png")),
+                output_path=os.path.join(out_dir, pfx("loss_monitoring_after_sensitivity.pdf")),
                 window_size=min(100, max(10, args.n_iterations // 50))
             )
             
             if args.n_iterations >= 100:
                 last_10_percent = max(10, int(0.1 * args.n_iterations))
                 plot_loss_monitoring(
-                    os.path.join(out_dir, pfx("loss_history_after_sensitivity.npz")),
+                    os.path.join(out_dir, f"loss_history_{pfx('after_sensitivity')}.npz"),
                     title_suffix=f"(Stage 2: After Sensitivity Analysis - Last 10% - {args.component.upper()})" if args.distill_target == "sef_split" else "(Stage 2: After Sensitivity Analysis - Last 10%)",
-                    output_path=os.path.join(out_dir, pfx("loss_monitoring_after_sensitivity_last_10_percent.png")),
+                    output_path=os.path.join(out_dir, pfx("loss_monitoring_after_sensitivity_last_10_percent.pdf")),
                     window_size=min(100, max(10, last_10_percent // 50)),
                     last_n_iterations=last_10_percent
                 )
@@ -980,7 +980,7 @@ def main():
             axes[j].set_visible(False)
             
         plt.tight_layout()
-        plot_path = os.path.join(out_dir, pfx(f"distributions_{args.material_model}.png"))
+        plot_path = os.path.join(out_dir, pfx(f"distributions_{args.material_model}.pdf"))
         plt.savefig(plot_path, dpi=200)
         plt.close()
         print(f"Saved parameter distributions plot to {plot_path}")
@@ -1061,7 +1061,7 @@ def main():
             fig.suptitle(f"Parameter Correlation Pairplot ({args.material_model})", y=1.02, fontsize=16, fontweight='bold')
             plt.tight_layout()
             
-            pairplot_path = os.path.join(out_dir, pfx(f"parameter_correlation_{args.material_model}.png"))
+            pairplot_path = os.path.join(out_dir, pfx(f"parameter_correlation_{args.material_model}.pdf"))
             fig.savefig(pairplot_path, dpi=200, bbox_inches='tight')
             plt.close()
             print(f"Saved parameter correlation pairplot to {pairplot_path}")

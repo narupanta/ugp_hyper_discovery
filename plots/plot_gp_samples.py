@@ -129,7 +129,7 @@ def main():
             ax.legend()
 
     plt.tight_layout()
-    save_path = os.path.join(args.export_dir, "gp_energy_samples.png")
+    save_path = os.path.join(args.export_dir, "gp_energy_samples.pdf")
     plt.savefig(save_path, dpi=200)
     print(f"Plot saved to {save_path}")
 

@@ -152,7 +152,7 @@ def generate_bc_visualization():
     plt.tight_layout(rect=[0, 0.02, 1, 0.94])
     
     os.makedirs('plots/figures', exist_ok=True)
-    out_path = 'plots/figures/experimental_bc_identification_18617429.png'
+    out_path = 'plots/figures/experimental_bc_identification_18617429.pdf'
     plt.savefig(out_path, bbox_inches='tight')
     plt.close(fig)
     print(f"Successfully generated BC identification visualization and saved to {out_path}!")
