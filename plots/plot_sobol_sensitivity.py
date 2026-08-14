@@ -82,7 +82,7 @@ def main():
     ax1.legend(lines_1 + lines_2, labels_1 + labels_2, fontsize=11, loc='center right', bbox_to_anchor=(1.0, 0.6))
     
     plt.tight_layout()
-    sobol_plot_path = os.path.join(out_dir, "sobol_sensitivity_indices.png")
+    sobol_plot_path = os.path.join(out_dir, "sobol_sensitivity_indices.pdf")
     plt.savefig(sobol_plot_path, dpi=200)
     plt.close()
     print(f"Updated {sobol_plot_path}")

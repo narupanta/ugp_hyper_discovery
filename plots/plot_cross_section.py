@@ -116,7 +116,7 @@ def main():
             ax.legend(loc='upper right')
             
     plt.tight_layout()
-    save_file = os.path.join(args.distilled_dir, f"energy_cross_section_g{args.gamma}.png")
+    save_file = os.path.join(args.distilled_dir, f"energy_cross_section_g{args.gamma}.pdf")
     plt.savefig(save_file, dpi=150)
     plt.close()
     print(f"Plot saved to {save_file}")

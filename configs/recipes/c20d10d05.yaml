@@ -1,16 +1,17 @@
 # ==============================================================================
-# Benchmark Recipe: Isihara Material Model
+# Benchmark Recipe: Custom GT (C10=2.0, D1=1.0, D2=0.5)
 # ==============================================================================
 
 # 1. Synthetic Dataset Generation Config
-material_model_name: isihara
+material_model_name: c20d10d05
 disp_noise: 0.0001
 load_noise: 0.01
-target_load_true_top: 8.0
+target_load_true_top: 4.0
 asym_factor: 0.95
 n_loadsteps: 10
 geometry: block
 mesh_size: 0.08
+
 # 2. UGP Extraction (Training) Config
 number_of_mci_sampling: 8
 train_load_steps_indices: [1, 5, 9]
@@ -23,14 +24,14 @@ extraction_n_iterations: 50000
 extraction_learning_rate: 0.01
 
 # 3. Distillation (Uncertainty-Aware Model Discovery) Config
-distilled_material_model: gmr
-distillation_n_iterations: 2000
+distilled_material_model: gmr_nolog
+distillation_n_iterations: 10
 distill_target: sef_split
 sample_mode: dataset_f
 num_points: 256
 max_gamma: 10.0
 do_sensitivity: 1
-sobol_threshold: 0.0001
+sobol_threshold: 0.001
 sobol_samples_factor: 4096
 
 # 4. Validation Config

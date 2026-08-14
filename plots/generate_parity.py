@@ -87,7 +87,7 @@ def main():
         ax.grid(True, linestyle=':', alpha=0.6)
         ax.legend()
         
-        parity_plot_path = os.path.join(out_dir, f"parameter_parity_{args.material_model}.png")
+        parity_plot_path = os.path.join(out_dir, f"parameter_parity_{args.material_model}.pdf")
         plt.savefig(parity_plot_path, dpi=200)
         plt.close()
         print(f"Saved parameter parity plot to {parity_plot_path}")

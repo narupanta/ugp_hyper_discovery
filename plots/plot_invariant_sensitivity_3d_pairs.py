@@ -151,7 +151,7 @@ def main():
     fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 1.10), ncol=len(active_params), fontsize=12, title="Parameters", title_fontsize=14)
 
     plt.tight_layout()    
-    out_path = os.path.join(args.distilled_dir, f"{img_prefix}invariant_sensitivity_3d.png")
+    out_path = os.path.join(args.distilled_dir, f"{img_prefix}invariant_sensitivity_3d.pdf")
     fig.savefig(out_path, dpi=200, bbox_inches='tight')
     plt.close(fig)
     print(f"Plot saved to: {out_path}")

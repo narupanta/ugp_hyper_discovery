@@ -103,8 +103,8 @@ def main():
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    plt.savefig('energy_distribution.png', dpi=300)
-    print("Saved to energy_distribution.png")
+    plt.savefig('energy_distribution.pdf', dpi=300)
+    print("Saved to energy_distribution.pdf")
 
 if __name__ == "__main__":
     main()

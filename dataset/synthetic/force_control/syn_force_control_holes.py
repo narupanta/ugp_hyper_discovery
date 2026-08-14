@@ -104,7 +104,7 @@ def plot_fem_verification(I1_bar_true, I2_bar_true, J_true,
     
     # Save files
     os.makedirs(save_path, exist_ok=True)
-    fig1.savefig(os.path.join(save_path, "fem_deployment_accuracy_r2.png"), dpi=600)
+    fig1.savefig(os.path.join(save_path, "fem_deployment_accuracy_r2.pdf"), dpi=600)
     # --- FIGURE 2: Invariant Space Coverage ---
     # Inducing points indices: 0:I1_bar, 1:I2_bar, 2:J
     # z_i1 = inducing_points[:, 0]
@@ -139,7 +139,7 @@ def plot_fem_verification(I1_bar_true, I2_bar_true, J_true,
     axes2[2].set_title(r'$\bar{I}_2 - 3$ vs $(J - 1)^2$')
     fig2.suptitle("Training and testing invariant space", fontsize=20)
     fig2.tight_layout()
-    fig2.savefig(os.path.join(save_path, "invariant_space_coverage.png"), dpi=600)
+    fig2.savefig(os.path.join(save_path, "invariant_space_coverage.pdf"), dpi=600)
 
 
 
@@ -204,7 +204,7 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, save_pa
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
     os.makedirs(save_path, exist_ok=True)
-    plt.savefig(os.path.join(save_path, "displacement_analysis.png"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, "displacement_analysis.pdf"), dpi=300, bbox_inches='tight')
 
 def plot_dataset_viz(data, dataset_name, save_path) :
     # --- 1. Setup Dummy Data (Simulating FEM Output) ---
@@ -291,7 +291,7 @@ def plot_dataset_viz(data, dataset_name, save_path) :
     if not os.path.exists(save_path):
         os.makedirs(save_path)
    
-    plt.savefig(os.path.join(save_path, f"{dataset_name}.png"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, f"{dataset_name}.pdf"), dpi=300, bbox_inches='tight')
 
 # Usage:
 # plot_force_fields(node_coords, cells, R_nodes)

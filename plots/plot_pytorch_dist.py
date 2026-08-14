@@ -78,6 +78,6 @@ for i, name in enumerate(parameter_names):
     ax.set_ylabel('Density')
 
 plt.tight_layout()
-out_path = os.path.join(settings.PROJECT_DIR, "pytorch_parameter_distributions.png")
+out_path = os.path.join(settings.PROJECT_DIR, "pytorch_parameter_distributions.pdf")
 plt.savefig(out_path, dpi=150)
 print(f"Saved plot to {out_path}")
