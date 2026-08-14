@@ -161,113 +161,7 @@ class EnergyOutputSelector:
     def __call__(self, outputs):
         return outputs
 
-class PyTorchGMRModel(nn.Module):
-    def __init__(self, num_points, device, include_log_terms=False, distill_target="sef", component="total"):
-        super().__init__()
-        self.include_log_terms = include_log_terms
-        self.distill_target = distill_target
-        self.component = component
-        self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
-        if self.include_log_terms:
-            self._num_parameters = 13
-            self._parameter_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$", "$E$", "$D_{1}$", "$D_{2}$", "$D_{3}$")
-        else:
-            self._num_parameters = 12
-            self._parameter_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$", "$D_{1}$", "$D_{2}$", "$D_{3}$")
-        self._parameter_scales = torch.ones(self._num_parameters, device=device)
-        self._device = device
-        self._num_points = num_points
-        self._parameter_mask = init_parameter_mask(self._num_parameters, device)
-        self._parameter_population_matrix = init_parameter_population_matrix(self._num_parameters, device)
-
-    @property
-    def output_dim(self) -> int: return self._output_dim
-    @property
-    def num_parameters(self) -> int: return self._num_parameters
-    @num_parameters.setter
-    def num_parameters(self, val: int): self._num_parameters = val
-    @property
-    def parameter_names(self): return tuple(self._parameter_names)
-    @parameter_names.setter
-    def parameter_names(self, val): self._parameter_names = tuple(val)
-    @property
-    def parameter_scales(self): return self._parameter_scales
-    @parameter_scales.setter
-    def parameter_scales(self, val): self._parameter_scales = val
-
-    def __call__(self, inputs, test_cases, parameters, validate_args=False):
-        # inputs: [batch, 3, 3] F tensor
-        # parameters: [num_active_parameters]
-        full_parameters = mask_and_populate_parameters(
-            parameters,
-            self._parameter_mask,
-            self._parameter_population_matrix,
-        )
-        
-        # Calculate invariants I1, I2, J
-        C = torch.matmul(inputs.transpose(1, 2), inputs)
-        I1 = torch.diagonal(C, dim1=1, dim2=2).sum(-1)
-        I2 = 0.5 * (I1**2 - torch.diagonal(torch.matmul(C, C), dim1=1, dim2=2).sum(-1))
-        J = torch.det(inputs)
-
-        I1_bar = J**(-2/3) * I1
-        I2_bar = J**(-4/3) * I2
-
-        I1_m3 = I1_bar - 3.0
-        I2_m3 = I2_bar - 3.0
-        J_m1 = J - 1.0
-
-        if self.include_log_terms:
-            C10, C01, C20, C11, C02, C30, C21, C12, C03, E, D1, D2, D3 = full_parameters
-            log1 = torch.log(torch.clamp(I1_bar / 3.0, min=1e-8))
-            log2 = torch.log(torch.clamp(I2_bar / 3.0, min=1e-8))
-            W_log = E * log2
-        else:
-            C10, C01, C20, C11, C02, C30, C21, C12, C03, D1, D2, D3 = full_parameters
-            W_log = 0.0
-
-        W_dev = (C10 * I1_m3 + C01 * I2_m3 +
-                 C20 * I1_m3**2 + C11 * I1_m3 * I2_m3 + C02 * I2_m3**2 +
-                 C30 * I1_m3**3 + C21 * (I1_m3**2) * I2_m3 + C12 * I1_m3 * (I2_m3**2) + C03 * I2_m3**3 +
-                 W_log)
-        
-        W_vol = D1 * J_m1**2 + D2 * J_m1**4 + D3 * J_m1**6
-
-        energy = 0.0
-        if self.component in ["total", "dev"]:
-            energy += W_dev
-        if self.component in ["total", "vol"]:
-            energy += W_vol
-        if self.distill_target in ["sef_stress", "sef_cauchy"]:
-            F_inv_T = torch.linalg.inv(inputs).transpose(1, 2)
-            dJ_dF = J.view(-1, 1, 1) * F_inv_T
-            dI1bar_dF = J.view(-1, 1, 1)**(-2/3) * (2.0 * inputs - (2.0/3.0) * I1.view(-1, 1, 1) * F_inv_T)
-            dI2_dF = 2.0 * I1.view(-1, 1, 1) * inputs - 2.0 * torch.matmul(inputs, torch.matmul(inputs.transpose(1, 2), inputs))
-            dI2bar_dF = J.view(-1, 1, 1)**(-4/3) * (dI2_dF - (4.0/3.0) * I2.view(-1, 1, 1) * F_inv_T)
-            
-            dW_dI1 = C10 + 2.0 * C20 * I1_m3 + C11 * I2_m3 + 3.0 * C30 * (I1_m3**2) + 2.0 * C21 * I1_m3 * I2_m3 + C12 * (I2_m3**2)
-            dW_dI2 = C01 + C11 * I1_m3 + 2.0 * C02 * I2_m3 + C21 * (I1_m3**2) + 2.0 * C12 * I1_m3 * I2_m3 + 3.0 * C03 * (I2_m3**2)
-            if self.include_log_terms:
-                dW_dI2 = dW_dI2 + E / I2_bar
-            dW_dJ = 2.0 * D1 * J_m1 + 4.0 * D2 * (J_m1**3) + 6.0 * D3 * (J_m1**5)
-            
-            if self.component == "dev":
-                dW_dJ = 0.0 * dW_dJ
-            elif self.component == "vol":
-                dW_dI1 = 0.0 * dW_dI1
-                dW_dI2 = 0.0 * dW_dI2
-                
-            stress = dW_dI1.view(-1, 1, 1) * dI1bar_dF + dW_dI2.view(-1, 1, 1) * dI2bar_dF + dW_dJ.view(-1, 1, 1) * dJ_dF
-            if self.distill_target == "sef_cauchy":
-                stress = torch.matmul(stress, inputs.transpose(1, 2)) / J.view(-1, 1, 1)
-            
-            p00 = stress[:, 0, 0]
-            p11 = stress[:, 1, 1]
-            p01 = stress[:, 0, 1]
-            return torch.stack([energy, p00, p11, p01], dim=-1) # shape [num_points, 4]
-        else:
-            return energy.unsqueeze(-1) # shape [num_points, 1]
-        
+class BasePyTorchMaterialModel(nn.Module):
     def deactivate_parameters(self, indices):
         mask_parameters(indices, self._parameter_mask, False)
 
@@ -313,6 +207,218 @@ class PyTorchGMRModel(nn.Module):
         self.parameter_scales = scales
 
 
+class PyTorchGMRModel(BasePyTorchMaterialModel):
+    def __init__(self, num_points, device, include_log_terms=False, distill_target="sef"):
+        super().__init__()
+        self.include_log_terms = include_log_terms
+        self.distill_target = distill_target
+        self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
+        
+        if self.include_log_terms:
+            self._num_parameters = 13
+            self._parameter_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$", "$E$", "$D_{1}$", "$D_{2}$", "$D_{3}$")
+        else:
+            self._num_parameters = 12
+            self._parameter_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$", "$D_{1}$", "$D_{2}$", "$D_{3}$")
+        
+        self._parameter_scales = torch.ones(self._num_parameters, device=device)
+        self._device = device
+        self._num_points = num_points
+        self._parameter_mask = init_parameter_mask(self._num_parameters, device)
+        self._parameter_population_matrix = init_parameter_population_matrix(self._num_parameters, device)
+
+    @property
+    def output_dim(self) -> int: return self._output_dim
+    @property
+    def num_parameters(self) -> int: return self._num_parameters
+    @num_parameters.setter
+    def num_parameters(self, val: int): self._num_parameters = val
+    @property
+    def parameter_names(self): return tuple(self._parameter_names)
+    @parameter_names.setter
+    def parameter_names(self, val): self._parameter_names = tuple(val)
+    @property
+    def parameter_scales(self): return self._parameter_scales
+    @parameter_scales.setter
+    def parameter_scales(self, val): self._parameter_scales = val
+
+    def __call__(self, inputs, test_cases, parameters, validate_args=False):
+        full_parameters = mask_and_populate_parameters(parameters, self._parameter_mask, self._parameter_population_matrix)
+        C = torch.matmul(inputs.transpose(1, 2), inputs)
+        I1 = torch.diagonal(C, dim1=1, dim2=2).sum(-1)
+        I2 = 0.5 * (I1**2 - torch.diagonal(torch.matmul(C, C), dim1=1, dim2=2).sum(-1))
+        J = torch.det(inputs)
+        I1_bar, I2_bar = J**(-2/3) * I1, J**(-4/3) * I2
+        I1_m3, I2_m3, J_m1 = I1_bar - 3.0, I2_bar - 3.0, J - 1.0
+
+        if self.include_log_terms:
+            C10, C01, C20, C11, C02, C30, C21, C12, C03, E, D1, D2, D3 = full_parameters
+            log2 = torch.log(torch.clamp(I2_bar / 3.0, min=1e-8))
+            W_log = E * log2
+        else:
+            C10, C01, C20, C11, C02, C30, C21, C12, C03, D1, D2, D3 = full_parameters
+            W_log = 0.0
+
+        W_dev = (C10 * I1_m3 + C01 * I2_m3 + C20 * I1_m3**2 + C11 * I1_m3 * I2_m3 + C02 * I2_m3**2 +
+                 C30 * I1_m3**3 + C21 * (I1_m3**2) * I2_m3 + C12 * I1_m3 * (I2_m3**2) + C03 * I2_m3**3 + W_log)
+        W_vol = D1 * J_m1**2 + D2 * J_m1**4 + D3 * J_m1**6
+        energy = W_dev + W_vol
+
+        if self.distill_target in ["sef_stress", "sef_cauchy"]:
+            F_inv_T = torch.linalg.inv(inputs).transpose(1, 2)
+            dJ_dF = J.view(-1, 1, 1) * F_inv_T
+            dI1bar_dF = J.view(-1, 1, 1)**(-2/3) * (2.0 * inputs - (2.0/3.0) * I1.view(-1, 1, 1) * F_inv_T)
+            dI2_dF = 2.0 * I1.view(-1, 1, 1) * inputs - 2.0 * torch.matmul(inputs, torch.matmul(inputs.transpose(1, 2), inputs))
+            dI2bar_dF = J.view(-1, 1, 1)**(-4/3) * (dI2_dF - (4.0/3.0) * I2.view(-1, 1, 1) * F_inv_T)
+            
+            dW_dI1 = C10 + 2.0 * C20 * I1_m3 + C11 * I2_m3 + 3.0 * C30 * (I1_m3**2) + 2.0 * C21 * I1_m3 * I2_m3 + C12 * (I2_m3**2)
+            dW_dI2 = C01 + C11 * I1_m3 + 2.0 * C02 * I2_m3 + C21 * (I1_m3**2) + 2.0 * C12 * I1_m3 * I2_m3 + 3.0 * C03 * (I2_m3**2)
+            if self.include_log_terms:
+                dW_dI2 += E / torch.clamp(I2_bar, min=1e-8)
+                
+            dW_dJ = 2.0 * D1 * J_m1 + 4.0 * D2 * J_m1**3 + 6.0 * D3 * J_m1**5
+            P = dW_dI1.view(-1, 1, 1) * dI1bar_dF + dW_dI2.view(-1, 1, 1) * dI2bar_dF + dW_dJ.view(-1, 1, 1) * dJ_dF
+            
+            if self.distill_target == "sef_cauchy":
+                cauchy = (1.0 / J.view(-1, 1, 1)) * torch.matmul(P, inputs.transpose(1, 2))
+                return torch.cat([energy.unsqueeze(1), cauchy[:, 0, 0].unsqueeze(1), cauchy[:, 1, 1].unsqueeze(1), cauchy[:, 0, 1].unsqueeze(1)], dim=1)
+            else:
+                return torch.cat([energy.unsqueeze(1), P[:, 0, 0].unsqueeze(1), P[:, 1, 1].unsqueeze(1), P[:, 0, 1].unsqueeze(1)], dim=1)
+        return energy.unsqueeze(-1)
+
+
+class PyTorchGMRDevModel(BasePyTorchMaterialModel):
+    def __init__(self, num_points, device, include_log_terms=False, distill_target="sef"):
+        super().__init__()
+        self.include_log_terms = include_log_terms
+        self.distill_target = distill_target
+        self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
+        
+        if self.include_log_terms:
+            self._num_parameters = 10
+            self._parameter_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$", "$E$")
+        else:
+            self._num_parameters = 9
+            self._parameter_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$")
+        
+        self._parameter_scales = torch.ones(self._num_parameters, device=device)
+        self._device = device
+        self._num_points = num_points
+        self._parameter_mask = init_parameter_mask(self._num_parameters, device)
+        self._parameter_population_matrix = init_parameter_population_matrix(self._num_parameters, device)
+
+    @property
+    def output_dim(self) -> int: return self._output_dim
+    @property
+    def num_parameters(self) -> int: return self._num_parameters
+    @num_parameters.setter
+    def num_parameters(self, val: int): self._num_parameters = val
+    @property
+    def parameter_names(self): return tuple(self._parameter_names)
+    @parameter_names.setter
+    def parameter_names(self, val): self._parameter_names = tuple(val)
+    @property
+    def parameter_scales(self): return self._parameter_scales
+    @parameter_scales.setter
+    def parameter_scales(self, val): self._parameter_scales = val
+
+    def __call__(self, inputs, test_cases, parameters, validate_args=False):
+        full_parameters = mask_and_populate_parameters(parameters, self._parameter_mask, self._parameter_population_matrix)
+        C = torch.matmul(inputs.transpose(1, 2), inputs)
+        I1 = torch.diagonal(C, dim1=1, dim2=2).sum(-1)
+        I2 = 0.5 * (I1**2 - torch.diagonal(torch.matmul(C, C), dim1=1, dim2=2).sum(-1))
+        J = torch.det(inputs)
+        I1_bar, I2_bar = J**(-2/3) * I1, J**(-4/3) * I2
+        I1_m3, I2_m3 = I1_bar - 3.0, I2_bar - 3.0
+
+        if self.include_log_terms:
+            C10, C01, C20, C11, C02, C30, C21, C12, C03, E = full_parameters
+            log2 = torch.log(torch.clamp(I2_bar / 3.0, min=1e-8))
+            W_log = E * log2
+        else:
+            C10, C01, C20, C11, C02, C30, C21, C12, C03 = full_parameters
+            W_log = 0.0
+
+        W_dev = (C10 * I1_m3 + C01 * I2_m3 + C20 * I1_m3**2 + C11 * I1_m3 * I2_m3 + C02 * I2_m3**2 +
+                 C30 * I1_m3**3 + C21 * (I1_m3**2) * I2_m3 + C12 * I1_m3 * (I2_m3**2) + C03 * I2_m3**3 + W_log)
+        energy = W_dev
+
+        if self.distill_target in ["sef_stress", "sef_cauchy"]:
+            F_inv_T = torch.linalg.inv(inputs).transpose(1, 2)
+            dI1bar_dF = J.view(-1, 1, 1)**(-2/3) * (2.0 * inputs - (2.0/3.0) * I1.view(-1, 1, 1) * F_inv_T)
+            dI2_dF = 2.0 * I1.view(-1, 1, 1) * inputs - 2.0 * torch.matmul(inputs, torch.matmul(inputs.transpose(1, 2), inputs))
+            dI2bar_dF = J.view(-1, 1, 1)**(-4/3) * (dI2_dF - (4.0/3.0) * I2.view(-1, 1, 1) * F_inv_T)
+            
+            dW_dI1 = C10 + 2.0 * C20 * I1_m3 + C11 * I2_m3 + 3.0 * C30 * (I1_m3**2) + 2.0 * C21 * I1_m3 * I2_m3 + C12 * (I2_m3**2)
+            dW_dI2 = C01 + C11 * I1_m3 + 2.0 * C02 * I2_m3 + C21 * (I1_m3**2) + 2.0 * C12 * I1_m3 * I2_m3 + 3.0 * C03 * (I2_m3**2)
+            if self.include_log_terms:
+                dW_dI2 += E / torch.clamp(I2_bar, min=1e-8)
+                
+            P = dW_dI1.view(-1, 1, 1) * dI1bar_dF + dW_dI2.view(-1, 1, 1) * dI2bar_dF
+            
+            if self.distill_target == "sef_cauchy":
+                cauchy = (1.0 / J.view(-1, 1, 1)) * torch.matmul(P, inputs.transpose(1, 2))
+                return torch.cat([energy.unsqueeze(1), cauchy[:, 0, 0].unsqueeze(1), cauchy[:, 1, 1].unsqueeze(1), cauchy[:, 0, 1].unsqueeze(1)], dim=1)
+            else:
+                return torch.cat([energy.unsqueeze(1), P[:, 0, 0].unsqueeze(1), P[:, 1, 1].unsqueeze(1), P[:, 0, 1].unsqueeze(1)], dim=1)
+        return energy.unsqueeze(-1)
+
+
+class PyTorchGMRVolModel(BasePyTorchMaterialModel):
+    def __init__(self, num_points, device, distill_target="sef"):
+        super().__init__()
+        self.distill_target = distill_target
+        self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
+        
+        self._num_parameters = 3
+        self._parameter_names = ("$D_{1}$", "$D_{2}$", "$D_{3}$")
+        
+        self._parameter_scales = torch.ones(self._num_parameters, device=device)
+        self._device = device
+        self._num_points = num_points
+        self._parameter_mask = init_parameter_mask(self._num_parameters, device)
+        self._parameter_population_matrix = init_parameter_population_matrix(self._num_parameters, device)
+
+    @property
+    def output_dim(self) -> int: return self._output_dim
+    @property
+    def num_parameters(self) -> int: return self._num_parameters
+    @num_parameters.setter
+    def num_parameters(self, val: int): self._num_parameters = val
+    @property
+    def parameter_names(self): return tuple(self._parameter_names)
+    @parameter_names.setter
+    def parameter_names(self, val): self._parameter_names = tuple(val)
+    @property
+    def parameter_scales(self): return self._parameter_scales
+    @parameter_scales.setter
+    def parameter_scales(self, val): self._parameter_scales = val
+
+    def __call__(self, inputs, test_cases, parameters, validate_args=False):
+        full_parameters = mask_and_populate_parameters(parameters, self._parameter_mask, self._parameter_population_matrix)
+        J = torch.det(inputs)
+        J_m1 = J - 1.0
+
+        D1, D2, D3 = full_parameters
+
+        W_vol = D1 * J_m1**2 + D2 * J_m1**4 + D3 * J_m1**6
+        energy = W_vol
+
+        if self.distill_target in ["sef_stress", "sef_cauchy"]:
+            F_inv_T = torch.linalg.inv(inputs).transpose(1, 2)
+            dJ_dF = J.view(-1, 1, 1) * F_inv_T
+                
+            dW_dJ = 2.0 * D1 * J_m1 + 4.0 * D2 * J_m1**3 + 6.0 * D3 * J_m1**5
+            P = dW_dJ.view(-1, 1, 1) * dJ_dF
+            
+            if self.distill_target == "sef_cauchy":
+                cauchy = (1.0 / J.view(-1, 1, 1)) * torch.matmul(P, inputs.transpose(1, 2))
+                return torch.cat([energy.unsqueeze(1), cauchy[:, 0, 0].unsqueeze(1), cauchy[:, 1, 1].unsqueeze(1), cauchy[:, 0, 1].unsqueeze(1)], dim=1)
+            else:
+                return torch.cat([energy.unsqueeze(1), P[:, 0, 0].unsqueeze(1), P[:, 1, 1].unsqueeze(1), P[:, 0, 1].unsqueeze(1)], dim=1)
+        return energy.unsqueeze(-1)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, required=True)
@@ -330,8 +436,12 @@ def main():
     parser.add_argument("--max_gamma", type=float, default=1.0, help="Max deformation intensity gamma when sample_mode is standard")
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"], help="Target mode: strain energy function (sef), joint SEF + Piola stress (sef_stress), joint SEF + Cauchy stress (sef_cauchy), or separate DEV and VOL energy (sef_split)")
     parser.add_argument("--component", type=str, default="total", choices=["total", "dev", "vol"], help="Component to distill (used with sef_split)")
+    parser.add_argument("--override_out_dir", type=str, default=None, help="Explicitly specify the output directory for distilled model logs and artifacts (overriding timestamp generation)")
     parser.add_argument("--load_existing_sensitivities", action="store_true", help="Skip Sobol resampling and directly load existing sensitivity CSVs from out_dir")
     args = parser.parse_args()
+    
+    prefix = f"{args.component}_" if args.distill_target == "sef_split" else ""
+    def pfx(filename): return prefix + filename
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -407,7 +517,19 @@ def main():
 
     mock_gp = MockGP(mean_psi, cov_psi, device=device)
     include_log = args.material_model not in ["gmr_nolog", "gmr_no_log"]
-    model = PyTorchGMRModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log, component=args.component)
+    if args.component == "dev":
+        model = PyTorchGMRDevModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log)
+    elif args.component == "vol":
+        model = PyTorchGMRVolModel(num_points, device=device, distill_target=args.distill_target)
+    else:
+        model = PyTorchGMRModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log)
+    
+    if args.distill_target == "sef_split":
+        if args.component == "dev":
+            model.deactivate_parameters([model.num_parameters - 3, model.num_parameters - 2, model.num_parameters - 1])
+        elif args.component == "vol":
+            model.deactivate_parameters(list(range(model.num_parameters - 3)))
+            
     full_param_names_master = model.parameter_names
     output_selector = EnergyOutputSelector(num_outputs=mean_psi.shape[0])
 
@@ -452,13 +574,14 @@ def main():
         mode_str = f"_{args.sample_mode}_g{args.max_gamma}" if args.sample_mode == "standard" else f"_{args.sample_mode}"
         if args.distill_target in ["sef_stress", "sef_cauchy", "sef_split"]:
             mode_str += f"_{args.distill_target}"
-            if args.distill_target == "sef_split":
-                mode_str += f"_{args.component}"
-        out_dir = os.path.abspath(os.path.join("distillation", "distilled_models", f"{current_time}_{true_model_name}{noise_str}_{args.material_model}{mode_str}_uqmodeldisc"))
+        if args.override_out_dir:
+            out_dir = os.path.abspath(args.override_out_dir)
+        else:
+            out_dir = os.path.abspath(os.path.join("distillation", "distilled_models", f"{current_time}_{true_model_name}{noise_str}_{args.material_model}{mode_str}_uqmodeldisc"))
         log_mode = "w"
     os.makedirs(out_dir, exist_ok=True)
     
-    with open(os.path.join(out_dir, "source_extraction_dir.txt"), "w") as f:
+    with open(os.path.join(out_dir, pfx("source_extraction_dir.txt")), "w") as f:
         f.write(args.saved_model_dir)
     
     class TeeLogger(object):
@@ -473,8 +596,8 @@ def main():
             self.terminal.flush()
             self.log.flush()
             
-    sys.stdout = TeeLogger(os.path.join(out_dir, "distillation_log.txt"), mode=log_mode)
-    print(f"\nLogging distillation outputs to {os.path.join(out_dir, 'distillation_log.txt')}")
+    sys.stdout = TeeLogger(os.path.join(out_dir, pfx("distillation_log.txt")), mode=log_mode)
+    print(f"\nLogging distillation outputs to {os.path.join(out_dir, pfx('distillation_log.txt'))}")
     
     settings.PROJECT_DIR = Path(out_dir)
     project_dir = ProjectDirectory(settings)
@@ -483,17 +606,19 @@ def main():
 
     if args.load_distilled_dir and os.path.exists(os.path.join(out_dir, "output", "normalizing_flow_parameters")):
         print("\n========================================================================")
-        print("=== Stage 1: Loading Existing Distilled Model (Skipping Training) ===")
+        model_type_str = f"({args.component.upper()} Split Model)" if args.distill_target == "sef_split" else "(Full Model)"
+        print(f"=== Stage 1: Loading Existing Distilled Model (Skipping Training) {model_type_str} ===")
         print("========================================================================\n")
         distribution = load_normalizing_flow_parameter_distribution(
             model=model,
-            output_subdirectory=".",
+            output_subdirectory=args.component,
             project_directory=project_dir,
             device=device
         )
     else:
         print("\n========================================================================")
-        print("=== Stage 1: Initial Parameter Distillation (Full Model) ===")
+        model_type_str = f"({args.component.upper()} Split Model)" if args.distill_target == "sef_split" else "(Full Model)"
+        print(f"=== Stage 1: Initial Parameter Distillation {model_type_str} ===")
         print("========================================================================\n")
         t0_stage1 = time.time()
 
@@ -510,7 +635,7 @@ def main():
             num_layers_lipschitz_nn=3,
             relative_width_lipschitz_nn=1.0,
             num_iters_lipschitz=10,
-            output_subdirectory=".",
+            output_subdirectory=args.component,
             project_directory=project_dir,
             device=device,
             stage_tag="before_sensitivity",
@@ -521,24 +646,24 @@ def main():
         
         save_normalizing_flow_parameter_distribution(
             distribution=distribution,
-            output_subdirectory=".",
+            output_subdirectory=args.component,
             project_directory=project_dir,
             device=device
         )
 
         plot_loss_monitoring(
-            os.path.join(out_dir, "loss_history_before_sensitivity.npz"),
-            title_suffix="(Stage 1: Before Sensitivity Analysis)",
-            output_path=os.path.join(out_dir, "loss_monitoring_before_sensitivity.png"),
+            os.path.join(out_dir, pfx("loss_history_before_sensitivity.npz")),
+            title_suffix=f"(Stage 1: Before Sensitivity Analysis - {args.component.upper()})" if args.distill_target == "sef_split" else "(Stage 1: Before Sensitivity Analysis)",
+            output_path=os.path.join(out_dir, pfx("loss_monitoring_before_sensitivity.png")),
             window_size=min(100, max(10, args.n_iterations // 50))
         )
         
         if args.n_iterations >= 100:
             last_10_percent = max(10, int(0.1 * args.n_iterations))
             plot_loss_monitoring(
-                os.path.join(out_dir, "loss_history_before_sensitivity.npz"),
-                title_suffix="(Stage 1: Before Sensitivity Analysis - Last 10%)",
-                output_path=os.path.join(out_dir, "loss_monitoring_before_sensitivity_last_10_percent.png"),
+                os.path.join(out_dir, pfx("loss_history_before_sensitivity.npz")),
+                title_suffix=f"(Stage 1: Before Sensitivity Analysis - Last 10% - {args.component.upper()})" if args.distill_target == "sef_split" else "(Stage 1: Before Sensitivity Analysis - Last 10%)",
+                output_path=os.path.join(out_dir, pfx("loss_monitoring_before_sensitivity_last_10_percent.png")),
                 window_size=min(100, max(10, last_10_percent // 50)),
                 last_n_iterations=last_10_percent
             )
@@ -548,8 +673,8 @@ def main():
         print("\nSaving parameter distribution plot before sensitivity analysis...")
         with torch.no_grad():
             samples_pre = distribution.sample(5000).cpu().numpy()
-        full_param_names_pre = full_param_names_master
-        pre_samples_path = os.path.join(out_dir, "flow_samples_before_sensitivity.npy")
+        full_param_names_pre = [n for i, n in enumerate(full_param_names_master) if model._parameter_mask[i].item()]
+        pre_samples_path = os.path.join(out_dir, pfx("flow_samples_before_sensitivity.npy"))
         np.save(pre_samples_path, samples_pre)
         print(f"Saved pre-sensitivity parameter samples to {pre_samples_path}")
         
@@ -571,7 +696,7 @@ def main():
         for j in range(len(full_param_names_pre), len(axes_pre)):
             axes_pre[j].set_visible(False)
         plt.tight_layout()
-        pre_plot_path = os.path.join(out_dir, f"distributions_before_sensitivity_{args.material_model}.png")
+        pre_plot_path = os.path.join(out_dir, pfx(f"distributions_before_sensitivity_{args.material_model}.png"))
         plt.savefig(pre_plot_path, dpi=200)
         plt.close()
         print(f"Saved pre-sensitivity distribution plot to {pre_plot_path}")
@@ -590,9 +715,10 @@ def main():
         if args.load_existing_sensitivities:
             print("Loading existing Sobol sensitivity indices from output/sensitivities...")
             import pandas as pd
-            csv_dir = os.path.join(out_dir, "output", "sensitivities")
+            sens_dir_name = f"{args.component}_sensitivities" if args.distill_target == "sef_split" else "sensitivities"
+            csv_dir = os.path.join(out_dir, "output", sens_dir_name)
             if not os.path.exists(os.path.join(csv_dir, "total_sobol_indices_statistics_output_0.csv")):
-                csv_dir = sensitivities_dir
+                csv_dir = os.path.join(out_dir, sens_dir_name)
             dfs = [pd.read_csv(os.path.join(csv_dir, f"total_sobol_indices_statistics_output_{i}.csv")) for i in range(model._output_dim)]
             param_cols = [c for c in dfs[0].columns if c not in ["Unnamed: 0", ""]]
             means_list = np.array([df.iloc[0][param_cols].values.astype(float) for df in dfs])
@@ -613,7 +739,7 @@ def main():
                 test_cases=test_cases,
                 select_model=True,
                 total_sobol_index_thresshold=args.sobol_threshold,
-                output_subdirectory="sensitivities",
+                output_subdirectory=f"{args.component}_sensitivities" if args.distill_target == "sef_split" else "sensitivities",
                 project_directory=project_dir,
                 device=device,
             )
@@ -622,9 +748,10 @@ def main():
         try:
             import matplotlib.pyplot as plt
             import pandas as pd
-            csv_dir = os.path.join(out_dir, "output", "sensitivities")
+            sens_dir_name = f"{args.component}_sensitivities" if args.distill_target == "sef_split" else "sensitivities"
+            csv_dir = os.path.join(out_dir, "output", sens_dir_name)
             if not os.path.exists(os.path.join(csv_dir, "total_sobol_indices_statistics_output_0.csv")):
-                csv_dir = os.path.join(out_dir, "sensitivities")
+                csv_dir = os.path.join(out_dir, sens_dir_name)
             stats_path = os.path.join(csv_dir, "total_sobol_indices_statistics_output_0.csv")
             first_stats_path = os.path.join(csv_dir, "first_sobol_indices_statistics_output_0.csv")
             if os.path.exists(stats_path) and os.path.exists(first_stats_path):
@@ -632,6 +759,11 @@ def main():
                 df_first = pd.read_csv(first_stats_path).fillna(0.0)
                 
                 param_cols = [c for c in df_tot.columns if c not in ["Unnamed: 0", ""]]
+                
+                # Filter to only active parameters for this component
+                if hasattr(model, 'parameter_names') and model.parameter_names:
+                    param_cols = [c for c in param_cols if c in model.parameter_names]
+                
                 tot_means = df_tot.iloc[0][param_cols].values.astype(float)
                 first_means = df_first.iloc[0][param_cols].values.astype(float)
                 
@@ -669,7 +801,6 @@ def main():
                 ax1.set_title('Material Parameter Sensitivity (Sobol Indices)', fontsize=14, fontweight='bold')
                 ax1.set_xticks(x)
                 ax1.set_xticklabels(sorted_param_cols, fontsize=11, fontweight='bold')
-                # Removed grid
                 
                 ax2 = ax1.twinx()
                 ax2.plot(x, est_coverage_pct, color='black', marker='o', linestyle='-', linewidth=2, markersize=6, label="Estimated Coverage (EC)")
@@ -685,7 +816,7 @@ def main():
                 ax1.legend(lines_1 + lines_2, labels_1 + labels_2, fontsize=11, loc='center right', bbox_to_anchor=(1.0, 0.6))
                 
                 plt.tight_layout()
-                sobol_plot_path = os.path.join(out_dir, "sobol_sensitivity_indices.png")
+                sobol_plot_path = os.path.join(out_dir, pfx("sobol_sensitivity_indices.png"))
                 plt.savefig(sobol_plot_path, dpi=200)
                 plt.close()
                 print(f"Saved Sobol sensitivity bar plot to {sobol_plot_path}")
@@ -699,7 +830,8 @@ def main():
         # Custom parameter selection logic
         try:
             import pandas as pd
-            csv_dir = os.path.join(out_dir, "sensitivities")
+            sens_dir_name = f"{args.component}_sensitivities" if args.distill_target == "sef_split" else "sensitivities"
+            csv_dir = os.path.join(out_dir, sens_dir_name)
             stats_path = os.path.join(csv_dir, "total_sobol_indices_statistics_output_0.csv")
             first_stats_path = os.path.join(csv_dir, "first_sobol_indices_statistics_output_0.csv")
             
@@ -746,7 +878,8 @@ def main():
             model.activate_parameters(list(range(model.num_parameters)))
         elif len(active_names) < model.num_parameters:
             print("\n========================================================================")
-            print("=== Stage 3: Re-distillation with Sensitive Parameters Only ===")
+            model_type_str = f"({args.component.upper()} Split Model)" if args.distill_target == "sef_split" else "(Sparse Model)"
+            print(f"=== Stage 2: Target Sub-Parameter Distillation {model_type_str} ===")
             print("========================================================================\n")
             model.reduce_to_activated_parameters()
             print(f"Reduced model active parameters ({model.num_parameters}): {model.parameter_names}")
@@ -765,7 +898,7 @@ def main():
                 num_layers_lipschitz_nn=3,
                 relative_width_lipschitz_nn=1.0,
                 num_iters_lipschitz=10,
-                output_subdirectory=".",
+                output_subdirectory=args.component,
                 project_directory=project_dir,
                 device=device,
                 stage_tag="after_sensitivity",
@@ -775,18 +908,18 @@ def main():
             print(f"\n[Time Usage] Stage 3 finished in {t_stage3_dur / 60:.2f} minutes ({t_stage3_dur:.2f} seconds).\n")
             
             plot_loss_monitoring(
-                os.path.join(out_dir, "loss_history_after_sensitivity.npz"),
-                title_suffix="(Stage 3: After Sensitivity Analysis)",
-                output_path=os.path.join(out_dir, "loss_monitoring_after_sensitivity.png"),
+                os.path.join(out_dir, pfx("loss_history_after_sensitivity.npz")),
+                title_suffix=f"(Stage 2: After Sensitivity Analysis - {args.component.upper()})" if args.distill_target == "sef_split" else "(Stage 2: After Sensitivity Analysis)",
+                output_path=os.path.join(out_dir, pfx("loss_monitoring_after_sensitivity.png")),
                 window_size=min(100, max(10, args.n_iterations // 50))
             )
             
             if args.n_iterations >= 100:
                 last_10_percent = max(10, int(0.1 * args.n_iterations))
                 plot_loss_monitoring(
-                    os.path.join(out_dir, "loss_history_after_sensitivity.npz"),
-                    title_suffix="(Stage 3: After Sensitivity Analysis - Last 10%)",
-                    output_path=os.path.join(out_dir, "loss_monitoring_after_sensitivity_last_10_percent.png"),
+                    os.path.join(out_dir, pfx("loss_history_after_sensitivity.npz")),
+                    title_suffix=f"(Stage 2: After Sensitivity Analysis - Last 10% - {args.component.upper()})" if args.distill_target == "sef_split" else "(Stage 2: After Sensitivity Analysis - Last 10%)",
+                    output_path=os.path.join(out_dir, pfx("loss_monitoring_after_sensitivity_last_10_percent.png")),
                     window_size=min(100, max(10, last_10_percent // 50)),
                     last_n_iterations=last_10_percent
                 )
@@ -796,7 +929,7 @@ def main():
     # Save the PyTorch Normalizing Flow model weights
     save_normalizing_flow_parameter_distribution(
         distribution=distribution,
-        output_subdirectory=".",
+        output_subdirectory=args.component,
         project_directory=project_dir,
         device=device
     )
@@ -811,7 +944,7 @@ def main():
         else:
             samples_np = samples.cpu().numpy()
             
-        samples_path = os.path.join(settings.PROJECT_DIR, "flow_samples.npy")
+        samples_path = os.path.join(settings.PROJECT_DIR, pfx("flow_samples.npy"))
         np.save(samples_path, samples_np)
         print(f"Saved distilled PyTorch parameter samples (shape: {samples_np.shape}) to {samples_path}")
 
@@ -847,7 +980,7 @@ def main():
             axes[j].set_visible(False)
             
         plt.tight_layout()
-        plot_path = os.path.join(out_dir, f"distributions_{args.material_model}.png")
+        plot_path = os.path.join(out_dir, pfx(f"distributions_{args.material_model}.png"))
         plt.savefig(plot_path, dpi=200)
         plt.close()
         print(f"Saved parameter distributions plot to {plot_path}")
@@ -928,7 +1061,7 @@ def main():
             fig.suptitle(f"Parameter Correlation Pairplot ({args.material_model})", y=1.02, fontsize=16, fontweight='bold')
             plt.tight_layout()
             
-            pairplot_path = os.path.join(out_dir, f"parameter_correlation_{args.material_model}.png")
+            pairplot_path = os.path.join(out_dir, pfx(f"parameter_correlation_{args.material_model}.png"))
             fig.savefig(pairplot_path, dpi=200, bbox_inches='tight')
             plt.close()
             print(f"Saved parameter correlation pairplot to {pairplot_path}")
@@ -938,21 +1071,25 @@ def main():
     except Exception as e:
         print(f"Error generating parameter correlation pairplot: {e}")
 
-    
-    # Run validation plot script
-    try:
-        import subprocess
-        subprocess.run(["python3", "plots/plot_distilled_validation.py", 
-                        "--distilled_dir", out_dir, 
-                        "--material_model", args.material_model], check=True)
-    except Exception as e:
-        print(f"Error running validation plots: {e}")
+    # Run validation plot scripts (only if not sef_split, otherwise we wait for both to finish in bash script)
+    if args.distill_target != "sef_split":
+        try:
+            import subprocess
+            subprocess.run(["python3", "plots/plot_distilled_validation.py", 
+                            "--distilled_dir", out_dir, 
+                            "--material_model", args.material_model,
+                            "--distill_target", args.distill_target], check=True)
+        except Exception as e:
+            print(f"Error running validation plots: {e}")
 
     # Run deformation sensitivity plot script
     try:
+        active_params_str = ",".join(model.parameter_names)
         import subprocess
-        subprocess.run(["python3", "plots/plot_deformation_sensitivity.py", 
-                        "--distilled_dir", out_dir], check=True)
+        cmd = ["python3", "plots/plot_deformation_sensitivity.py", "--distilled_dir", out_dir, "--active_params", active_params_str]
+        if args.distill_target == "sef_split":
+            cmd.extend(["--component", args.component, "--distill_target", args.distill_target])
+        subprocess.run(cmd, check=True)
     except Exception as e:
         print(f"Error running deformation sensitivity plots: {e}")
 
@@ -960,12 +1097,13 @@ def main():
     try:
         active_params_str = ",".join(model.parameter_names)
         
-        subprocess.run(["python3", "plots/plot_invariant_sensitivity.py", 
-                        "--distilled_dir", out_dir, "--active_params", active_params_str], check=True)
-        subprocess.run(["python3", "plots/plot_invariant_sensitivity_3d_pairs.py", 
-                        "--distilled_dir", out_dir, "--active_params", active_params_str], check=True)
-        subprocess.run(["python3", "plots/plot_invariant_sensitivity_3d_interactive.py", 
-                        "--distilled_dir", out_dir, "--active_params", active_params_str], check=True)
+        base_cmd = ["python3", "--distilled_dir", out_dir, "--active_params", active_params_str]
+        if args.distill_target == "sef_split":
+            base_cmd.extend(["--component", args.component, "--distill_target", args.distill_target])
+            
+        subprocess.run([base_cmd[0], "plots/plot_invariant_sensitivity.py"] + base_cmd[1:], check=True)
+        subprocess.run([base_cmd[0], "plots/plot_invariant_sensitivity_3d_pairs.py"] + base_cmd[1:], check=True)
+        subprocess.run([base_cmd[0], "plots/plot_invariant_sensitivity_3d_interactive.py"] + base_cmd[1:], check=True)
     except Exception as e:
         print(f"Error running invariant sensitivity plots: {e}")
 

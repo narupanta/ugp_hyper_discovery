@@ -221,13 +221,18 @@ if [ "$SKIP_DISTILL" == "true" ]; then
 else
     echo "--- Step 3: Distillation ($DIST_MODEL candidate expression, $DIST_ITERS iterations) ---"
     if [ "$DIST_TARGET" == "sef_split" ]; then
-        echo "Distilling DEV component..."
+        CURRENT_TIME=$(date +"%Y%m%dT%H%M%S")
+        SHARED_OUT_DIR="distillation/distilled_models/${CURRENT_TIME}_${MODEL}_${DIST_MODEL}_${SAMPLE_MODE}_${DIST_TARGET}_uqmodeldisc"
+        mkdir -p "$SHARED_OUT_DIR"
+        
+        echo "Distilling DEV component into $SHARED_OUT_DIR..."
         python3 distillation/distill_uqmodeldisc.py \
             --saved_model_dir "$SAVED_DIR" \
             --material_model "$DIST_MODEL" \
             --n_iterations "$DIST_ITERS" \
             --distill_target "$DIST_TARGET" \
             --component "dev" \
+            --override_out_dir "$SHARED_OUT_DIR" \
             --sample_mode "$SAMPLE_MODE" \
             --num_points "$NUM_POINTS" \
             --max_gamma "$MAX_GAMMA" \
@@ -235,13 +240,14 @@ else
             --sobol_samples_factor "$SOBOL_FACTOR" \
             $SENSITIVITY_FLAG &
             
-        echo "Distilling VOL component..."
+        echo "Distilling VOL component into $SHARED_OUT_DIR..."
         python3 distillation/distill_uqmodeldisc.py \
             --saved_model_dir "$SAVED_DIR" \
             --material_model "$DIST_MODEL" \
             --n_iterations "$DIST_ITERS" \
             --distill_target "$DIST_TARGET" \
             --component "vol" \
+            --override_out_dir "$SHARED_OUT_DIR" \
             --sample_mode "$SAMPLE_MODE" \
             --num_points "$NUM_POINTS" \
             --max_gamma "$MAX_GAMMA" \
@@ -250,6 +256,14 @@ else
             $SENSITIVITY_FLAG &
             
         wait
+        
+        echo "Generating split validation plots..."
+        python3 plots/plot_distilled_validation.py \
+            --distilled_dir "$SHARED_OUT_DIR" \
+            --saved_model_dir "$SAVED_DIR" \
+            --material_model "$DIST_MODEL" \
+            --distill_target "$DIST_TARGET"
+            
     else
         python3 distillation/distill_uqmodeldisc.py \
             --saved_model_dir "$SAVED_DIR" \

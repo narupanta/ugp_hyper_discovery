@@ -22,9 +22,22 @@ def main():
     parser = argparse.ArgumentParser(description="Plot invariant-dependent Sobol indices in 3D pairs")
     parser.add_argument("--distilled_dir", type=str, required=True, help="Path to the distilled model directory")
     parser.add_argument("--active_params", type=str, default=None, help="Comma-separated list of active parameters")
+    parser.add_argument("--component", type=str, default="dev", choices=["dev", "vol"], help="Component for split model")
+    parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
     args = parser.parse_args()
     
-    csv_path = os.path.join(args.distilled_dir, "output", "sensitivities", "total_sobol_indices_output_0.csv")
+    if args.distill_target == "sef_split":
+        sens_dir_name = f"{args.component}_sensitivities"
+        source_txt_name = f"{args.component}_source_extraction_dir.txt"
+        img_prefix = f"{args.component}_"
+    else:
+        sens_dir_name = "sensitivities"
+        source_txt_name = "source_extraction_dir.txt"
+        img_prefix = ""
+
+    csv_path = os.path.join(args.distilled_dir, "output", sens_dir_name, "total_sobol_indices_output_0.csv")
+    if not os.path.exists(csv_path):
+        csv_path = os.path.join(args.distilled_dir, sens_dir_name, "total_sobol_indices_output_0.csv")
     if not os.path.exists(csv_path):
         print(f"Error: {csv_path} not found.")
         return
@@ -34,7 +47,7 @@ def main():
     exclude_cols = ['test cases', 'Unnamed: 0']
     params = [c for c in df.columns if c not in exclude_cols and not c.startswith('Unnamed')]
     
-    source_txt = os.path.join(args.distilled_dir, "source_extraction_dir.txt")
+    source_txt = os.path.join(args.distilled_dir, source_txt_name)
     if not os.path.exists(source_txt):
         print(f"Error: {source_txt} not found.")
         return
@@ -137,9 +150,10 @@ def main():
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 1.10), ncol=len(active_params), fontsize=12, title="Parameters", title_fontsize=14)
 
-    plt.tight_layout()
-    out_path = os.path.join(args.distilled_dir, "invariant_sensitivity_3d_pairs.png")
-    plt.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.tight_layout()    
+    out_path = os.path.join(args.distilled_dir, f"{img_prefix}invariant_sensitivity_3d.png")
+    fig.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
     print(f"Plot saved to: {out_path}")
 
 if __name__ == "__main__":

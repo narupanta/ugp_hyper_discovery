@@ -17,9 +17,23 @@ def extract_gamma(F, mode_idx):
 def main():
     parser = argparse.ArgumentParser(description="Plot deformation-dependent Sobol indices")
     parser.add_argument("--distilled_dir", type=str, required=True, help="Path to the distilled model directory")
+    parser.add_argument("--active_params", type=str, default=None, help="Comma-separated list of active parameters")
+    parser.add_argument("--component", type=str, default="dev", choices=["dev", "vol"], help="Component for split model")
+    parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
     args = parser.parse_args()
     
-    csv_path = os.path.join(args.distilled_dir, "output", "sensitivities", "total_sobol_indices_output_0.csv")
+    if args.distill_target == "sef_split":
+        sens_dir_name = f"{args.component}_sensitivities"
+        source_txt_name = f"{args.component}_source_extraction_dir.txt"
+        img_prefix = f"{args.component}_"
+    else:
+        sens_dir_name = "sensitivities"
+        source_txt_name = "source_extraction_dir.txt"
+        img_prefix = ""
+        
+    csv_path = os.path.join(args.distilled_dir, "output", sens_dir_name, "total_sobol_indices_output_0.csv")
+    if not os.path.exists(csv_path):
+        csv_path = os.path.join(args.distilled_dir, sens_dir_name, "total_sobol_indices_output_0.csv")
     if not os.path.exists(csv_path):
         print(f"Error: {csv_path} not found.")
         return
@@ -30,8 +44,13 @@ def main():
     exclude_cols = ['test cases', 'Unnamed: 0']
     params = [c for c in df.columns if c not in exclude_cols and not c.startswith('Unnamed')]
     
+    if args.active_params:
+        active_params_list = [p.strip() for p in args.active_params.split(',') if p.strip() in params]
+        if active_params_list:
+            params = active_params_list
+    
     # Find the source extraction directory to load f3x3.npy
-    source_txt = os.path.join(args.distilled_dir, "source_extraction_dir.txt")
+    source_txt = os.path.join(args.distilled_dir, source_txt_name)
     if not os.path.exists(source_txt):
         print(f"Error: {source_txt} not found. Cannot determine gamma stretch.")
         return
@@ -118,10 +137,11 @@ def main():
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 1.05), ncol=len(params)//2 + 1, fontsize=12, title="Parameters", title_fontsize=14)
     
-    plt.tight_layout()
-    out_path = os.path.join(args.distilled_dir, "deformation_sensitivity_modes.png")
-    plt.savefig(out_path, dpi=200, bbox_inches='tight')
-    print(f"Plot saved to: {out_path}")
+    plt.tight_layout()    
+    plot_path = os.path.join(args.distilled_dir, f"{img_prefix}deformation_sensitivity_modes.png")
+    fig.savefig(plot_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Deformation sensitivity plot saved to {plot_path}")
 
 if __name__ == "__main__":
     main()
