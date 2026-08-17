@@ -12,7 +12,7 @@ n_loadsteps: 10
 geometry: block
 mesh_size: 0.08
 # 2. UGP Extraction (Training) Config
-number_of_mci_sampling: 32
+number_of_mci_sampling: 16
 train_load_steps_indices: [1, 5, 9]
 n_ip: 5
 beta: 1.0
@@ -24,7 +24,7 @@ extraction_learning_rate: 0.01
 
 # 3. Distillation (Uncertainty-Aware Model Discovery) Config
 distilled_material_model: gmr
-distillation_n_iterations: 2000
+distillation_n_iterations: 20000
 distill_target: sef_split
 sample_mode: dataset_all
 num_points: 128
