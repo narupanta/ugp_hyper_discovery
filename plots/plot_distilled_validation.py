@@ -188,7 +188,7 @@ def main():
     fig_width = 8
     fig_height = 12
     
-    def generate_energy_plot(samples_list, true_psi_list, title_prefix, save_name, gp_mean_list=None, gp_var_list=None, ylabel=r"Strain Energy ($\Psi$)"):
+    def generate_energy_plot(samples_list, true_psi_list, title_prefix, save_name, gp_mean_list=None, gp_var_list=None, ylabel=r"Strain Energy ($\Psi$)", dist_color="blue"):
         fig_psi, axes_psi = plt.subplots(3, 2, figsize=(fig_width, fig_height), sharex=True)
         
         for i, name in enumerate(mode_names):
@@ -208,8 +208,8 @@ def main():
                 ss_tot_psi = jnp.sum((true_psi_list[i] - jnp.mean(true_psi_list[i])) ** 2)
                 r2_psi_gp = 1 - jnp.sum((true_psi_list[i] - gp_mean_list[i]) ** 2) / (ss_tot_psi + 1e-12)
                 
-                ax_psi.fill_between(gamma, gp_psi_lower, gp_psi_upper, color='gray', alpha=0.3, label="GP Posterior (95% CI)")
-                ax_psi.plot(gamma, gp_mean_list[i], color='gray', lw=1.5, ls='-', label="GP Mean", zorder=4)
+                ax_psi.fill_between(gamma, gp_psi_lower, gp_psi_upper, color='gray', alpha=0.3, label="GP 95% CI")
+                ax_psi.plot(gamma, gp_mean_list[i], color='gray', lw=1.5, ls='-', label="GP mean", zorder=4)
             else:
                 gp_cov_psi = 0.0
                 rmse_psi_gp = 0.0
@@ -225,8 +225,10 @@ def main():
             ss_tot_psi = jnp.sum((true_psi_list[i] - jnp.mean(true_psi_list[i])) ** 2)
             r2_psi = 1 - jnp.sum((true_psi_list[i] - dist_psi_mean) ** 2) / (ss_tot_psi + 1e-12)
             
-            ax_psi.plot(gamma, samples_list[i].T, color="blue", lw=0.6, alpha=0.35, zorder=2)
-            ax_psi.plot([], [], color="blue", lw=2.0, label=f"Distilled Samples")
+            ax_psi.fill_between(gamma, nf_psi_lower, nf_psi_upper, color=dist_color, alpha=0.15, label="Distilled 95%CI", zorder=2)
+            ax_psi.plot(gamma, samples_list[i].T, color=dist_color, lw=0.6, alpha=0.1, zorder=1)
+            ax_psi.plot([], [], color=dist_color, lw=0.6, alpha=0.5, label="Distilled Samples")
+            ax_psi.plot(gamma, dist_psi_mean, color=dist_color, lw=2.0, label="Distilled Mean", zorder=3)
             
             annotation_dist_psi = (
                 "Distilled Samples\n" +
@@ -248,11 +250,11 @@ def main():
                 
                 ax_psi.annotate(annotation_dist_psi, xy=(0.42, 0.95), xycoords='axes fraction', 
                                 ha='left', va='top', fontsize=9, fontweight='bold',
-                                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="blue", lw=1.5, alpha=0.8), zorder=6)
+                                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=dist_color, lw=1.5, alpha=0.8), zorder=6)
             else:
                 ax_psi.annotate(annotation_dist_psi, xy=(0.02, 0.95), xycoords='axes fraction', 
                                 ha='left', va='top', fontsize=9, fontweight='bold',
-                                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="blue", lw=1.5, alpha=0.8), zorder=6)
+                                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=dist_color, lw=1.5, alpha=0.8), zorder=6)
 
             y_min_psi, y_max_psi = jnp.min(true_psi_list[i]), jnp.max(true_psi_list[i])
             pad_psi = (y_max_psi - y_min_psi) * 0.1 if y_max_psi != y_min_psi else 1.0
@@ -272,7 +274,16 @@ def main():
             ax_psi.tick_params(axis='both', labelsize=10)
 
         handles_psi, labels_psi = axes_psi[0, 0].get_legend_handles_labels()
-        fig_psi.legend(handles_psi, labels_psi, loc='lower center', ncol=2, bbox_to_anchor=(0.5, 0.0), fontsize=10, framealpha=1.0)
+        by_label = dict(zip(labels_psi, handles_psi))
+        ordered_labels = ["Ground Truth", "GP mean", "GP 95% CI", "Distilled Mean", "Distilled 95%CI", "Distilled Samples"]
+        final_handles = []
+        final_labels = []
+        for l in ordered_labels:
+            if l in by_label:
+                final_labels.append(l)
+                final_handles.append(by_label[l])
+                
+        fig_psi.legend(final_handles, final_labels, loc='lower center', ncol=3, bbox_to_anchor=(0.5, 0.0), fontsize=10, framealpha=1.0)
         fig_psi.tight_layout(rect=[0, 0.05, 1, 1])
         save_file = os.path.join(distilled_dir, save_name)
         fig_psi.savefig(save_file, bbox_inches='tight', dpi=200)
@@ -297,9 +308,9 @@ def main():
                 # Fallback to total energy if model cannot be split
                 psi_true_dev.append(jax.vmap(true_model.psi)(F_mode))
                 psi_true_vol.append(jax.vmap(true_model.psi)(F_mode))
-        generate_energy_plot(dist_psi_dev_samples, psi_true_dev, "DEV Energy", f"distilled_validation_energy_dev_{args.material_model}.pdf", dev_psi_dist_mean, dev_psi_dist_var, ylabel=r"Deviatoric SEF ($\Psi_{\mathrm{dev}}$)")
-        generate_energy_plot(dist_psi_vol_samples, psi_true_vol, "VOL Energy", f"distilled_validation_energy_vol_{args.material_model}.pdf", vol_psi_dist_mean, vol_psi_dist_var, ylabel=r"Volumetric SEF ($\Psi_{\mathrm{vol}}$)")
-        generate_energy_plot(dist_psi_samples, psi_true, "TOTAL Energy", f"distilled_validation_energy_total_{args.material_model}.pdf", psi_dist_mean, psi_dist_var)
+        generate_energy_plot(dist_psi_dev_samples, psi_true_dev, "DEV Energy", f"distilled_validation_energy_dev_{args.material_model}.pdf", dev_psi_dist_mean, dev_psi_dist_var, ylabel=r"Deviatoric SEF ($\Psi_{\mathrm{dev}}$)", dist_color="#0072B2")
+        generate_energy_plot(dist_psi_vol_samples, psi_true_vol, "VOL Energy", f"distilled_validation_energy_vol_{args.material_model}.pdf", vol_psi_dist_mean, vol_psi_dist_var, ylabel=r"Volumetric SEF ($\Psi_{\mathrm{vol}}$)", dist_color="#D55E00")
+        generate_energy_plot(dist_psi_samples, psi_true, "TOTAL Energy", f"distilled_validation_energy_total_{args.material_model}.pdf", psi_dist_mean, psi_dist_var, dist_color="#009E73")
     
     fig_psi, axes_psi = plt.subplots(3, 2, figsize=(fig_width, fig_height), sharex=True)
     fig_p, axes_p = plt.subplots(3, 2, figsize=(fig_width, fig_height), sharex=True)

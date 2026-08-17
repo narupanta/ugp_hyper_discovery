@@ -544,7 +544,7 @@ def main():
         parts = model_folder_name.split('_')
         
         true_model_name = "isihara" # We can just hardcode or infer it
-        for p in ["isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4"]:
+        for p in ["isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
             if p in parts:
                 true_model_name = p
                 break
@@ -560,6 +560,8 @@ def main():
             true_params = {"$C_{10}$": true_model.dev_params[0], "$D_{2}$": true_model.vol_params[1]}
         elif true_model_name in ["gentthomas"]:
             true_params = {"$C_{10}$": true_model.dev_params[0], "$E$": true_model.dev_params[9], "$D_{1}$": true_model.vol_params[0]}
+        elif true_model_name in ["c20d10d05", "c20_d10_d05"]:
+            true_params = {"$C_{10}$": true_model.dev_params[0], "$D_{1}$": true_model.vol_params[0], "$D_{2}$": true_model.vol_params[1]}
         source_type = "exp" if any(x in model_folder_name.lower() for x in ["exp", "dic", "18617429"]) else "syn"
         noise_str = f"_{source_type}"
         if len(parts) >= 4:
@@ -994,82 +996,143 @@ def main():
         # Filter df to only include active parameters
         active_params_list = [col for col in full_param_names if col in model.parameter_names]
         
-        if len(active_params_list) > 1:
-            print("Generating parameter correlation pairplot...")
-            df_active = df[active_params_list]
-            
-            # Use a smaller subset of samples if there are too many, to speed up plotting and reduce file size
-            df_sample = df_active.sample(n=min(1000, len(df_active)), random_state=42)
-            
-            n_params = len(active_params_list)
-            fig, axes = plt.subplots(n_params, n_params, figsize=(n_params*2.5, n_params*2.5))
-            
-            for i in range(n_params):
-                for j in range(n_params):
-                    ax = axes[i, j]
-                    col_i = active_params_list[i]
-                    col_j = active_params_list[j]
-                    
-                    if i < j:
-                        # Upper triangle - hide
-                        ax.set_visible(False)
-                    elif i == j:
-                        # Diagonal - Histogram
-                        data = df_sample[col_i].values
-                        ax.hist(data, bins=30, color='#16a085', alpha=0.7, density=True, edgecolor='white', linewidth=0.5)
+        def generate_pairplot(param_names, suffix):
+            if len(param_names) > 1:
+                print(f"Generating parameter correlation pairplot for {suffix} parameters...")
+                df_subset = df[param_names]
+                df_sample = df_subset.sample(n=min(1000, len(df_subset)), random_state=42)
+                
+                n_params = len(param_names)
+                fig, axes = plt.subplots(n_params, n_params, figsize=(n_params*2.5, n_params*2.5))
+                
+                for i in range(n_params):
+                    for j in range(n_params):
+                        ax = axes[i, j]
+                        col_i = param_names[i]
+                        col_j = param_names[j]
                         
-                        mean_val = data.mean()
-                        true_val = true_params.get(col_i, 0.0)
-                        ci_lower = np.percentile(data, 2.5)
-                        ci_upper = np.percentile(data, 97.5)
-                        
-                        ax.axvline(mean_val, color='red', linestyle='-', lw=1.5, alpha=0.8)
-                        ax.axvline(true_val, color='black', linestyle='--', lw=1.5, alpha=0.8)
-                        ax.axvline(ci_lower, color='red', linestyle=':', lw=1.5, alpha=0.8)
-                        ax.axvline(ci_upper, color='red', linestyle=':', lw=1.5, alpha=0.8)
-                        
-                        title_str = f"True: {true_val:.3f} | Mean: {mean_val:.3f}\n95% CI: [{ci_lower:.3f}, {ci_upper:.3f}]"
-                        ax.set_title(title_str, fontsize=9, fontweight='bold', pad=4)
-                        
-                        if i == n_params - 1:
-                            ax.set_xlabel(col_j, fontsize=10, fontweight='bold')
-                        else:
-                            ax.set_xticklabels([])
+                        if i < j:
+                            ax.set_visible(False)
+                        elif i == j:
+                            data = df_sample[col_i].values
+                            ax.hist(data, bins=30, color='#16a085', alpha=0.7, density=True, edgecolor='white', linewidth=0.5)
                             
-                        # Hide y-axis for diagonal (like seaborn does)
-                        ax.set_yticks([])
-                        if j == 0 and n_params > 1:
-                            ax.set_ylabel(col_i, fontsize=10, fontweight='bold')
-                    else:
-                        # Lower triangle - Scatter
-                        ax.scatter(df_sample[col_j], df_sample[col_i], alpha=0.5, s=15, color='#2980b9', edgecolors='none')
-                        
-                        corr = df_sample[col_j].corr(df_sample[col_i])
-                        ax.annotate(f"r = {corr:.3f}", xy=(0.95, 0.95), xycoords='axes fraction', 
-                                    ha='right', va='top', fontsize=10, fontweight='bold',
-                                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.7))
-                                    
-                        if i == n_params - 1:
-                            ax.set_xlabel(col_j, fontsize=10, fontweight='bold')
-                        else:
-                            ax.set_xticklabels([])
-                        if j == 0:
-                            ax.set_ylabel(col_i, fontsize=10, fontweight='bold')
-                        else:
-                            ax.set_yticklabels([])
+                            mean_val = data.mean()
+                            true_val = true_params.get(col_i, 0.0)
+                            ci_lower = np.percentile(data, 2.5)
+                            ci_upper = np.percentile(data, 97.5)
                             
-            fig.suptitle(f"Parameter Correlation Pairplot ({args.material_model})", y=1.02, fontsize=16, fontweight='bold')
-            plt.tight_layout()
-            
-            pairplot_path = os.path.join(out_dir, pfx(f"parameter_correlation_{args.material_model}.pdf"))
-            fig.savefig(pairplot_path, dpi=200, bbox_inches='tight')
-            plt.close()
-            print(f"Saved parameter correlation pairplot to {pairplot_path}")
-        else:
-            print("Not enough active parameters to generate a correlation pairplot.")
+                            ax.axvline(mean_val, color='red', linestyle='-', lw=1.5, alpha=0.8)
+                            ax.axvline(true_val, color='black', linestyle='--', lw=1.5, alpha=0.8)
+                            ax.axvline(ci_lower, color='red', linestyle=':', lw=1.5, alpha=0.8)
+                            ax.axvline(ci_upper, color='red', linestyle=':', lw=1.5, alpha=0.8)
+                            
+                            title_str = f"True: {true_val:.3f} | Mean: {mean_val:.3f}\n95% CI: [{ci_lower:.3f}, {ci_upper:.3f}]"
+                            ax.set_title(title_str, fontsize=9, fontweight='bold', pad=4)
+                            
+                            if i == n_params - 1:
+                                ax.set_xlabel(col_j, fontsize=10, fontweight='bold')
+                            else:
+                                ax.set_xticklabels([])
+                                
+                            ax.set_yticks([])
+                            if j == 0 and n_params > 1:
+                                ax.set_ylabel(col_i, fontsize=10, fontweight='bold')
+                        else:
+                            ax.scatter(df_sample[col_j], df_sample[col_i], alpha=0.5, s=15, color='#2980b9', edgecolors='none')
+                            
+                            std_i = df_sample[col_i].std()
+                            std_j = df_sample[col_j].std()
+                            if std_i == 0 or std_j == 0:
+                                corr = 0.0
+                            else:
+                                corr = df_sample[col_j].corr(df_sample[col_i])
+                                if np.isnan(corr): corr = 0.0
+                            ax.annotate(f"r = {corr:.3f}", xy=(0.95, 0.95), xycoords='axes fraction', 
+                                        ha='right', va='top', fontsize=10, fontweight='bold',
+                                        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.7))
+                                        
+                            if i == n_params - 1:
+                                ax.set_xlabel(col_j, fontsize=10, fontweight='bold')
+                            else:
+                                ax.set_xticklabels([])
+                            if j == 0:
+                                ax.set_ylabel(col_i, fontsize=10, fontweight='bold')
+                            else:
+                                ax.set_yticklabels([])
+                                
+                fig.suptitle(f"Parameter Correlation Pairplot ({args.material_model})", y=1.02, fontsize=16, fontweight='bold')
+                plt.tight_layout()
+                
+                pairplot_path = os.path.join(out_dir, pfx(f"parameter_correlation_{args.material_model}_{suffix}.pdf"))
+                fig.savefig(pairplot_path, dpi=200, bbox_inches='tight')
+                plt.close()
+                print(f"Saved parameter correlation pairplot to {pairplot_path}")
+            else:
+                print(f"Not enough parameters to generate a correlation pairplot for {suffix}.")
+
+        generate_pairplot(list(full_param_names), "all")
+        generate_pairplot(active_params_list, "active")
             
     except Exception as e:
         print(f"Error generating parameter correlation pairplot: {e}")
+
+    # Generate parameter violin plot
+    try:
+        print("Generating parameter violin plot...")
+        plt.figure(figsize=(max(8, len(full_param_names_master) * 0.8), 6))
+        
+        violin_data = []
+        violin_positions = []
+        labels = []
+        
+        for i, col in enumerate(full_param_names_master):
+            if col in model.parameter_names:
+                violin_data.append(df[col].values)
+                violin_positions.append(i)
+            labels.append(col)
+            
+        ax = plt.gca()
+        if violin_data:
+            parts = ax.violinplot(violin_data, positions=violin_positions, showmeans=False, showextrema=False)
+            for pc in parts['bodies']:
+                pc.set_facecolor('#2980b9')
+                pc.set_edgecolor('black')
+                pc.set_alpha(0.7)
+            
+            for pos, data in zip(violin_positions, violin_data):
+                mean_val = np.mean(data)
+                ci_lower = np.percentile(data, 2.5)
+                ci_upper = np.percentile(data, 97.5)
+                
+                ax.plot([pos - 0.2, pos + 0.2], [mean_val, mean_val], color='black', lw=2)
+                ax.plot([pos, pos], [ci_lower, ci_upper], color='black', lw=2)
+                
+        ax.set_xticks(range(len(full_param_names_master)))
+        ax.set_xticklabels(labels, fontsize=12)
+        
+        for i, col in enumerate(full_param_names_master):
+            true_val = true_params.get(col, 0.0)
+            ax.scatter([i], [true_val], color='red', marker='X', s=100, zorder=10, lw=2, label="Ground Truth" if i==0 else "")
+            
+        ax.set_ylim([0, 2.5])
+        ax.set_ylabel("Material Parameter Value", fontsize=12)
+        ax.set_title(f"Parameter Posterior Distribution ({args.material_model})", fontsize=14, fontweight='bold')
+        
+        handles, lbls = ax.get_legend_handles_labels()
+        by_label = dict(zip(lbls, handles))
+        if by_label:
+            ax.legend(by_label.values(), by_label.keys(), loc='upper right')
+            
+        ax.grid(axis='y', alpha=0.3)
+        plt.tight_layout()
+        
+        violin_path = os.path.join(out_dir, pfx(f"parameter_violin_{args.material_model}.pdf"))
+        plt.savefig(violin_path, dpi=200, bbox_inches='tight')
+        plt.close()
+        print(f"Saved parameter violin plot to {violin_path}")
+    except Exception as e:
+        print(f"Error generating parameter violin plot: {e}")
 
     # Run validation plot scripts (only if not sef_split, otherwise we wait for both to finish in bash script)
     if args.distill_target != "sef_split":

@@ -151,7 +151,7 @@ if __name__ == "__main__" :
     psi_true_func = lambda f: true_mat_model.psi(f)
     piola_true_func = lambda f: true_mat_model.P(f)
 
-    if args.model_mode == "anisotropic":
+    if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
         a0 = jnp.asarray(prep_data.get("a0", [1.0, 0.0, 0.0]))
         extractor = AnisotropicFeatureExtractor(a0)
         dev, vol, aniso = jax.vmap(jax.vmap(extractor.extract))(f3x3)
@@ -177,7 +177,7 @@ if __name__ == "__main__" :
         I_z = jnp.load(os.path.join(resume_dir, "I_z.npy"))
         dev_z = I_z[:, :2]
         vol_z = I_z[:, 2:]
-        if args.model_mode == "anisotropic":
+        if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
             aniso_z = I_z[:, 3:] # assuming aniso is 1D
             min_aniso = jnp.min(aniso_flat, axis=0)
             max_aniso = jnp.max(aniso_flat, axis=0)
@@ -185,7 +185,7 @@ if __name__ == "__main__" :
         dev_z = farthest_point_sampling_with_fixed_point(dev_flat, n_ip, jnp.array([3.0, 3.0]))
         vol_z = farthest_point_sampling_with_fixed_point(vol_flat, n_ip, jnp.array([1.0]))
         I_z_list = [dev_z, vol_z]
-        if args.model_mode == "anisotropic":
+        if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
             aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, jnp.array([0.0]))
             min_aniso = jnp.min(aniso_flat, axis=0)
             max_aniso = jnp.max(aniso_flat, axis=0)
@@ -214,7 +214,7 @@ if __name__ == "__main__" :
         raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
 
         aniso_kwargs = {}
-        if args.model_mode == "anisotropic":
+        if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
             raw_aniso_z_fps = inv_softplus(aniso_z)
             raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
             raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
@@ -226,6 +226,8 @@ if __name__ == "__main__" :
                 raw_aniso_u_var=raw_aniso_u_var_init,
                 raw_aniso_kappa=jnp.array(0.0)
             )
+            if args.model_mode == "aniso_unk_fiber":
+                aniso_kwargs["raw_aniso_theta"] = jnp.array(0.0)
 
         if is_fixed_reaction_force_noise:
             params = GPRawParams(
@@ -308,7 +310,28 @@ if __name__ == "__main__" :
 
 
 
-    loss_fn = lambda p, k: total_stochastic_loss(p, model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k, number_of_mci_sampling)
+    def loss_fn(p, k):
+        if args.model_mode == "aniso_unk_fiber":
+            theta = jnp.pi * jax.nn.sigmoid(p.raw_aniso_theta)
+            a0 = jnp.array([jnp.cos(theta), jnp.sin(theta), 0.0])
+            dyn_extractor = AnisotropicFeatureExtractor(a0)
+            local_model = SparseHyperelasticityGP(
+                raw_params=p,
+                I_z=I_z,
+                min_dev=min_dev,
+                min_vol=min_vol,
+                max_dev=max_dev,
+                max_vol=max_vol,
+                sampling_mode="pws",
+                beta=beta,
+                feature_extractor=dyn_extractor,
+                min_aniso=min_aniso,
+                max_aniso=max_aniso,
+                aniso_z=aniso_z
+            )
+        else:
+            local_model = model
+        return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k, number_of_mci_sampling)
 
     opt = optax.adam(learning_rate=learning_rate)
     opt_state = opt.init(params)
@@ -334,6 +357,22 @@ if __name__ == "__main__" :
     best_params = trainer.train(n_iterations=n_iterations, main_key=main_key, log_info_str=log_info_str)
 
     print("Generating Training Data R2 Plot for all load steps...")
+    if args.model_mode == "aniso_unk_fiber":
+        theta_pred = jnp.pi * jax.nn.sigmoid(best_params.raw_aniso_theta)
+        a0_pred = jnp.array([jnp.cos(theta_pred), jnp.sin(theta_pred), 0.0])
+        extractor = AnisotropicFeatureExtractor(a0_pred)
+        pred_deg = jnp.degrees(theta_pred)
+        print(f"Predicted Fiber Angle: {pred_deg:.2f} degrees")
+        import matplotlib.pyplot as plt
+        plt.figure()
+        plt.bar(["Predicted Angle"], [pred_deg])
+        plt.axhline(30.0, color='r', linestyle='--', label="True Angle (30 deg)")
+        plt.ylabel("Angle (degrees)")
+        plt.title(f"Fiber Orientation Prediction (Predicted: {pred_deg:.2f})")
+        plt.legend()
+        plt.savefig(os.path.join(save_path, "predicted_angle.pdf"))
+        plt.close()
+
     learned_gp = SparseHyperelasticityGP(
         raw_params=best_params, I_z=I_z, min_dev=min_dev, min_vol=min_vol, max_dev=max_dev, max_vol=max_vol, beta=beta,
         feature_extractor=extractor,

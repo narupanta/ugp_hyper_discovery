@@ -100,6 +100,8 @@ class SparseHyperelasticityGP:
                 aniso_z=aniso_z,
                 aniso_kappa=to_f64(jax.nn.softplus(p.raw_aniso_kappa))
             )
+            if getattr(p, "raw_aniso_theta", None) is not None:
+                kwargs["aniso_theta"] = to_f64(jnp.pi * jax.nn.sigmoid(p.raw_aniso_theta))
 
         return GPParams(
             dev_ls=to_f64(self.max_dev.mean() * 2 * jax.nn.sigmoid(p.raw_dev_ls)),

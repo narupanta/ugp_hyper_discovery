@@ -38,41 +38,47 @@ def plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_pa
     fig1.savefig(os.path.join(save_path, "loss_and_physics.pdf"))
 
 def plot_parameters_hist(params_hist, steps_history, save_path):
-    # --- FIGURE 1: Inducing Variables & Positions (2x3 Grid) ---
-    fig1, axes1 = plt.subplots(2, 3, figsize=(18, 10))
+    # --- FIGURE 1: Inducing Variables & Positions ---
+    has_aniso_inducing = "aniso_u_mean" in params_hist and len(params_hist["aniso_u_mean"]) > 0
+    rows1 = 3 if has_aniso_inducing else 2
+    fig1, axes1 = plt.subplots(rows1, 3, figsize=(18, 5 * rows1))
     fig1.suptitle(r"Evolution of Inducing Variables and Positions ($Z, \mathbf{u}$)", fontsize=16)
 
     # ROW 0: DEVIATORIC GP
-    # 0,0: Deviatoric Mean (m_dev)
     axes1[0, 0].plot(steps_history, np.array(params_hist["dev_u_mean"]))
     axes1[0, 0].set_title(r"Deviatoric Mean ($\mathbf{m}_{dev}$)")
     
-    # 0,1: Deviatoric Variance (S_dev)
     axes1[0, 1].plot(steps_history, np.array(params_hist["dev_u_var"]))
     axes1[0, 1].set_title(r"Deviatoric Variance ($\mathbf{S}_{dev}$)")
     
-    # 0,2: Deviatoric Inducing Positions (dev_z)
-    # dev_z is (M, 2) -> We plot the first column (I1_bar) or a norm
-    # Applying the softplus transformation used in your model for accurate viz
     dev_z_1 = np.array(params_hist["dev_z"])[:, :, 0]
     dev_z_2 = np.array(params_hist["dev_z"])[:, :, 1]
     axes1[0, 2].plot(steps_history, dev_z_1) 
-    axes1[0, 2].plot(steps_history, dev_z_2) # Plotting I1_bar positions
+    axes1[0, 2].plot(steps_history, dev_z_2)
     axes1[0, 2].set_title(r"Dev. Inducing Positions ($Z_{dev, I_1}$)")
 
     # ROW 1: VOLUMETRIC GP
-    # 1,0: Volumetric Mean (m_vol)
     axes1[1, 0].plot(steps_history, np.array(params_hist["vol_u_mean"]))
     axes1[1, 0].set_title(r"Volumetric Mean ($\mathbf{m}_{vol}$)")
     
-    # 1,1: Volumetric Variance (S_vol)
     axes1[1, 1].plot(steps_history, np.array(params_hist["vol_u_var"]))
     axes1[1, 1].set_title(r"Volumetric Variance ($\mathbf{S}_{vol}$)")
     
-    # 1,2: Volumetric Inducing Positions (vol_z)
     actual_vol_z = np.array(params_hist["vol_z"])[:, :, 0]
     axes1[1, 2].plot(steps_history, actual_vol_z)
     axes1[1, 2].set_title(r"Vol. Inducing Positions ($Z_{vol, J}$)")
+
+    if has_aniso_inducing:
+        # ROW 2: ANISOTROPIC GP
+        axes1[2, 0].plot(steps_history, np.array(params_hist["aniso_u_mean"]))
+        axes1[2, 0].set_title(r"Anisotropic Mean ($\mathbf{m}_{aniso}$)")
+        
+        axes1[2, 1].plot(steps_history, np.array(params_hist["aniso_u_var"]))
+        axes1[2, 1].set_title(r"Anisotropic Variance ($\mathbf{S}_{aniso}$)")
+        
+        actual_aniso_z = np.array(params_hist["aniso_z"])[:, :, 0]
+        axes1[2, 2].plot(steps_history, actual_aniso_z)
+        axes1[2, 2].set_title(r"Aniso. Inducing Positions ($Z_{aniso, I_4}$)")
 
     for ax in axes1.flatten():
         ax.set_xlabel("Iteration Step")
@@ -80,7 +86,6 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     fig1.savefig(os.path.join(save_path, "inducing_state_evolution.pdf"))
-
     # --- FIGURE 2: Kernel Hyperparameters ---
     has_aniso = "aniso_gp_lengthscales" in params_hist and len(params_hist["aniso_gp_lengthscales"]) > 0
     rows = 3 if has_aniso else 2
@@ -161,8 +166,21 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     axes3[1].grid(True, alpha=0.3)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     fig3.savefig(os.path.join(save_path, "trend_parameters_evolution.pdf"))
-
+    
+    if "aniso_theta" in params_hist and len(params_hist["aniso_theta"]) > 0:
+        plt.figure(figsize=(8, 4))
+        angles_deg = np.degrees(np.array(params_hist["aniso_theta"]))
+        plt.plot(steps_history, angles_deg, label="Predicted Angle")
+        plt.axhline(30.0, color='r', linestyle='--', label="True Angle (30 deg)")
+        plt.title(r"Fiber Orientation Evolution ($\theta$)")
+        plt.xlabel("Iteration Step")
+        plt.ylabel("Angle (degrees)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(save_path, "fiber_angle_evolution.pdf"))
+        plt.close()
 def plot_r2_strain_energy_function(psi_pred, psi_true, psi_dev_pred, psi_dev_true, psi_vol_pred, psi_vol_true, save_path) :
     plt.figure(figsize=(8, 6))
     
