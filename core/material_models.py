@@ -344,6 +344,49 @@ class CustomGT(GeneralizedMooneyRivlin):
         vol_params = [d1, d2, 0.0]
         super().__init__(dev_params=dev_params, vol_params=vol_params, jit_P=jit_P)
 
+@register_material("aniso30")
+class Aniso30(BaseMaterialModel):
+    def __init__(self, c10=0.5, d1=1.0, theta=jnp.pi/6.0, jit_P: bool = True):
+        super().__init__(jit_P=jit_P)
+        self.c10 = c10
+        self.d1 = d1
+        # Calculate fiber direction vector from angle (theta in XY plane)
+        self.a0 = jnp.array([jnp.cos(theta), jnp.sin(theta), 0.0])
+
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
+        return self.psi_dev(F) + self.psi_vol(F) + self.psi_aniso(F)
+
+    def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
+        if F.shape[-2:] == (2, 2):
+            F = jnp.array([[F[0, 0], F[0, 1], 0.], 
+                           [F[1, 0], F[1, 1], 0.],
+                           [0.,      0.,     1. ]])
+        C = C_func(F)
+        I3_safe = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
+        C_bar = (I3_safe**(-1/3))[..., None, None] * C
+        return self.c10 * (I1_func(C_bar) - 3.0)
+
+    def psi_vol(self, F: jnp.ndarray) -> jnp.ndarray:
+        if F.shape[-2:] == (2, 2):
+            F = jnp.array([[F[0, 0], F[0, 1], 0.], 
+                           [F[1, 0], F[1, 1], 0.],
+                           [0.,      0.,     1. ]])
+        C = C_func(F)
+        I3_safe = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
+        return self.d1 * (jnp.sqrt(I3_safe) - 1.0)**2
+
+    def psi_aniso(self, F: jnp.ndarray) -> jnp.ndarray:
+        if F.shape[-2:] == (2, 2):
+            F = jnp.array([[F[0, 0], F[0, 1], 0.], 
+                           [F[1, 0], F[1, 1], 0.],
+                           [0.,      0.,     1. ]])
+        C = C_func(F)
+        I3_safe = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
+        C_bar = (I3_safe**(-1/3))[..., None, None] * C
+        I4_bar = jnp.einsum('i,...ij,j->...', self.a0, C_bar, self.a0)
+        return 0.7 * (I4_bar - 1.0)**2
+
+
 @register_material("ogden")
 class Ogden(BaseMaterialModel):
     def __init__(self, mu_params, alpha_params, vol_params, jit_P: bool = True):

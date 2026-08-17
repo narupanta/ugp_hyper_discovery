@@ -57,7 +57,7 @@ class HyperelasticGPTrainer:
             "dev_gp_lengthscales": [], "vol_gp_lengthscales": [], 
             "dev_u_mean": [], "dev_u_var": [], "vol_u_mean": [], "vol_u_var": [], "dev_z": [], "vol_z": [],
             "aniso_gp_sigma_scaling": [], "aniso_gp_lengthscales": [],
-            "aniso_u_mean": [], "aniso_u_var": [], "aniso_z": [],
+            "aniso_u_mean": [], "aniso_u_var": [], "aniso_z": [], "aniso_theta": [],
             "sigma_free_x": [], "sigma_free_y": [], "sigma_fix_x": [], "sigma_fix_y": [],
             "vol_kappa": []
         }
@@ -111,6 +111,10 @@ class HyperelasticGPTrainer:
             self.params_hist["aniso_u_mean"].append(cur_params.aniso_u_mean)
             self.params_hist["aniso_u_var"].append(cur_params.aniso_u_var)
             self.params_hist["aniso_z"].append(cur_params.aniso_z)
+
+        if getattr(cur_params, "aniso_theta", None) is not None:
+            self.params_hist["aniso_theta"].append(cur_params.aniso_theta)
+            log_message += f"angle: {jnp.degrees(cur_params.aniso_theta):.2f}\n"
 
         with open(self.log_file_path, "a") as f:
             f.write(log_message)

@@ -36,3 +36,4 @@ extrapolation_transitions.npy
 update_paths.py
 move_files.sh
 dataset_restructure.sh
+.DS_Store

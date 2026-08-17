@@ -294,6 +294,17 @@ if [ -z "$DISTILLED_DIR" ] || [ ! -d "$DISTILLED_DIR" ]; then
 fi
 echo "ℹ️ Using distilled model at: $DISTILLED_DIR"
 
+if [ "$SKIP_DISTILL" != "true" ]; then
+    echo "Generating combined summary plot..."
+    python3 plots/plot_combined_summary.py \
+        --distilled_dir "$DISTILLED_DIR" \
+        --sobol_threshold "$SOBOL_THRESHOLD"
+        
+    echo "Generating split summary plots (Energy / Params)..."
+    python3 plots/plot_split_summary.py \
+        --distilled_dir "$DISTILLED_DIR"
+fi
+
 echo "--- Step 4: Stochastic Forward Sampling with Distilled Model ---"
 
 # Restrict each process to a sensible number of threads and avoid JAX GPU OOM in parallel execution
