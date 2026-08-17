@@ -138,6 +138,7 @@ fi
 
 # 4. Validation Config
 VAL_SAMPLES=$(get_yaml "['val_number_samples']")
+VAL_LOAD_STEPS_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(*(d.get('val_load_steps_indices', [9])))")
 
 # 5. Geometry
 GEOMETRY=$(get_yaml "['geometry']")
@@ -337,5 +338,11 @@ cp "validation_distilled_${MODEL}.log" validation_distilled.log 2>/dev/null || t
 cp "analysis_distilled_${MODEL}.log" analysis_distilled.log 2>/dev/null || true
 cp "validation_distilled_${MODEL}.log" "$DISTILLED_DIR/" 2>/dev/null || true
 cp "analysis_distilled_${MODEL}.log" "$DISTILLED_DIR/" 2>/dev/null || true
+
+echo "Generating UQ verification displacement plots..."
+python3 plots/uq_verification_disp.py \
+    --model_path "$(basename "$DISTILLED_DIR")" \
+    --validation_load_step_indices $VAL_LOAD_STEPS_INDICES \
+    --n_sample "$VAL_SAMPLES"
 
 echo "🎉 Full Pipeline (Datagen -> Extraction -> Distillation -> Distilled Forward FEM) Completed Successfully!"
