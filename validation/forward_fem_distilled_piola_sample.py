@@ -292,10 +292,20 @@ if __name__ == "__main__" :
     node_type[jax.vmap(top)(node_coords)] = 4
 
     flow_samples_path = os.path.join(args.distilled_dir, "flow_samples.npy")
-    flow_samples = np.load(flow_samples_path)
+    dev_samples_path = os.path.join(args.distilled_dir, "dev_flow_samples.npy")
+    vol_samples_path = os.path.join(args.distilled_dir, "vol_flow_samples.npy")
+    
     np.random.seed(42)
-    sample_indices = np.random.choice(len(flow_samples), n_sample, replace=False)
-    selected_samples = flow_samples[sample_indices]
+    if os.path.exists(dev_samples_path) and os.path.exists(vol_samples_path):
+        dev_samples = np.load(dev_samples_path)
+        vol_samples = np.load(vol_samples_path)
+        dev_indices = np.random.choice(len(dev_samples), n_sample, replace=False)
+        vol_indices = np.random.choice(len(vol_samples), n_sample, replace=False)
+        selected_samples = np.concatenate([dev_samples[dev_indices], vol_samples[vol_indices]], axis=1)
+    else:
+        flow_samples = np.load(flow_samples_path)
+        sample_indices = np.random.choice(len(flow_samples), n_sample, replace=False)
+        selected_samples = flow_samples[sample_indices]
     
     
     true_mat_model = get_material(material_model_name)
