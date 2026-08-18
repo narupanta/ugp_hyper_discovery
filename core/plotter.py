@@ -39,7 +39,7 @@ def plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_pa
 
 def plot_parameters_hist(params_hist, steps_history, save_path):
     # --- FIGURE 1: Inducing Variables & Positions ---
-    has_aniso_inducing = "aniso_u_mean" in params_hist and len(params_hist["aniso_u_mean"]) > 0
+    has_aniso_inducing = "aniso_u_mean" in params_hist and len(params_hist["aniso_u_mean"]) > 0 and params_hist["aniso_u_mean"][0] is not None
     rows1 = 3 if has_aniso_inducing else 2
     fig1, axes1 = plt.subplots(rows1, 3, figsize=(18, 5 * rows1))
     fig1.suptitle(r"Evolution of Inducing Variables and Positions ($Z, \mathbf{u}$)", fontsize=16)
@@ -87,7 +87,7 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     fig1.savefig(os.path.join(save_path, "inducing_state_evolution.pdf"))
     # --- FIGURE 2: Kernel Hyperparameters ---
-    has_aniso = "aniso_gp_lengthscales" in params_hist and len(params_hist["aniso_gp_lengthscales"]) > 0
+    has_aniso = "aniso_gp_lengthscales" in params_hist and len(params_hist["aniso_gp_lengthscales"]) > 0 and params_hist["aniso_gp_lengthscales"][0] is not None
     rows = 3 if has_aniso else 2
     fig2, axes2 = plt.subplots(rows, 2, figsize=(14, 5 * rows))
     fig2.suptitle("Evolution of Kernel Hyperparameters", fontsize=16)
