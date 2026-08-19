@@ -138,7 +138,8 @@ def main():
     max_dev = jnp.max(dev_z, axis=0)
     max_vol = jnp.max(vol_z, axis=0)
     
-    gp_model = SparseHyperelasticityGP(gp_params, I_z, min_dev, min_vol, max_dev, max_vol, beta=1.0)
+    cov_mode = "full" if gp_params.raw_dev_u_var.ndim == 2 else "diag"
+    gp_model = SparseHyperelasticityGP(gp_params, I_z, min_dev, min_vol, max_dev, max_vol, beta=1.0, covariance_mode=cov_mode)
     
     # Try to load the dataset for background plotting and dataset_* modes
     dataset_F_flat_2x2 = None
