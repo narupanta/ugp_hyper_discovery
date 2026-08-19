@@ -37,3 +37,4 @@ sobol_samples_factor: 4096
 run_validation: 1
 val_load_steps_indices: [9]
 val_number_samples: 1024
+seed: 42

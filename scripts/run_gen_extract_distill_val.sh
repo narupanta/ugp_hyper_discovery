@@ -118,6 +118,7 @@ EXT_ITERS=$(get_yaml "['extraction_n_iterations']")
 EXT_LR=$(get_yaml "['extraction_learning_rate']")
 TRAIN_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(*(d['train_load_steps_indices']))")
 MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('model_mode', 'isotropic'))" 2>/dev/null || echo "isotropic")
+SEED=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('seed', 42))" 2>/dev/null || echo "42")
 
 
 # 3. Distillation Config
@@ -190,7 +191,8 @@ else
         --target_load_true_top "$TOP_LOAD" \
         --asym_factor "$ASYM" \
         --learning_rate "$EXT_LR" \
-        --model_mode "$MODEL_MODE"
+        --model_mode "$MODEL_MODE" \
+        --seed "$SEED"
     echo "✅ Step 2 (Extraction) completed."
 fi
 
@@ -239,6 +241,7 @@ else
             --max_gamma "$MAX_GAMMA" \
             --sobol_threshold "$SOBOL_THRESHOLD" \
             --sobol_samples_factor "$SOBOL_FACTOR" \
+            --seed "$SEED" \
             $SENSITIVITY_FLAG &
             
         echo "Distilling VOL component into $SHARED_OUT_DIR..."
@@ -254,6 +257,7 @@ else
             --max_gamma "$MAX_GAMMA" \
             --sobol_threshold "$SOBOL_THRESHOLD" \
             --sobol_samples_factor "$SOBOL_FACTOR" \
+            --seed "$SEED" \
             $SENSITIVITY_FLAG &
             
         wait
@@ -276,6 +280,7 @@ else
             --max_gamma "$MAX_GAMMA" \
             --sobol_threshold "$SOBOL_THRESHOLD" \
             --sobol_samples_factor "$SOBOL_FACTOR" \
+            --seed "$SEED" \
             $SENSITIVITY_FLAG
     fi
     echo "✅ Step 3 (Distillation) completed."

@@ -57,6 +57,8 @@ def parse_args():
     
     # Resume training
     parser.add_argument('--resume_from', type=str, default="", help="Name of the extraction/extracted_models folder to resume from")
+    
+    parser.add_argument('--seed', type=int, default=42, help="Random seed for PRNGKey")
 
     return parser.parse_args()
 
@@ -195,7 +197,7 @@ if __name__ == "__main__" :
     plot_inducing_points(dev_z, vol_z, dev_flat, vol_flat, save_path)
 
     # Setup random key
-    key = jax.random.PRNGKey(0)
+    key = jax.random.PRNGKey(args.seed)
     k1, k2, k3, k4 = jax.random.split(key, 4)
     
     if args.resume_from:
@@ -290,7 +292,7 @@ if __name__ == "__main__" :
     min_vol = jnp.min(vol_z, axis=0)
     max_dev = jnp.max(dev_z, axis=0)
     max_vol = jnp.max(vol_z, axis=0)
-    main_key = jr.PRNGKey(42)
+    main_key = jr.PRNGKey(args.seed)
 
     model = SparseHyperelasticityGP(
         raw_params=params,
