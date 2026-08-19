@@ -438,6 +438,7 @@ def main():
     parser.add_argument("--component", type=str, default="total", choices=["total", "dev", "vol"], help="Component to distill (used with sef_split)")
     parser.add_argument("--override_out_dir", type=str, default=None, help="Explicitly specify the output directory for distilled model logs and artifacts (overriding timestamp generation)")
     parser.add_argument("--load_existing_sensitivities", action="store_true", help="Skip Sobol resampling and directly load existing sensitivity CSVs from out_dir")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for PyTorch and Numpy")
     args = parser.parse_args()
     
     prefix = f"{args.component}_" if args.distill_target == "sef_split" else ""
@@ -447,6 +448,8 @@ def main():
     print(f"Using device: {device}")
 
     torch.set_default_dtype(torch.float64)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
     if args.sample_mode == "dataset_all":
         export_subfolder = "pytorch_export_dataset_all"

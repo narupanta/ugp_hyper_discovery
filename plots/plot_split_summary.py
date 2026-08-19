@@ -13,6 +13,9 @@ from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material
 from core.features import IsotropicFeatureExtractor
+from scipy.spatial import ConvexHull
+from core.material_models import get_material
+from core.features import IsotropicFeatureExtractor
 
 def to_latex(name):
     if name.startswith("C") and len(name) == 3 and name[1:].isdigit():
@@ -124,17 +127,28 @@ def main():
     best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
     gp_params = GPRawParams(**best_params_dict)
     I_z = jnp.load(os.path.join(saved_model_dir, "I_z.npy"))
+    I_obs_all = jnp.load(os.path.join(saved_model_dir, "I_obs_all.npy")).reshape(-1, 3)
     
     dev_z = I_z[:, :2]
     vol_z = I_z[:, 2:]
     min_dev, max_dev = jnp.min(dev_z, axis=0), jnp.max(dev_z, axis=0)
     min_vol, max_vol = jnp.min(vol_z, axis=0), jnp.max(vol_z, axis=0)
+    dev_obs = I_obs_all[:, :2]
+    vol_obs = I_obs_all[:, 2:]
+    limit_min_vol, limit_max_vol = jnp.min(vol_obs, axis=0), jnp.max(vol_obs, axis=0)
+    
+    dev_hull = ConvexHull(np.array(dev_obs))
+    hull_eqs = dev_hull.equations
+    dev_tol = 0.001
+    vol_tol = 0.001
     
     learned_gp = SparseHyperelasticityGP(gp_params, I_z, min_dev, min_vol, max_dev, max_vol, beta=1.0)
     
     # Generate Data
     F_all, gamma = generate_standard_modes(num_points=100, max_gamma=1.0)
     mode_names = ["UT", "ET", "PS", "UC", "EC", "SS"]
+    
+    extractor = IsotropicFeatureExtractor()
 
     psi_true = jax.vmap(true_model.psi)(F_all)
     psi_dist_mean = [learned_gp.psi_dist(F_all[mode]).mean for mode in range(len(mode_names))]
@@ -218,6 +232,10 @@ def main():
     fig_energy = plt.figure(figsize=(fig_width_energy, h_energy_split))
     gs_top = fig_energy.add_gridspec(2, 3, wspace=1.1, hspace=0.05)
     dist_color = "#009E73"
+    
+    mode_limits_dev = {}
+    mode_limits_vol = {}
+    
     for i, name in enumerate(mode_names):
         row, col = i // 3, i % 3
         ax_psi = fig_energy.add_subplot(gs_top[row, col])
@@ -263,10 +281,50 @@ def main():
         ax_psi.annotate(annotation_dist_psi, xy=(1.05, 0.25), xycoords='axes fraction', 
                         ha='left', va='center', fontsize=7, clip_on=False,
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=dist_color, lw=0.5, alpha=0.8), zorder=6)
+        
+        # Interpolation Limit boundary
+        dev_I, vol_J = jax.vmap(extractor.extract)(F_all[i])
+        inside_vol = (vol_J[:, 0] >= limit_min_vol[0] - vol_tol) & (vol_J[:, 0] <= limit_max_vol[0] + vol_tol)
+        dev_I_np = np.array(dev_I)
+        inside_dev = np.all(dev_I_np @ hull_eqs[:, :-1].T + hull_eqs[:, -1] <= dev_tol, axis=1)
+        
+        # Determine dev limits
+        crossings_dev = np.where(np.diff(inside_dev.astype(int)) != 0)[0]
+        limits_dev = []
+        for idx in crossings_dev:
+            limits_dev.append((float(gamma[idx]), dev_I_np[idx]))
+        mode_limits_dev[name] = {
+            'crossings': limits_dev,
+            'always_out': len(limits_dev) == 0 and not inside_dev[0]
+        }
+            
+        # Determine vol limits
+        crossings_vol = np.where(np.diff(inside_vol.astype(int)) != 0)[0]
+        limits_vol = []
+        for idx in crossings_vol:
+            limits_vol.append((float(gamma[idx]), float(vol_J[idx, 0])))
+        mode_limits_vol[name] = {
+            'crossings': limits_vol,
+            'always_out': len(limits_vol) == 0 and not inside_vol[0]
+        }
+
+        inside_mask = inside_vol & inside_dev
+        
+        crossings_mask = np.where(np.diff(inside_mask.astype(int)) != 0)[0]
+        gamma_boundaries = [float(gamma[0])] + [float(gamma[idx]) for idx in crossings_mask] + [float(gamma[-1])]
+        state_is_out = not inside_mask[0]
+        for k in range(len(gamma_boundaries) - 1):
+            if state_is_out:
+                ax_psi.axvspan(gamma_boundaries[k], gamma_boundaries[k+1], color='#E69F00', alpha=0.15, zorder=-1, label='Extrapolation')
+            state_is_out = not state_is_out
+            
+        for idx in crossings_mask:
+            ax_psi.axvline(float(gamma[idx]), color='#E69F00', linestyle=':', linewidth=1.5, zorder=0)
 
     # Global legend for energy plots
     handles, labels = ax_psi.get_legend_handles_labels()
-    fig_energy.legend(handles, labels, loc='lower center', ncol=5, bbox_to_anchor=(0.5, -0.01), fontsize=8, frameon=False)
+    by_label = dict(zip(labels, handles))
+    fig_energy.legend(by_label.values(), by_label.keys(), loc='lower center', ncol=3, bbox_to_anchor=(0.5, -0.05), fontsize=8, frameon=False)
     
     fig_energy.savefig(os.path.join(distilled_dir, f"split_energy_{true_model_name}.pdf"), dpi=300, bbox_inches='tight')
     plt.close(fig_energy)
@@ -386,6 +444,92 @@ def main():
     fig_params.savefig(os.path.join(distilled_dir, f"split_params_{true_model_name}.pdf"), dpi=300, bbox_inches='tight')
     plt.close(fig_params)
     
+    # 4. Deviatoric Invariant Space Plot
+    fig_dev_space, ax_dev = plt.subplots(figsize=(6, 5))
+    
+    # Plot convex hull
+    dev_hull_pts = np.array(dev_obs)[dev_hull.vertices]
+    # append the first point to close the loop
+    dev_hull_pts = np.vstack((dev_hull_pts, dev_hull_pts[0]))
+    ax_dev.plot(dev_hull_pts[:, 0], dev_hull_pts[:, 1], 'k--', lw=1.5, label='Interpolation Boundary (Convex Hull)', zorder=4)
+    ax_dev.fill(dev_hull_pts[:, 0], dev_hull_pts[:, 1], color='gray', alpha=0.1, zorder=1)
+    
+    # Plot training dataset
+    ax_dev.scatter(I_obs_all[:, 0], I_obs_all[:, 1], color='#1f77b4', marker='.', s=10, alpha=0.3, label='Training Dataset', zorder=2)
+    
+    # Plot inducing points
+    ax_dev.scatter(dev_z[:, 0], dev_z[:, 1], color='black', marker='X', s=50, label='Inducing Points', zorder=5)
+    
+    # Plot mode trajectories
+    mode_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+    for i, name in enumerate(mode_names):
+        dev_I, vol_J = jax.vmap(extractor.extract)(F_all[i])
+        ax_dev.plot(dev_I[:, 0], dev_I[:, 1], color=mode_colors[i], lw=1.5, label=f'{name} Trajectory')
+        
+        dev_info = mode_limits_dev[name]
+        if dev_info['always_out']:
+            ax_dev.scatter([3.0], [3.0], color='#E69F00', marker='s', s=30, zorder=6)
+            ax_dev.text(3.1, 3.0 - i*0.15, f"{name}: (Extrap)", fontsize=7, color=mode_colors[i], zorder=7)
+        else:
+            for g_dev, p_dev in dev_info['crossings']:
+                ax_dev.scatter([p_dev[0]], [p_dev[1]], color='#E69F00', marker='s', s=30, zorder=6)
+                ax_dev.text(p_dev[0] + 0.1, p_dev[1] - i*0.08, f"{name}: $\\gamma={g_dev:.2f}$", fontsize=7, color=mode_colors[i], zorder=7)
+    
+    # Start point
+    ax_dev.scatter([3.0], [3.0], color='black', marker='o', facecolors='none', s=50, label='Undeformed (3, 3)', zorder=5)
+    
+    ax_dev.set_xlabel(r"$\bar{I}_1$", fontsize=10)
+    ax_dev.set_ylabel(r"$\bar{I}_2$", fontsize=10)
+    ax_dev.set_title("Deviatoric Invariant Space & Interpolation Limits", fontsize=11)
+    ax_dev.legend(fontsize=8, loc='best', frameon=True)
+    ax_dev.grid(True, linestyle=':', alpha=0.6)
+    
+    dev_space_path = os.path.join(distilled_dir, f"split_deviatoric_space_{true_model_name}.pdf")
+    fig_dev_space.savefig(dev_space_path, dpi=300, bbox_inches='tight')
+    plt.close(fig_dev_space)
+    
+    # 5. Volumetric Invariant Space Plot (J vs gamma)
+    fig_vol_space, ax_vol = plt.subplots(figsize=(6, 4.5))
+    
+    # Plot interpolation bounds
+    ax_vol.axhspan(limit_min_vol[0], limit_max_vol[0], color='gray', alpha=0.15, label='Interpolation Boundary', zorder=1)
+    ax_vol.axhline(limit_min_vol[0], color='k', linestyle='--', lw=1.5, zorder=2)
+    ax_vol.axhline(limit_max_vol[0], color='k', linestyle='--', lw=1.5, zorder=2)
+    
+    # Plot inducing points as faint lines
+    for idx, vz in enumerate(vol_z):
+        lbl = 'Inducing Points (J)' if idx == 0 else ""
+        ax_vol.axhline(vz[0], color='black', alpha=0.5, ls=':', lw=1, label=lbl, zorder=3)
+        
+    # Plot mode trajectories
+    for i, name in enumerate(mode_names):
+        _, vol_J = jax.vmap(extractor.extract)(F_all[i])
+        ax_vol.plot(gamma, vol_J[:, 0], color=mode_colors[i], lw=2.0, label=f'{name} Trajectory', zorder=4)
+        
+        vol_info = mode_limits_vol[name]
+        if vol_info['always_out']:
+            ax_vol.scatter([0.0], [1.0], color='#E69F00', marker='s', s=30, zorder=6)
+            ax_vol.text(0.02, 1.0 - 0.05 - i*0.03, f"{name}: (Extrap)", fontsize=7, color=mode_colors[i], zorder=7)
+        else:
+            for g_vol, p_vol in vol_info['crossings']:
+                ax_vol.scatter([g_vol], [p_vol], color='#E69F00', marker='s', s=30, zorder=6)
+                ax_vol.text(g_vol + 0.02, p_vol + 0.02 + i*0.03, f"{name}: $\\gamma={g_vol:.2f}$", fontsize=7, color=mode_colors[i], zorder=7)
+        
+    ax_vol.scatter([0.0], [1.0], color='black', marker='o', facecolors='none', s=50, label='Undeformed (J=1)', zorder=5)
+    
+    ax_vol.set_xlabel(r"Deformation ($\gamma$)", fontsize=10)
+    ax_vol.set_ylabel(r"Volumetric Invariant ($J$)", fontsize=10)
+    ax_vol.set_title("Volumetric Invariant Space & Interpolation Limits", fontsize=11)
+    
+    # Move legend outside to avoid clutter
+    ax_vol.legend(fontsize=8, loc='center left', bbox_to_anchor=(1.0, 0.5), frameon=True)
+    ax_vol.grid(True, linestyle=':', alpha=0.6)
+    
+    vol_space_path = os.path.join(distilled_dir, f"split_volumetric_space_{true_model_name}.pdf")
+    fig_vol_space.savefig(vol_space_path, dpi=300, bbox_inches='tight')
+    plt.close(fig_vol_space)
+    
+
     print(f"Saved split summary plots to {distilled_dir}")
 
 if __name__ == "__main__":
