@@ -48,7 +48,10 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     axes1[0, 0].plot(steps_history, np.array(params_hist["dev_u_mean"]))
     axes1[0, 0].set_title(r"Deviatoric Mean ($\mathbf{m}_{dev}$)")
     
-    axes1[0, 1].plot(steps_history, np.array(params_hist["dev_u_var"]))
+    dev_u_var_arr = np.array(params_hist["dev_u_var"])
+    if dev_u_var_arr.ndim == 3:
+        dev_u_var_arr = np.diagonal(dev_u_var_arr, axis1=1, axis2=2)
+    axes1[0, 1].plot(steps_history, dev_u_var_arr)
     axes1[0, 1].set_title(r"Deviatoric Variance ($\mathbf{S}_{dev}$)")
     
     dev_z_1 = np.array(params_hist["dev_z"])[:, :, 0]
@@ -61,7 +64,10 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     axes1[1, 0].plot(steps_history, np.array(params_hist["vol_u_mean"]))
     axes1[1, 0].set_title(r"Volumetric Mean ($\mathbf{m}_{vol}$)")
     
-    axes1[1, 1].plot(steps_history, np.array(params_hist["vol_u_var"]))
+    vol_u_var_arr = np.array(params_hist["vol_u_var"])
+    if vol_u_var_arr.ndim == 3:
+        vol_u_var_arr = np.diagonal(vol_u_var_arr, axis1=1, axis2=2)
+    axes1[1, 1].plot(steps_history, vol_u_var_arr)
     axes1[1, 1].set_title(r"Volumetric Variance ($\mathbf{S}_{vol}$)")
     
     actual_vol_z = np.array(params_hist["vol_z"])[:, :, 0]
@@ -73,7 +79,10 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
         axes1[2, 0].plot(steps_history, np.array(params_hist["aniso_u_mean"]))
         axes1[2, 0].set_title(r"Anisotropic Mean ($\mathbf{m}_{aniso}$)")
         
-        axes1[2, 1].plot(steps_history, np.array(params_hist["aniso_u_var"]))
+        aniso_u_var_arr = np.array(params_hist["aniso_u_var"])
+        if aniso_u_var_arr.ndim == 3:
+            aniso_u_var_arr = np.diagonal(aniso_u_var_arr, axis1=1, axis2=2)
+        axes1[2, 1].plot(steps_history, aniso_u_var_arr)
         axes1[2, 1].set_title(r"Anisotropic Variance ($\mathbf{S}_{aniso}$)")
         
         actual_aniso_z = np.array(params_hist["aniso_z"])[:, :, 0]

@@ -22,7 +22,8 @@ class SparseHyperelasticityGP:
     def __init__(self, raw_params: Any, I_z: jnp.ndarray, min_dev: jnp.ndarray, min_vol: jnp.ndarray,
                  max_dev: jnp.ndarray, max_vol: jnp.ndarray, sampling_mode: str = "pws", 
                  beta: float = 1.0, L: int = 200, feature_extractor: Optional[FeatureExtractor] = None,
-                 min_aniso: Optional[jnp.ndarray] = None, max_aniso: Optional[jnp.ndarray] = None, aniso_z: Optional[jnp.ndarray] = None):
+                 min_aniso: Optional[jnp.ndarray] = None, max_aniso: Optional[jnp.ndarray] = None, aniso_z: Optional[jnp.ndarray] = None,
+                 covariance_mode: str = "diag"):
         self.feature_extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
         # 1. Inducing points split
         self.dev_z = jnp.asarray(I_z[:, :2], dtype=jnp.float64)
@@ -41,6 +42,7 @@ class SparseHyperelasticityGP:
         self.sampling_mode = sampling_mode
         self.L = L  # Number of Random Fourier Features for pathwise sampling
         self.beta = beta
+        self.covariance_mode = covariance_mode
         
         # 2. Setup Parameters and Weights
         self.params: GPParams = self.load_params(raw_params)
@@ -67,8 +69,18 @@ class SparseHyperelasticityGP:
 
         dev_mu = to_f64(jax.nn.softplus(p.raw_dev_u_mean))
         vol_mu = to_f64(jax.nn.softplus(p.raw_vol_u_mean))
-        dev_var = to_f64(jax.nn.softplus(p.raw_dev_u_var))
-        vol_var = to_f64(jax.nn.softplus(p.raw_vol_u_var))
+        
+        if self.covariance_mode == "full":
+            def get_full_cov(raw):
+                L_raw = jnp.tril(raw, k=-1)
+                L_diag = jnp.diag(jax.nn.softplus(jnp.diag(raw)))
+                L = L_raw + L_diag
+                return L @ L.T
+            dev_var = to_f64(get_full_cov(p.raw_dev_u_var))
+            vol_var = to_f64(get_full_cov(p.raw_vol_u_var))
+        else:
+            dev_var = to_f64(jax.nn.softplus(p.raw_dev_u_var))
+            vol_var = to_f64(jax.nn.softplus(p.raw_vol_u_var))
 
         # Force anchor points (First inducing point at zero energy)
         dev_z = to_f64(jax.nn.softplus(p.raw_dev_z)) + to_f64(jnp.array([3.0, 3.0]))
@@ -78,19 +90,30 @@ class SparseHyperelasticityGP:
         vol_z = vol_z.at[0].set(to_f64(jnp.array([1.0])))
 
         dev_u_mean = dev_mu.at[0].set(0.0)
-        dev_u_var  = dev_var.at[0].set(1e-8)
         vol_u_mean = vol_mu.at[0].set(0.0)
-        vol_u_var  = vol_var.at[0].set(1e-8)
+        if self.covariance_mode == "full":
+            dev_u_var = dev_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
+            vol_u_var = vol_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
+        else:
+            dev_u_var  = dev_var.at[0].set(1e-8)
+            vol_u_var  = vol_var.at[0].set(1e-8)
         
         kwargs = {}
         if self.is_anisotropic:
             aniso_mu = to_f64(jax.nn.softplus(p.raw_aniso_u_mean))
-            aniso_var = to_f64(jax.nn.softplus(p.raw_aniso_u_var))
+            if self.covariance_mode == "full":
+                aniso_var = to_f64(get_full_cov(p.raw_aniso_u_var))
+            else:
+                aniso_var = to_f64(jax.nn.softplus(p.raw_aniso_u_var))
+            
             aniso_z = to_f64(jax.nn.softplus(p.raw_aniso_z))
             # anchor point at zero energy
             aniso_z = aniso_z.at[0].set(to_f64(jnp.array([0.0])))
             aniso_u_mean = aniso_mu.at[0].set(0.0)
-            aniso_u_var = aniso_var.at[0].set(1e-8)
+            if self.covariance_mode == "full":
+                aniso_u_var = aniso_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
+            else:
+                aniso_u_var = aniso_var.at[0].set(1e-8)
             
             kwargs = dict(
                 aniso_ls=to_f64(jax.nn.softplus(p.raw_aniso_ls)),
@@ -137,10 +160,12 @@ class SparseHyperelasticityGP:
         # We strictly assume a zero-mean prior, so v_diff is just u_mean - 0
         v_diff = u_mean
         
-        M_mat = K_inv @ (Kzz - jnp.diag(u_var)) @ K_inv.T
-        trace_term = jnp.trace(K_inv @ jnp.diag(u_var))
+        U_cov = u_var if self.covariance_mode == "full" else jnp.diag(u_var)
+        
+        M_mat = K_inv @ (Kzz - U_cov) @ K_inv.T
+        trace_term = jnp.trace(K_inv @ U_cov)
         mahalanobis_term = v_diff.T @ K_inv @ v_diff
-        log_term = jnp.log(jnp.linalg.det(Kzz)) - jnp.log(jnp.linalg.det(jnp.diag(u_var)))
+        log_term = jnp.log(jnp.linalg.det(Kzz)) - jnp.log(jnp.linalg.det(U_cov))
         
         return Kzz, K_inv, v_diff, trace_term, mahalanobis_term, M_mat, log_term
 
@@ -198,9 +223,12 @@ class SparseHyperelasticityGP:
             phi = jnp.sqrt(2.0 * p.vol_sig**2 / self.L) * jnp.cos(jnp.dot(v, W_vol / p.vol_ls[:, None]) + b_vol)
             return jnp.dot(phi, w_vol_prior)
 
+        dev_U_cov = p.dev_u_var if self.covariance_mode == "full" else jnp.diag(p.dev_u_var)
+        vol_U_cov = p.vol_u_var if self.covariance_mode == "full" else jnp.diag(p.vol_u_var)
+        
         # 2. Sample Inducing Values u ~ q(u) using independent PRNG keys
-        u_dev = jax.random.multivariate_normal(k7, p.dev_u_mean, jnp.diag(p.dev_u_var), dtype=jnp.float64)
-        u_vol = jax.random.multivariate_normal(k8, p.vol_u_mean, jnp.diag(p.vol_u_var), dtype=jnp.float64)
+        u_dev = jax.random.multivariate_normal(k7, p.dev_u_mean, dev_U_cov, dtype=jnp.float64)
+        u_vol = jax.random.multivariate_normal(k8, p.vol_u_mean, vol_U_cov, dtype=jnp.float64)
 
         # 3. Correction Vectors (Matheron's Rule)
         v_dev_corr = jnp.linalg.solve(w.dev_Kzz, u_dev - vmap(f_prior_dev)(p.dev_z))
@@ -223,7 +251,8 @@ class SparseHyperelasticityGP:
                 phi = jnp.sqrt(2.0 * p.aniso_sig**2 / self.L) * jnp.cos(jnp.dot(v, W_aniso / p.aniso_ls[:, None]) + b_aniso)
                 return jnp.dot(phi, w_aniso_prior)
 
-            u_aniso = jax.random.multivariate_normal(k12, p.aniso_u_mean, jnp.diag(p.aniso_u_var), dtype=jnp.float64)
+            aniso_U_cov = p.aniso_u_var if self.covariance_mode == "full" else jnp.diag(p.aniso_u_var)
+            u_aniso = jax.random.multivariate_normal(k12, p.aniso_u_mean, aniso_U_cov, dtype=jnp.float64)
             v_aniso_corr = jnp.linalg.solve(w.aniso_Kzz, u_aniso - vmap(f_prior_aniso)(p.aniso_z))
 
             def path_aniso(aniso_feats):

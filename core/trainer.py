@@ -193,7 +193,8 @@ class HyperelasticGPTrainer:
                 feature_extractor=self.model.feature_extractor,
                 min_aniso=getattr(self.model, 'min_aniso', None),
                 max_aniso=getattr(self.model, 'max_aniso', None),
-                aniso_z=getattr(self.model, 'aniso_z', None)
+                aniso_z=getattr(self.model, 'aniso_z', None),
+                covariance_mode=getattr(self.model, 'covariance_mode', 'diag')
             )
             plot_combined_validation(plot_model, self.true_mat_model, self.save_path, m_step)
 
@@ -206,7 +207,8 @@ class HyperelasticGPTrainer:
             feature_extractor=self.model.feature_extractor,
             min_aniso=getattr(self.model, 'min_aniso', None),
             max_aniso=getattr(self.model, 'max_aniso', None),
-            aniso_z=getattr(self.model, 'aniso_z', None)
+            aniso_z=getattr(self.model, 'aniso_z', None),
+            covariance_mode=getattr(self.model, 'covariance_mode', 'diag')
         )
         plot_combined_validation(learned_gp, self.true_mat_model, self.save_path, step_idx)
         

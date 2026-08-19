@@ -59,6 +59,7 @@ def parse_args():
     parser.add_argument('--resume_from', type=str, default="", help="Name of the extraction/extracted_models folder to resume from")
     
     parser.add_argument('--seed', type=int, default=42, help="Random seed for PRNGKey")
+    parser.add_argument('--covariance_mode', type=str, default="diag", choices=["diag", "full"], help="Covariance mode for GP")
 
     return parser.parse_args()
 
@@ -70,16 +71,23 @@ def inv_softplus(y):
     y_safe = jnp.maximum(y, 1e-6)
     return jnp.where(y_safe > 20.0, y_safe, jnp.log(jnp.maximum(jnp.exp(y_safe) - 1.0, 1e-8)))
 
-def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool):
+def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag"):
     def freeze_fn(grads):
+        if covariance_mode == "full":
+            raw_dev_u_var = grads.raw_dev_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+            raw_vol_u_var = grads.raw_vol_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+        else:
+            raw_dev_u_var = grads.raw_dev_u_var.at[0].set(0.0)
+            raw_vol_u_var = grads.raw_vol_u_var.at[0].set(0.0)
+
         # 1. ALWAYS anchor index 0 (reference free state) in BOTH training modes
         grads = grads._replace(
             raw_dev_z=grads.raw_dev_z.at[0].set(0.0),
             raw_vol_z=grads.raw_vol_z.at[0].set(0.0),
             raw_dev_u_mean=grads.raw_dev_u_mean.at[0].set(0.0),
-            raw_dev_u_var=grads.raw_dev_u_var.at[0].set(0.0),
+            raw_dev_u_var=raw_dev_u_var,
             raw_vol_u_mean=grads.raw_vol_u_mean.at[0].set(0.0),
-            raw_vol_u_var=grads.raw_vol_u_var.at[0].set(0.0)
+            raw_vol_u_var=raw_vol_u_var
         )
         
         # 2. Optionally freeze reaction force noise parameters
@@ -211,15 +219,26 @@ if __name__ == "__main__" :
         
         # Anchor index 0 (free state) in initial parameters for both training modes
         raw_dev_u_mean_init = jax.random.normal(k2, (n_ip,)).at[0].set(0.0)
-        raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(1e-8))
         raw_vol_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
-        raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+        
+        if args.covariance_mode == "full":
+            raw_dev_u_var_init = (jax.random.normal(k2, (n_ip, n_ip)) * 0.1)
+            raw_dev_u_var_init = raw_dev_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+            raw_vol_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+            raw_vol_u_var_init = raw_vol_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+        else:
+            raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(1e-8))
+            raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
 
         aniso_kwargs = {}
         if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
             raw_aniso_z_fps = inv_softplus(aniso_z)
             raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
-            raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+            if args.covariance_mode == "full":
+                raw_aniso_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+                raw_aniso_u_var_init = raw_aniso_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+            else:
+                raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
             aniso_kwargs = dict(
                 raw_aniso_ls=jax.random.normal(k1, (1,)),
                 raw_aniso_sig=jax.random.normal(k1, ()),
@@ -306,7 +325,8 @@ if __name__ == "__main__" :
         feature_extractor=extractor,
         min_aniso=min_aniso,
         max_aniso=max_aniso,
-        aniso_z=aniso_z
+        aniso_z=aniso_z,
+        covariance_mode=args.covariance_mode
     )
 
 
@@ -329,7 +349,8 @@ if __name__ == "__main__" :
                 feature_extractor=dyn_extractor,
                 min_aniso=min_aniso,
                 max_aniso=max_aniso,
-                aniso_z=aniso_z
+                aniso_z=aniso_z,
+                covariance_mode=args.covariance_mode
             )
         else:
             local_model = model
@@ -352,7 +373,7 @@ if __name__ == "__main__" :
         min_vol=min_vol,
         max_dev=max_dev,
         max_vol=max_vol,
-        freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points)
+        freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode)
     )
 
     log_info_str = f"{train_load_steps_indices}, {material_model_name}"
@@ -380,7 +401,8 @@ if __name__ == "__main__" :
         feature_extractor=extractor,
         min_aniso=min_aniso,
         max_aniso=max_aniso,
-        aniso_z=aniso_z
+        aniso_z=aniso_z,
+        covariance_mode=args.covariance_mode
     )
     F_train_full_3x3 = jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
     plot_training_r2(learned_gp, true_mat_model, F_train_full_3x3, save_path)
