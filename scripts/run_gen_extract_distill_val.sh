@@ -241,7 +241,6 @@ else
             --sample_mode "$SAMPLE_MODE" \
             --num_points "$NUM_POINTS" \
             --max_gamma "$MAX_GAMMA" \
-            --pruning_mode "$PRUNING_MODE" \
             --sobol_threshold "$SOBOL_THRESHOLD" \
             --sobol_samples_factor "$SOBOL_FACTOR" \
             --seed "$SEED" \
@@ -258,7 +257,6 @@ else
             --sample_mode "$SAMPLE_MODE" \
             --num_points "$NUM_POINTS" \
             --max_gamma "$MAX_GAMMA" \
-            --pruning_mode "$PRUNING_MODE" \
             --sobol_threshold "$SOBOL_THRESHOLD" \
             --sobol_samples_factor "$SOBOL_FACTOR" \
             --seed "$SEED" \
@@ -282,7 +280,6 @@ else
             --sample_mode "$SAMPLE_MODE" \
             --num_points "$NUM_POINTS" \
             --max_gamma "$MAX_GAMMA" \
-            --pruning_mode "$PRUNING_MODE" \
             --sobol_threshold "$SOBOL_THRESHOLD" \
             --sobol_samples_factor "$SOBOL_FACTOR" \
             --seed "$SEED" \
