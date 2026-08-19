@@ -131,7 +131,7 @@ class SparseHyperelasticityGP:
     def _compute_component_weights(self, z: jnp.ndarray, u_mean: jnp.ndarray, u_var: jnp.ndarray, 
                                    ls: jnp.ndarray, sig: jnp.ndarray) -> Tuple[jnp.ndarray, ...]:
         """Helper to precompute reusable covariance matrices and vectors for GP."""
-        Kzz = rbf(z, z, sig, ls) + 1e-6 * jnp.eye(z.shape[0], dtype=jnp.float64)
+        Kzz = rbf(z, z, sig, ls)
         K_inv = jnp.linalg.solve(Kzz, jnp.eye(z.shape[0], dtype=jnp.float64))
         
         # We strictly assume a zero-mean prior, so v_diff is just u_mean - 0
