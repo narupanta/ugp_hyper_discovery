@@ -356,7 +356,12 @@ if __name__ == "__main__" :
             local_model = model
         return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k, number_of_mci_sampling)
 
-    opt = optax.adam(learning_rate=learning_rate)
+    schedule = optax.cosine_decay_schedule(
+        init_value=learning_rate,
+        decay_steps=n_iterations,
+        alpha=1e-4 / learning_rate
+    )
+    opt = optax.adam(learning_rate=schedule)
     opt_state = opt.init(params)
     
     trainer = HyperelasticGPTrainer(
