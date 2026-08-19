@@ -429,8 +429,6 @@ def main():
     parser.add_argument("--no_sensitivity", dest="do_sensitivity", action="store_false", help="Skip sensitivity analysis")
     parser.add_argument("--sobol_threshold", type=float, default=1e-4, help="Total Sobol index threshold for selecting sensitive parameters")
     parser.add_argument("--sobol_samples_factor", type=int, default=1024, help="Saltelli sample factor for sensitivity analysis")
-    parser.add_argument("--pruning_mode", type=str, default="ec", choices=["ec", "threshold"], help="Pruning mode: 'ec' (Estimated Coverage) or 'threshold' (Fixed Sobol Threshold).")
-    parser.add_argument("--ec_threshold", type=float, default=95.0, help="Estimated Coverage threshold in percent (default: 95.0). Only used if pruning_mode='ec'.")
     parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all", "inducing_points"], help="Sample deformation inputs from extraction dataset directly or standard modes (with or without interpolation clipping)")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points for GP joint evaluation and distillation")
     parser.add_argument("--max_gamma", type=float, default=1.0, help="Max deformation intensity gamma when sample_mode is standard")
@@ -850,25 +848,8 @@ def main():
                 
                 sorted_indices = np.argsort(tot_means)[::-1]
                 
-                if args.pruning_mode == "ec":
-                    denominator = max(np.sum(first_means), np.sum(tot_means))
-                    if denominator == 0:
-                        denominator = 1.0
-                    
-                    sorted_tot_means = tot_means[sorted_indices]
-                    est_coverage_pct = np.cumsum(sorted_tot_means) / denominator * 100.0
-                    
-                    cutoff_idx = np.searchsorted(est_coverage_pct, args.ec_threshold)
-                    if cutoff_idx >= len(est_coverage_pct):
-                        cutoff_idx = len(est_coverage_pct) - 1
-                        
-                    selected_indices = sorted_indices[:cutoff_idx + 1].tolist()
-                    print(f"\n[Pruning Mode: EC] Selecting top {cutoff_idx + 1} parameters to reach {args.ec_threshold}% Estimated Coverage.")
-                
-                elif args.pruning_mode == "threshold":
-                    selected_indices = [i for i, mean in enumerate(tot_means) if mean >= args.sobol_threshold]
-                    print(f"\n[Pruning Mode: Threshold] Selecting parameters with Total-Order > {args.sobol_threshold}.")
-                
+                selected_indices = [i for i, mean in enumerate(tot_means) if mean >= args.sobol_threshold]
+                print(f"\n[Pruning Mode: Threshold] Selecting parameters with Total-Order > {args.sobol_threshold}.")
                 model.deactivate_all_parameters()
                 model.activate_parameters(selected_indices)
                 
