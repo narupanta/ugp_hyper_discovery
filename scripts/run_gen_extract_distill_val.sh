@@ -118,6 +118,7 @@ EXT_ITERS=$(get_yaml "['extraction_n_iterations']")
 EXT_LR=$(get_yaml "['extraction_learning_rate']")
 TRAIN_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(*(d['train_load_steps_indices']))")
 MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('model_mode', 'isotropic'))" 2>/dev/null || echo "isotropic")
+COVARIANCE_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('covariance_mode', 'diag'))" 2>/dev/null || echo "diag")
 SEED=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('seed', 42))" 2>/dev/null || echo "42")
 
 
@@ -192,6 +193,7 @@ else
         --asym_factor "$ASYM" \
         --learning_rate "$EXT_LR" \
         --model_mode "$MODEL_MODE" \
+        --covariance_mode "$COVARIANCE_MODE" \
         --seed "$SEED"
     echo "✅ Step 2 (Extraction) completed."
 fi
