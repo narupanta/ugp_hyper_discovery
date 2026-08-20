@@ -249,7 +249,7 @@ if __name__ == "__main__" :
                 raw_aniso_kappa=jnp.array(0.0)
             )
             if args.model_mode == "aniso_unk_fiber":
-                aniso_kwargs["raw_aniso_theta"] = jnp.array(0.0)
+                aniso_kwargs["raw_aniso_theta"] = jax.random.normal(k1, ())
 
         if is_fixed_reaction_force_noise:
             params = GPRawParams(
