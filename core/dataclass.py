@@ -34,7 +34,8 @@ class GPRawParams(NamedTuple):
     raw_aniso_u_var: jnp.ndarray = None
     raw_aniso_z: jnp.ndarray = None
     raw_aniso_kappa: jnp.ndarray = None
-    raw_aniso_theta: jnp.ndarray = None
+    raw_aniso_theta_mean: jnp.ndarray = None
+    raw_aniso_theta_var: jnp.ndarray = None
 
 class GPParams(NamedTuple) :
     dev_ls: jnp.ndarray = None
@@ -59,7 +60,8 @@ class GPParams(NamedTuple) :
     aniso_sig: jnp.ndarray = None
     aniso_u_mean: jnp.ndarray = None
     aniso_u_var: jnp.ndarray = None
-    aniso_theta: jnp.ndarray = None
+    aniso_theta_mean: jnp.ndarray = None
+    aniso_theta_var: jnp.ndarray = None
     aniso_z: jnp.ndarray = None
     aniso_kappa: jnp.ndarray = None
 

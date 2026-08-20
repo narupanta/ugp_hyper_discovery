@@ -255,7 +255,8 @@ if __name__ == "__main__" :
                 raw_aniso_kappa=jnp.array(0.0)
             )
             if args.model_mode == "aniso_unk_fiber":
-                aniso_kwargs["raw_aniso_theta"] = jax.random.normal(k1, ())
+                aniso_kwargs["raw_aniso_theta_mean"] = jax.random.normal(k1, ())
+                aniso_kwargs["raw_aniso_theta_var"] = jnp.array(inv_softplus(1.0))
 
         if is_fixed_reaction_force_noise:
             params = GPRawParams(
@@ -340,9 +341,12 @@ if __name__ == "__main__" :
 
 
     def loss_fn(p, k):
+        k_theta, k_loss = jax.random.split(k)
         if args.model_mode == "aniso_unk_fiber":
-            theta = jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta) - 0.5)
-            a0 = jnp.array([jnp.cos(theta), jnp.sin(theta), 0.0])
+            theta_mean = jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta_mean) - 0.5)
+            theta_std = jax.nn.softplus(p.raw_aniso_theta_var) + 1e-6
+            theta_sample = theta_mean + theta_std * jax.random.normal(k_theta)
+            a0 = jnp.array([jnp.cos(theta_sample), jnp.sin(theta_sample), 0.0])
             dyn_extractor = AnisotropicFeatureExtractor(a0)
             local_model = SparseHyperelasticityGP(
                 raw_params=p,
@@ -361,7 +365,7 @@ if __name__ == "__main__" :
             )
         else:
             local_model = model
-        return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k, number_of_mci_sampling)
+        return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k_loss, number_of_mci_sampling)
 
     if args.final_learning_rate is not None and args.final_learning_rate != learning_rate:
         schedule = optax.cosine_decay_schedule(
@@ -402,17 +406,19 @@ if __name__ == "__main__" :
     print("Generating Training Data R2 Plot for all load steps...")
     pred_deg = float('nan')
     if args.model_mode == "aniso_unk_fiber":
-        theta_pred = jnp.pi * (jax.nn.sigmoid(best_params.raw_aniso_theta) - 0.5)
+        theta_pred = jnp.pi * (jax.nn.sigmoid(best_params.raw_aniso_theta_mean) - 0.5)
+        theta_std_pred = jax.nn.softplus(best_params.raw_aniso_theta_var) + 1e-6
         a0_pred = jnp.array([jnp.cos(theta_pred), jnp.sin(theta_pred), 0.0])
         extractor = AnisotropicFeatureExtractor(a0_pred)
         pred_deg = float(jnp.degrees(theta_pred))
-        print(f"Predicted Fiber Angle: {pred_deg:.2f} degrees")
+        pred_std_deg = float(jnp.degrees(theta_std_pred))
+        print(f"Predicted Fiber Angle: {pred_deg:.2f} ± {pred_std_deg:.2f} degrees")
         import matplotlib.pyplot as plt
         plt.figure()
-        plt.bar(["Predicted Angle"], [pred_deg])
+        plt.bar(["Predicted Angle"], [pred_deg], yerr=[pred_std_deg], capsize=10)
         plt.axhline(30.0, color='r', linestyle='--', label="True Angle (30 deg)")
         plt.ylabel("Angle (degrees)")
-        plt.title(f"Fiber Orientation Prediction (Predicted: {pred_deg:.2f})")
+        plt.title(f"Fiber Orientation Prediction (Predicted: {pred_deg:.2f} ± {pred_std_deg:.2f})")
         plt.legend()
         plt.savefig(os.path.join(save_path, "predicted_angle.pdf"))
         plt.close()
