@@ -52,7 +52,8 @@ def parse_args():
     # Handling the List [1, 5, 9] to cover the 10 steps range
     parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[1, 5, 9])
     parser.add_argument('--n_iterations', type=int, default=1000)
-    parser.add_argument('--learning_rate', type=float, default=5e-2, help="Learning rate for Adam optimizer")
+    parser.add_argument('--learning_rate', type=float, default=0.01, help="Learning rate for Adam optimizer")
+    parser.add_argument('--final_learning_rate', type=float, default=None, help="Final learning rate for cosine decay. If not set or equal to learning_rate, uses constant lr.")
     parser.add_argument('--geometry', type=str, default='block', help="Geometry of the specimen")
     
     # Resume training
@@ -356,12 +357,16 @@ if __name__ == "__main__" :
             local_model = model
         return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k, number_of_mci_sampling)
 
-    schedule = optax.cosine_decay_schedule(
-        init_value=learning_rate,
-        decay_steps=n_iterations,
-        alpha=1e-4 / learning_rate
-    )
-    opt = optax.adam(learning_rate=schedule)
+    if args.final_learning_rate is not None and args.final_learning_rate != learning_rate:
+        schedule = optax.cosine_decay_schedule(
+            init_value=learning_rate,
+            decay_steps=n_iterations,
+            alpha=args.final_learning_rate / learning_rate
+        )
+        opt = optax.adam(learning_rate=schedule)
+    else:
+        opt = optax.adam(learning_rate=learning_rate)
+        
     opt_state = opt.init(params)
     
     trainer = HyperelasticGPTrainer(

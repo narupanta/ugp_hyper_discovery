@@ -116,6 +116,7 @@ FIXED_IP=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(
 PRIOR_MEAN=$(get_yaml "['is_include_prior_mean']")
 EXT_ITERS=$(get_yaml "['extraction_n_iterations']")
 EXT_LR=$(get_yaml "['extraction_learning_rate']")
+EXT_FINAL_LR=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('extraction_final_learning_rate', d.get('extraction_learning_rate')))" 2>/dev/null || echo "$EXT_LR")
 TRAIN_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(*(d['train_load_steps_indices']))")
 MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('model_mode', 'isotropic'))" 2>/dev/null || echo "isotropic")
 COVARIANCE_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('covariance_mode', 'diag'))" 2>/dev/null || echo "diag")
@@ -192,6 +193,7 @@ else
         --target_load_true_top "$TOP_LOAD" \
         --asym_factor "$ASYM" \
         --learning_rate "$EXT_LR" \
+        --final_learning_rate "$EXT_FINAL_LR" \
         --model_mode "$MODEL_MODE" \
         --covariance_mode "$COVARIANCE_MODE" \
         --seed "$SEED"

@@ -115,8 +115,13 @@ class SparseHyperelasticityGP:
             else:
                 aniso_u_var = aniso_var.at[0].set(1e-8)
             
+            if "full" not in self.covariance_mode:
+                aniso_ls_val = to_f64(self.max_aniso.mean() * 2 * jax.nn.sigmoid(p.raw_aniso_ls))
+            else:
+                aniso_ls_val = to_f64(jax.nn.softplus(p.raw_aniso_ls))
+
             kwargs = dict(
-                aniso_ls=to_f64(jax.nn.softplus(p.raw_aniso_ls)),
+                aniso_ls=aniso_ls_val,
                 aniso_sig=to_f64(jnp.exp(p.raw_aniso_sig)),
                 aniso_u_mean=aniso_u_mean,
                 aniso_u_var=aniso_u_var,
@@ -126,14 +131,21 @@ class SparseHyperelasticityGP:
             if getattr(p, "raw_aniso_theta", None) is not None:
                 kwargs["aniso_theta"] = to_f64(jnp.pi * jax.nn.sigmoid(p.raw_aniso_theta))
 
+        if "full" not in self.covariance_mode:
+            dev_ls_val = to_f64(self.max_dev.mean() * 2 * jax.nn.sigmoid(p.raw_dev_ls))
+            vol_ls_val = to_f64(self.max_vol * 2 * jax.nn.sigmoid(p.raw_vol_ls))
+        else:
+            dev_ls_val = to_f64(jax.nn.softplus(p.raw_dev_ls))
+            vol_ls_val = to_f64(jax.nn.softplus(p.raw_vol_ls))
+
         return GPParams(
-            dev_ls=to_f64(jax.nn.softplus(p.raw_dev_ls)),
+            dev_ls=dev_ls_val,
             dev_sig=to_f64(jnp.exp(p.raw_dev_sig)),
             dev_u_mean=dev_u_mean,
             dev_u_var=dev_u_var,
             dev_z=dev_z,
 
-            vol_ls=to_f64(jax.nn.softplus(p.raw_vol_ls)),
+            vol_ls=vol_ls_val,
             vol_sig=to_f64(jnp.exp(p.raw_vol_sig)),
             vol_u_mean=vol_u_mean,
             vol_u_var=vol_u_var,
