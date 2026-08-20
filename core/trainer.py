@@ -14,7 +14,7 @@ jax.config.update("jax_enable_x64", True)
 
 
 class HyperelasticGPTrainer:
-    def __init__(self, model: SparseHyperelasticityGP, initial_params, loss_fn, opt_state, optimizer, save_path, true_mat_model, I_z, I_all, min_dev, min_vol, max_dev, max_vol, freeze_fn=None):
+    def __init__(self, model: SparseHyperelasticityGP, initial_params, loss_fn, opt_state, optimizer, save_path, true_mat_model, I_z, I_all, min_dev, min_vol, max_dev, max_vol, freeze_fn=None, seed=None):
         self.model = model
         self.params = initial_params
         self.opt_state = opt_state
@@ -24,7 +24,10 @@ class HyperelasticGPTrainer:
         
         import json
         with open(f"{self.save_path}/metadata.json", "w") as f:
-            json.dump({"covariance_mode": getattr(self.model, "covariance_mode", "diag")}, f)
+            meta = {"covariance_mode": getattr(self.model, "covariance_mode", "diag")}
+            if seed is not None:
+                meta["seed"] = seed
+            json.dump(meta, f)
 
         self.I_z = I_z
         self.I_all = I_all

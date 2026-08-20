@@ -18,6 +18,8 @@ SKIP_EXT=false
 SKIP_DISTILL=false
 SKIP_VAL=false
 EXTRACTION_DIR_OVERRIDE=""
+BATCH_DIR=""
+SEED_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -39,6 +41,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --extraction-dir)
             EXTRACTION_DIR_OVERRIDE="$2"
+            shift 2
+            ;;
+        --seed)
+            SEED_OVERRIDE="$2"
+            shift 2
+            ;;
+        --batch-dir)
+            BATCH_DIR="$2"
             shift 2
             ;;
         -*)
@@ -120,7 +130,11 @@ EXT_FINAL_LR=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); pr
 TRAIN_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(*(d['train_load_steps_indices']))")
 MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('model_mode', 'isotropic'))" 2>/dev/null || echo "isotropic")
 COVARIANCE_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('covariance_mode', 'diag'))" 2>/dev/null || echo "diag")
-SEED=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('seed', 42))" 2>/dev/null || echo "42")
+if [ -n "$SEED_OVERRIDE" ]; then
+    SEED="$SEED_OVERRIDE"
+else
+    SEED=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('seed', 42))" 2>/dev/null || echo "42")
+fi
 
 
 # 3. Distillation Config
@@ -196,7 +210,8 @@ else
         --final_learning_rate "$EXT_FINAL_LR" \
         --model_mode "$MODEL_MODE" \
         --covariance_mode "$COVARIANCE_MODE" \
-        --seed "$SEED"
+        --seed "$SEED" \
+        --batch_dir "$BATCH_DIR"
     echo "✅ Step 2 (Extraction) completed."
 fi
 

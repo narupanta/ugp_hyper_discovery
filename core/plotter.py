@@ -1025,3 +1025,5 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path):
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, "training_r2_energy.pdf"), bbox_inches='tight')
     plt.close()
+    
+    return float(r2), float(rmse), float(coverage)
