@@ -384,12 +384,9 @@ class SparseHyperelasticityGP:
             total_kl += aniso_kl
             
             if getattr(p, "aniso_theta_var", None) is not None:
-                # Variational Fiber Angle KL (q(theta) vs prior N(0, pi^2))
-                var_q = p.aniso_theta_var**2
-                mu_q = p.aniso_theta_mean
-                var_p = jnp.pi**2
-                theta_kl = 0.5 * ((var_q + mu_q**2) / var_p - 1.0 - jnp.log(var_q / var_p))
-                total_kl += jnp.sum(theta_kl)
+                # Variational Fiber Angle: We explicitly remove the KL penalty for the angle 
+                # so the optimizer can freely collapse the variance to 0 when it finds the true angle basin!
+                pass
             
         return total_kl * self.beta
 
