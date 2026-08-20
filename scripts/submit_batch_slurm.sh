@@ -1,14 +1,15 @@
 #!/bin/bash
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <recipe> [num_seeds]"
-    echo "Example: $0 isihara 20"
+    echo "Usage: $0 <recipe> [num_seeds] [parallel_jobs]"
+    echo "Example: $0 isihara 20 5"
     exit 1
 fi
 
 RECIPE=$1
 NUM_SEEDS=${2:-20}
+PARALLEL_JOBS=${3:-5}
 
-echo "Submitting batch extraction array for recipe '$RECIPE' with $NUM_SEEDS seeds..."
+echo "Submitting batch extraction array for recipe '$RECIPE' with $NUM_SEEDS seeds ($PARALLEL_JOBS concurrently)..."
 
 BATCH_TIMESTAMP=$(date +"%Y%m%dT%H%M%S")
 
@@ -25,23 +26,13 @@ echo "Models will be saved to $BATCH_DIR"
 # Ensure slurm_logs directory exists
 mkdir -p slurm_logs
 
-# 1. Submit the array job
-echo "Submitting array extraction job (1-$NUM_SEEDS)..."
-ARRAY_JOB_ID=$(sbatch --parsable --array=1-$NUM_SEEDS scripts/slurm_extract_job.sbatch "$RECIPE" "$BATCH_DIR")
+# Submit the single job
+echo "Submitting single SLURM job..."
+JOB_ID=$(sbatch --parsable scripts/slurm_extract_job.sbatch "$RECIPE" "$BATCH_DIR" "$NUM_SEEDS" "$PARALLEL_JOBS")
 
-if [ -z "$ARRAY_JOB_ID" ]; then
-    echo "❌ Failed to submit array job!"
+if [ -z "$JOB_ID" ]; then
+    echo "❌ Failed to submit job!"
     exit 1
 fi
-echo "✅ Array Job submitted with ID: $ARRAY_JOB_ID"
-
-# 2. Submit the dependent summarization job
-echo "Submitting summarization job dependent on array job completion..."
-SUM_JOB_ID=$(sbatch --parsable --dependency=afterok:$ARRAY_JOB_ID scripts/slurm_summarize_job.sbatch "$BATCH_DIR")
-
-if [ -z "$SUM_JOB_ID" ]; then
-    echo "⚠️ Failed to submit summary job. You may need to run it manually later."
-else
-    echo "✅ Summarization Job submitted with ID: $SUM_JOB_ID"
-    echo "Everything is queued! You can check the status using 'squeue -u \$USER'"
-fi
+echo "✅ Job submitted with ID: $JOB_ID"
+echo "Everything is queued! You can check the status using 'squeue -u \$USER'"
