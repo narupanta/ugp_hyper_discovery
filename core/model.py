@@ -128,8 +128,10 @@ class SparseHyperelasticityGP:
                 aniso_z=aniso_z,
                 aniso_kappa=to_f64(jax.nn.softplus(p.raw_aniso_kappa))
             )
-            if getattr(p, "raw_aniso_theta", None) is not None:
-                kwargs["aniso_theta"] = to_f64(jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta) - 0.5))
+            if getattr(p, "raw_aniso_theta_mean", None) is not None:
+                kwargs["aniso_theta_mean"] = to_f64(jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta_mean) - 0.5))
+            if getattr(p, "raw_aniso_theta_var", None) is not None:
+                kwargs["aniso_theta_var"] = to_f64(jax.nn.softplus(p.raw_aniso_theta_var) + 1e-6)
 
         if "full" not in self.covariance_mode:
             dev_ls_val = to_f64(self.max_dev.mean() * 2 * jax.nn.sigmoid(p.raw_dev_ls))
@@ -376,9 +378,18 @@ class SparseHyperelasticityGP:
                               w.vol_trace_term, p.vol_z.shape[0])
         total_kl = dev_kl + vol_kl
         if self.is_anisotropic:
-            aniso_kl = component_kl(w.aniso_mahalanobis_term, w.aniso_logterm, 
-                                    w.aniso_trace_term, p.aniso_z.shape[0])
+            aniso_kl = 0.5 * jnp.where("whitened" in self.covariance_mode, 
+                                    w.aniso_trace_term + w.aniso_mahalanobis_term + w.aniso_logterm,
+                                    w.aniso_trace_term + w.aniso_mahalanobis_term + w.aniso_logterm - p.aniso_z.shape[0])
             total_kl += aniso_kl
+            
+            if getattr(p, "aniso_theta_var", None) is not None:
+                # Variational Fiber Angle KL (q(theta) vs prior N(0, pi^2))
+                var_q = p.aniso_theta_var**2
+                mu_q = p.aniso_theta_mean
+                var_p = jnp.pi**2
+                theta_kl = 0.5 * ((var_q + mu_q**2) / var_p - 1.0 - jnp.log(var_q / var_p))
+                total_kl += jnp.sum(theta_kl)
             
         return total_kl * self.beta
 
