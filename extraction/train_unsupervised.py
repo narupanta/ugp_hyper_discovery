@@ -60,6 +60,7 @@ def parse_args():
     parser.add_argument('--resume_from', type=str, default="", help="Name of the extraction/extracted_models folder to resume from")
     
     parser.add_argument('--seed', type=int, default=42, help="Random seed for PRNGKey")
+    parser.add_argument('--batch_dir', type=str, default="", help="If provided, models are saved into batch_dir/seed")
     parser.add_argument("--covariance_mode", type=str, default="diag", choices=["diag", "full", "whitened_diag", "whitened_full"], help="Covariance matrix parameterization for inducing points.")
 
     return parser.parse_args()
@@ -133,10 +134,15 @@ if __name__ == "__main__" :
     n_iterations = args.n_iterations
     learning_rate = args.learning_rate
 
-    # Subfolder with datetime
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     training_config_str = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{n_ip}_{beta}_{is_fixed_reaction_force_noise}_fip{is_fixed_inducing_points}_{model_mode}_{args.geometry}"
-    save_path = os.path.join(base_save_path, f"{timestamp}_{training_config_str}")
+    
+    # Subfolder with datetime or batch_dir
+    if args.batch_dir:
+        save_path = os.path.join(args.batch_dir, str(args.seed))
+    else:
+        save_path = os.path.join(base_save_path, f"{timestamp}_{training_config_str}")
+        
     os.makedirs(save_path, exist_ok=True)
 
     # load precomputed dataset
@@ -383,18 +389,23 @@ if __name__ == "__main__" :
         min_vol=min_vol,
         max_dev=max_dev,
         max_vol=max_vol,
-        freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode)
+        freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode),
+        seed=args.seed
     )
 
     log_info_str = f"{train_load_steps_indices}, {material_model_name}"
+    import time
+    start_time = time.time()
     best_params = trainer.train(n_iterations=n_iterations, main_key=main_key, log_info_str=log_info_str)
+    extraction_time = time.time() - start_time
 
     print("Generating Training Data R2 Plot for all load steps...")
+    pred_deg = float('nan')
     if args.model_mode == "aniso_unk_fiber":
         theta_pred = jnp.pi * (jax.nn.sigmoid(best_params.raw_aniso_theta) - 0.5)
         a0_pred = jnp.array([jnp.cos(theta_pred), jnp.sin(theta_pred), 0.0])
         extractor = AnisotropicFeatureExtractor(a0_pred)
-        pred_deg = jnp.degrees(theta_pred)
+        pred_deg = float(jnp.degrees(theta_pred))
         print(f"Predicted Fiber Angle: {pred_deg:.2f} degrees")
         import matplotlib.pyplot as plt
         plt.figure()
@@ -415,7 +426,40 @@ if __name__ == "__main__" :
         covariance_mode=args.covariance_mode
     )
     F_train_full_3x3 = jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
-    plot_training_r2(learned_gp, true_mat_model, F_train_full_3x3, save_path)
+    r2, rmse, coverage = plot_training_r2(learned_gp, true_mat_model, F_train_full_3x3, save_path)
+
+    # Capture peak memory
+    import resource
+    import sys
+    ru_maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    peak_mb = ru_maxrss / (1024 ** 2) if sys.platform == "darwin" else ru_maxrss / 1024.0
+
+    # Capture physical parameters
+    phys_params = learned_gp.load_params(best_params)
+    
+    metrics = {
+        "seed": args.seed,
+        "extraction_time": extraction_time,
+        "memory_peak_mb": peak_mb,
+        "r2": r2,
+        "rmse": rmse,
+        "ec": coverage,
+        "elbo": float(trainer.loss_components_hist["total_loss"][-1]) if trainer.loss_components_hist["total_loss"] else None,
+        "ell": float(trainer.loss_components_hist["log_like"][-1]) if trainer.loss_components_hist["log_like"] else None,
+        "kl": float(trainer.loss_components_hist["kl"][-1]) if trainer.loss_components_hist["kl"] else None,
+        "phy": float(trainer.loss_components_hist["phy"][-1]) if trainer.loss_components_hist["phy"] else None,
+        "disp_noise": float(args.disp_noise),
+        "load_noise": float(args.load_noise),
+        "fiber_direction": pred_deg,
+        "sigma_free_x": float(phys_params.sigma_free_x),
+        "sigma_free_y": float(phys_params.sigma_free_y),
+        "sigma_fix_x": np.array(phys_params.sigma_fix_x).tolist(),
+        "sigma_fix_y": np.array(phys_params.sigma_fix_y).tolist(),
+    }
+    
+    import json
+    with open(os.path.join(save_path, "extraction_metrics.json"), "w") as f:
+        json.dump(metrics, f, indent=4)
 
     print(f"{timestamp}_{training_config_str}")
 
