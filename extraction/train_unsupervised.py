@@ -59,7 +59,7 @@ def parse_args():
     parser.add_argument('--resume_from', type=str, default="", help="Name of the extraction/extracted_models folder to resume from")
     
     parser.add_argument('--seed', type=int, default=42, help="Random seed for PRNGKey")
-    parser.add_argument('--covariance_mode', type=str, default="diag", choices=["diag", "full"], help="Covariance mode for GP")
+    parser.add_argument("--covariance_mode", type=str, default="diag", choices=["diag", "full", "whitened_diag", "whitened_full"], help="Covariance matrix parameterization for inducing points.")
 
     return parser.parse_args()
 
@@ -221,7 +221,7 @@ if __name__ == "__main__" :
         raw_dev_u_mean_init = jax.random.normal(k2, (n_ip,)).at[0].set(0.0)
         raw_vol_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
         
-        if args.covariance_mode == "full":
+        if "full" in args.covariance_mode:
             raw_dev_u_var_init = (jax.random.normal(k2, (n_ip, n_ip)) * 0.1)
             raw_dev_u_var_init = raw_dev_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
             raw_vol_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
@@ -234,7 +234,7 @@ if __name__ == "__main__" :
         if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
             raw_aniso_z_fps = inv_softplus(aniso_z)
             raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
-            if args.covariance_mode == "full":
+            if "full" in args.covariance_mode:
                 raw_aniso_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
                 raw_aniso_u_var_init = raw_aniso_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
             else:
