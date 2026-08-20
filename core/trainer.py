@@ -22,6 +22,10 @@ class HyperelasticGPTrainer:
         self.save_path = save_path
         self.true_mat_model = true_mat_model
         
+        import json
+        with open(f"{self.save_path}/metadata.json", "w") as f:
+            json.dump({"covariance_mode": getattr(self.model, "covariance_mode", "diag")}, f)
+
         self.I_z = I_z
         self.I_all = I_all
         self.min_dev = min_dev
