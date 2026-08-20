@@ -335,7 +335,7 @@ if __name__ == "__main__" :
 
     def loss_fn(p, k):
         if args.model_mode == "aniso_unk_fiber":
-            theta = jnp.pi * jax.nn.sigmoid(p.raw_aniso_theta)
+            theta = jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta) - 0.5)
             a0 = jnp.array([jnp.cos(theta), jnp.sin(theta), 0.0])
             dyn_extractor = AnisotropicFeatureExtractor(a0)
             local_model = SparseHyperelasticityGP(
@@ -391,7 +391,7 @@ if __name__ == "__main__" :
 
     print("Generating Training Data R2 Plot for all load steps...")
     if args.model_mode == "aniso_unk_fiber":
-        theta_pred = jnp.pi * jax.nn.sigmoid(best_params.raw_aniso_theta)
+        theta_pred = jnp.pi * (jax.nn.sigmoid(best_params.raw_aniso_theta) - 0.5)
         a0_pred = jnp.array([jnp.cos(theta_pred), jnp.sin(theta_pred), 0.0])
         extractor = AnisotropicFeatureExtractor(a0_pred)
         pred_deg = jnp.degrees(theta_pred)
