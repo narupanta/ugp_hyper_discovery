@@ -84,14 +84,25 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
             raw_vol_u_var = grads.raw_vol_u_var.at[0].set(0.0)
 
         # 1. ALWAYS anchor index 0 (reference free state) in BOTH training modes
-        grads = grads._replace(
-            raw_dev_z=grads.raw_dev_z.at[0].set(0.0),
-            raw_vol_z=grads.raw_vol_z.at[0].set(0.0),
-            raw_dev_u_mean=grads.raw_dev_u_mean.at[0].set(0.0),
-            raw_dev_u_var=raw_dev_u_var,
-            raw_vol_u_mean=grads.raw_vol_u_mean.at[0].set(0.0),
-            raw_vol_u_var=raw_vol_u_var
-        )
+        replace_kwargs = {
+            "raw_dev_z": grads.raw_dev_z.at[0].set(0.0),
+            "raw_vol_z": grads.raw_vol_z.at[0].set(0.0),
+            "raw_dev_u_mean": grads.raw_dev_u_mean.at[0].set(0.0),
+            "raw_dev_u_var": raw_dev_u_var,
+            "raw_vol_u_mean": grads.raw_vol_u_mean.at[0].set(0.0),
+            "raw_vol_u_var": raw_vol_u_var
+        }
+
+        if getattr(grads, "raw_aniso_z", None) is not None:
+            replace_kwargs["raw_aniso_z"] = grads.raw_aniso_z.at[0].set(0.0)
+            replace_kwargs["raw_aniso_u_mean"] = grads.raw_aniso_u_mean.at[0].set(0.0)
+            if covariance_mode == "full":
+                raw_aniso_u_var = grads.raw_aniso_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+            else:
+                raw_aniso_u_var = grads.raw_aniso_u_var.at[0].set(0.0)
+            replace_kwargs["raw_aniso_u_var"] = raw_aniso_u_var
+            
+        grads = grads._replace(**replace_kwargs)
         
         # 2. Optionally freeze reaction force noise parameters
         if is_fixed_noise:
@@ -102,10 +113,13 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
             
         # 3. Optionally freeze ALL inducing point positions (from FPS)
         if is_fixed_z:
-            grads = grads._replace(
-                raw_dev_z=jnp.zeros_like(grads.raw_dev_z),
-                raw_vol_z=jnp.zeros_like(grads.raw_vol_z)
-            )
+            replace_kwargs = {
+                "raw_dev_z": jnp.zeros_like(grads.raw_dev_z),
+                "raw_vol_z": jnp.zeros_like(grads.raw_vol_z)
+            }
+            if getattr(grads, "raw_aniso_z", None) is not None:
+                replace_kwargs["raw_aniso_z"] = jnp.zeros_like(grads.raw_aniso_z)
+            grads = grads._replace(**replace_kwargs)
         return grads
     return freeze_fn
 
@@ -256,7 +270,7 @@ if __name__ == "__main__" :
                 raw_aniso_kappa=jnp.array(0.0)
             )
             if args.model_mode == "aniso_unk_fiber":
-                deg = jax.random.uniform(k1, minval=0.1, maxval=89.9)
+                deg = jax.random.uniform(k1, minval=-89.9, maxval=89.9)
                 val = (deg / 180.0) + 0.5
                 raw_theta = jnp.log(val / (1.0 - val))
                 aniso_kwargs["raw_aniso_theta_mean"] = raw_theta
