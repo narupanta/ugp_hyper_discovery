@@ -183,7 +183,7 @@ if __name__ == "__main__" :
     psi_true_func = lambda f: true_mat_model.psi(f)
     piola_true_func = lambda f: true_mat_model.P(f)
 
-    if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
+    if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
         a0 = jnp.asarray(prep_data.get("a0", [1.0, 0.0, 0.0]))
         extractor = AnisotropicFeatureExtractor(a0, cap_compression=args.cap_compression == 1)
         dev, vol, aniso = jax.vmap(jax.vmap(extractor.extract))(f3x3)
@@ -209,7 +209,7 @@ if __name__ == "__main__" :
         I_z = jnp.load(os.path.join(resume_dir, "I_z.npy"))
         dev_z = I_z[:, :2]
         vol_z = I_z[:, 2:]
-        if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
+        if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
             aniso_z = I_z[:, 3:] # assuming aniso is 1D
             min_aniso = jnp.min(aniso_flat, axis=0)
             max_aniso = jnp.max(aniso_flat, axis=0)
@@ -217,7 +217,7 @@ if __name__ == "__main__" :
         dev_z = farthest_point_sampling_with_fixed_point(dev_flat, n_ip, jnp.array([3.0, 3.0]))
         vol_z = farthest_point_sampling_with_fixed_point(vol_flat, n_ip, jnp.array([1.0]))
         I_z_list = [dev_z, vol_z]
-        if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
+        if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
             aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, jnp.array([0.0, 0.0]))
             min_aniso = jnp.min(aniso_flat, axis=0)
             max_aniso = jnp.max(aniso_flat, axis=0)
@@ -253,7 +253,7 @@ if __name__ == "__main__" :
             raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
 
         aniso_kwargs = {}
-        if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
+        if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
             raw_aniso_z_fps = inv_softplus(aniso_z)
             raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
             if "full" in args.covariance_mode:
@@ -269,7 +269,7 @@ if __name__ == "__main__" :
                 raw_aniso_u_var=raw_aniso_u_var_init,
                 raw_aniso_kappa=jnp.array(0.0)
             )
-            if args.model_mode == "aniso_unk_fiber":
+            if args.model_mode in ["aniso_unk_fiber", "aniso_unk_fiber_neg"]:
                 deg = jax.random.uniform(k1, minval=-89.9, maxval=89.9)
                 val = (deg / 180.0) + 0.5
                 raw_theta = jnp.log(val / (1.0 - val))
@@ -359,7 +359,7 @@ if __name__ == "__main__" :
 
     def loss_fn(p, k):
         k_theta, k_loss = jax.random.split(k)
-        if args.model_mode == "aniso_unk_fiber":
+        if args.model_mode in ["aniso_unk_fiber", "aniso_unk_fiber_neg"]:
             theta_mean = jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta_mean) - 0.5)
             theta_sample = theta_mean
             a0 = jnp.array([jnp.cos(theta_sample), jnp.sin(theta_sample), 0.0])
@@ -383,10 +383,13 @@ if __name__ == "__main__" :
             local_model = model
         return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k_loss, number_of_mci_sampling)
 
-    if args.model_mode == "aniso_unk_fiber":
-        # Randomly initialize anywhere between 0.1 and 89.9 degrees
-        deg = jax.random.uniform(k1, minval=0.1, maxval=89.9)
-        print(f"Initializing fiber angle mean at {float(deg):.2f} degrees for testing...")
+    if args.model_mode in ["aniso_unk_fiber", "aniso_unk_fiber_neg"]:
+        if args.model_mode == "aniso_unk_fiber_neg":
+            deg = jax.random.uniform(k1, minval=-89.9, maxval=-0.1)
+        else:
+            deg = jax.random.uniform(k1, minval=-89.9, maxval=89.9)
+            
+        print(f"Initializing fiber angle mean at {float(deg):.2f} degrees...")
         val = (deg / 180.0) + 0.5
         raw_val = float(jnp.log(val / (1.0 - val)))
         
@@ -432,7 +435,7 @@ if __name__ == "__main__" :
 
     print("Generating Training Data R2 Plot for all load steps...")
     pred_deg = float('nan')
-    if args.model_mode == "aniso_unk_fiber":
+    if args.model_mode in ["aniso_unk_fiber", "aniso_unk_fiber_neg"]:
         theta_pred = jnp.pi * (jax.nn.sigmoid(best_params.raw_aniso_theta_mean) - 0.5)
         a0_pred = jnp.array([jnp.cos(theta_pred), jnp.sin(theta_pred), 0.0])
         extractor = AnisotropicFeatureExtractor(a0_pred, cap_compression=args.cap_compression == 1)
