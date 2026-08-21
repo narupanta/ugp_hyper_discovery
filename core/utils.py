@@ -33,6 +33,11 @@ def I4_func(C, a0):
     """Fourth invariant (pseudo-invariant) I4 = a0 . C a0."""
     return jnp.einsum('i,...ij,j->...', a0, C, a0)
 
+def I5_func(C, a0):
+    """Fifth invariant (pseudo-invariant) I5 = a0 . C^2 a0."""
+    C2 = jnp.einsum('...ij,...jk->...ik', C, C)
+    return jnp.einsum('i,...ij,j->...', a0, C2, a0)
+
 # -------------------------------
 # Strain energy functions
 # -------------------------------

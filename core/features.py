@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from abc import ABC, abstractmethod
 from typing import Tuple
-from .utils import invariants_and_derivatives, transform_input_features, C_func, I3_func, I4_func
+from .utils import invariants_and_derivatives, transform_input_features, C_func, I3_func, I4_func, I5_func
 
 class FeatureExtractor(ABC):
     @abstractmethod
@@ -42,8 +42,9 @@ class AnisotropicFeatureExtractor(FeatureExtractor):
         I3 = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
         C_bar = (I3**(-1/3))[..., None, None] * C
         I4_bar = I4_func(C_bar, self.a0)
+        I5_bar = I5_func(C_bar, self.a0)
         
-        # When I4_bar is 1, aniso energy should be 0.
-        aniso = jnp.expand_dims(I4_bar - 1.0, axis=-1)
+        # When I4_bar is 1 and I5_bar is 1, aniso energy should be 0.
+        aniso = jnp.stack([I4_bar - 1.0, I5_bar - 1.0], axis=-1)
         
         return dev, vol, aniso

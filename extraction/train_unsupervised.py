@@ -218,7 +218,7 @@ if __name__ == "__main__" :
         vol_z = farthest_point_sampling_with_fixed_point(vol_flat, n_ip, jnp.array([1.0]))
         I_z_list = [dev_z, vol_z]
         if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
-            aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, jnp.array([0.0]))
+            aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, jnp.array([0.0, 0.0]))
             min_aniso = jnp.min(aniso_flat, axis=0)
             max_aniso = jnp.max(aniso_flat, axis=0)
             I_z_list.append(aniso_z)
@@ -262,7 +262,7 @@ if __name__ == "__main__" :
             else:
                 raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
             aniso_kwargs = dict(
-                raw_aniso_ls=jax.random.normal(k1, (1,)),
+                raw_aniso_ls=jax.random.normal(k1, (2,)),
                 raw_aniso_sig=jax.random.normal(k1, ()),
                 raw_aniso_z=raw_aniso_z_fps,
                 raw_aniso_u_mean=raw_aniso_u_mean_init,
