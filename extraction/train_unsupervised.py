@@ -368,8 +368,9 @@ if __name__ == "__main__" :
         return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k_loss, number_of_mci_sampling)
 
     if args.model_mode == "aniso_unk_fiber":
-        deg = 1.0
-        print(f"Initializing fiber angle mean at {deg} degrees for testing...")
+        # Randomly initialize anywhere between 0.1 and 89.9 degrees
+        deg = jax.random.uniform(k1, minval=0.1, maxval=89.9)
+        print(f"Initializing fiber angle mean at {float(deg):.2f} degrees for testing...")
         val = (deg / 180.0) + 0.5
         raw_val = float(jnp.log(val / (1.0 - val)))
         

@@ -64,7 +64,7 @@ class HyperelasticGPTrainer:
             "dev_gp_lengthscales": [], "vol_gp_lengthscales": [], 
             "dev_u_mean": [], "dev_u_var": [], "vol_u_mean": [], "vol_u_var": [], "dev_z": [], "vol_z": [],
             "aniso_gp_sigma_scaling": [], "aniso_gp_lengthscales": [],
-            "aniso_u_mean": [], "aniso_u_var": [], "aniso_z": [], "aniso_theta": [],
+            "aniso_u_mean": [], "aniso_u_var": [], "aniso_z": [], "aniso_theta_mean": [], "aniso_theta_var": [],
             "sigma_free_x": [], "sigma_free_y": [], "sigma_fix_x": [], "sigma_fix_y": [],
             "vol_kappa": []
         }
