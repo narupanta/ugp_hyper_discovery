@@ -256,8 +256,10 @@ if __name__ == "__main__" :
                 raw_aniso_kappa=jnp.array(0.0)
             )
             if args.model_mode == "aniso_unk_fiber":
-                aniso_kwargs["raw_aniso_theta_mean"] = jnp.array(0.0)
-                aniso_kwargs["raw_aniso_theta_var"] = jnp.array(inv_softplus(1.0))
+                deg = jax.random.uniform(k1, minval=0.1, maxval=89.9)
+                val = (deg / 180.0) + 0.5
+                raw_theta = jnp.log(val / (1.0 - val))
+                aniso_kwargs["raw_aniso_theta_mean"] = raw_theta
 
         if is_fixed_reaction_force_noise:
             params = GPRawParams(
@@ -345,8 +347,7 @@ if __name__ == "__main__" :
         k_theta, k_loss = jax.random.split(k)
         if args.model_mode == "aniso_unk_fiber":
             theta_mean = jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta_mean) - 0.5)
-            theta_std = jax.nn.softplus(p.raw_aniso_theta_var) + 1e-6
-            theta_sample = theta_mean + theta_std * jax.random.normal(k_theta)
+            theta_sample = theta_mean
             a0 = jnp.array([jnp.cos(theta_sample), jnp.sin(theta_sample), 0.0])
             dyn_extractor = AnisotropicFeatureExtractor(a0)
             local_model = SparseHyperelasticityGP(
@@ -419,19 +420,15 @@ if __name__ == "__main__" :
     pred_deg = float('nan')
     if args.model_mode == "aniso_unk_fiber":
         theta_pred = jnp.pi * (jax.nn.sigmoid(best_params.raw_aniso_theta_mean) - 0.5)
-        theta_std_pred = jax.nn.softplus(best_params.raw_aniso_theta_var) + 1e-6
         a0_pred = jnp.array([jnp.cos(theta_pred), jnp.sin(theta_pred), 0.0])
         extractor = AnisotropicFeatureExtractor(a0_pred)
         pred_deg = float(jnp.degrees(theta_pred))
-        pred_std_deg = float(jnp.degrees(theta_std_pred))
-        print(f"Predicted Fiber Angle: {pred_deg:.2f} ± {pred_std_deg:.2f} degrees")
+        print(f"Predicted Fiber Angle: {pred_deg:.2f} degrees")
         import matplotlib.pyplot as plt
         plt.figure()
-        plt.bar(["Predicted Angle"], [pred_deg], yerr=[pred_std_deg], capsize=10)
-        plt.axhline(30.0, color='r', linestyle='--', label="True Angle (30 deg)")
+        plt.bar(["Predicted Angle"], [pred_deg], capsize=10)
         plt.ylabel("Angle (degrees)")
-        plt.title(f"Fiber Orientation Prediction (Predicted: {pred_deg:.2f} ± {pred_std_deg:.2f})")
-        plt.legend()
+        plt.title("Learned Fiber Angle")
         plt.savefig(os.path.join(save_path, "predicted_angle.pdf"))
         plt.close()
 

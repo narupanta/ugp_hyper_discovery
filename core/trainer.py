@@ -121,8 +121,11 @@ class HyperelasticGPTrainer:
 
         if getattr(cur_params, "aniso_theta_mean", None) is not None:
             self.params_hist["aniso_theta_mean"].append(cur_params.aniso_theta_mean)
-            self.params_hist["aniso_theta_var"].append(cur_params.aniso_theta_var)
-            log_message += f"angle: {jnp.degrees(cur_params.aniso_theta_mean):.2f} ± {jnp.degrees(cur_params.aniso_theta_var):.2f}\n"
+            if getattr(cur_params, "aniso_theta_var", None) is not None:
+                self.params_hist["aniso_theta_var"].append(cur_params.aniso_theta_var)
+                log_message += f"angle: {jnp.degrees(cur_params.aniso_theta_mean):.2f} ± {jnp.degrees(cur_params.aniso_theta_var):.2f}\n"
+            else:
+                log_message += f"angle: {jnp.degrees(cur_params.aniso_theta_mean):.2f}\n"
 
         with open(self.log_file_path, "a") as f:
             f.write(log_message)

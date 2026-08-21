@@ -181,11 +181,12 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     if "aniso_theta_mean" in params_hist and len(params_hist["aniso_theta_mean"]) > 0:
         plt.figure(figsize=(8, 4))
         angles_mean = np.degrees(np.array(params_hist["aniso_theta_mean"]))
-        angles_std = np.degrees(np.array(params_hist["aniso_theta_var"])) # It's actually stddev
         plt.plot(steps_history, angles_mean, label="Predicted Angle (Mean)")
-        plt.fill_between(steps_history, angles_mean - angles_std, angles_mean + angles_std, alpha=0.3, label="±1 Std Dev")
+        if "aniso_theta_var" in params_hist and len(params_hist["aniso_theta_var"]) > 0:
+            angles_std = np.degrees(np.array(params_hist["aniso_theta_var"])) # It's actually stddev
+            plt.fill_between(steps_history, angles_mean - angles_std, angles_mean + angles_std, alpha=0.3, label="±1 Std Dev")
         plt.axhline(30.0, color='r', linestyle='--', label="True Angle (30 deg)")
-        plt.title(r"Variational Fiber Orientation Evolution ($\theta$)")
+        plt.title(r"Fiber Orientation Evolution ($\theta$)")
         plt.xlabel("Iteration Step")
         plt.ylabel("Angle (degrees)")
         plt.legend()
