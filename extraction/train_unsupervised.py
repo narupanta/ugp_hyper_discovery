@@ -44,6 +44,7 @@ def parse_args():
     parser.add_argument('--number_of_mci_sampling', type=int, default=3)
     parser.add_argument('--n_ip', type=int, default=5)
     parser.add_argument('--beta', type=float, default=50.0)
+    parser.add_argument('--num_rff', type=int, default=200, help="Number of Random Fourier Features basis")
     
     # Booleans (using 0/1 as integers is often safer in shell scripts)
     parser.add_argument('--is_fixed_reaction_force_noise', type=int, default=1)
@@ -255,7 +256,7 @@ if __name__ == "__main__" :
                 raw_aniso_kappa=jnp.array(0.0)
             )
             if args.model_mode == "aniso_unk_fiber":
-                aniso_kwargs["raw_aniso_theta_mean"] = jax.random.normal(k1, ())
+                aniso_kwargs["raw_aniso_theta_mean"] = jnp.array(0.0)
                 aniso_kwargs["raw_aniso_theta_var"] = jnp.array(inv_softplus(1.0))
 
         if is_fixed_reaction_force_noise:
@@ -329,7 +330,7 @@ if __name__ == "__main__" :
         max_dev=max_dev,
         max_vol=max_vol,
         sampling_mode="pws",
-        beta=beta,
+        beta=beta, L=args.num_rff,
         feature_extractor=extractor,
         min_aniso=min_aniso,
         max_aniso=max_aniso,
@@ -356,7 +357,7 @@ if __name__ == "__main__" :
                 max_dev=max_dev,
                 max_vol=max_vol,
                 sampling_mode="pws",
-                beta=beta,
+                beta=beta, L=args.num_rff,
                 feature_extractor=dyn_extractor,
                 min_aniso=min_aniso,
                 max_aniso=max_aniso,
@@ -435,7 +436,7 @@ if __name__ == "__main__" :
         plt.close()
 
     learned_gp = SparseHyperelasticityGP(
-        raw_params=best_params, I_z=I_z, min_dev=min_dev, min_vol=min_vol, max_dev=max_dev, max_vol=max_vol, beta=beta,
+        raw_params=best_params, I_z=I_z, min_dev=min_dev, min_vol=min_vol, max_dev=max_dev, max_vol=max_vol, beta=beta, L=args.num_rff,
         feature_extractor=extractor,
         min_aniso=min_aniso,
         max_aniso=max_aniso,

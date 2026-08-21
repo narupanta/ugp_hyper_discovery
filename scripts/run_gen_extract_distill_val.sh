@@ -121,6 +121,7 @@ fi
 MCI_SAMPLING=$(get_yaml "['number_of_mci_sampling']")
 N_IP=$(get_yaml "['n_ip']")
 BETA=$(get_yaml "['beta']")
+NUM_RFF=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('num_rff', 200))" 2>/dev/null || echo "200")
 FIXED_NOISE=$(get_yaml "['is_fixed_reaction_force_noise']")
 FIXED_IP=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('is_fixed_inducing_points', 1))" 2>/dev/null || echo "1")
 PRIOR_MEAN=$(get_yaml "['is_include_prior_mean']")
@@ -198,6 +199,7 @@ else
         --train_load_steps_indices $TRAIN_INDICES \
         --n_ip "$N_IP" \
         --beta "$BETA" \
+        --num_rff "$NUM_RFF" \
         --is_fixed_reaction_force_noise "$FIXED_NOISE" \
         --is_fixed_inducing_points "$FIXED_IP" \
         --n_iterations "$EXT_ITERS" \

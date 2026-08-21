@@ -3,6 +3,7 @@ import argparse
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from shapely.geometry import MultiPoint
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 import jax
 from jax import config
@@ -192,15 +193,54 @@ def main():
     
     denominator = max(np.sum(sorted_first_means), np.sum(sorted_tot_means), 1.0)
     est_coverage_pct = (np.cumsum(sorted_tot_means) / denominator) * 100.0
-
     # Violin data
     if is_split:
         dev = np.load(os.path.join(distilled_dir, "dev_flow_samples.npy"))
         vol = np.load(os.path.join(distilled_dir, "vol_flow_samples.npy"))
         min_len = min(dev.shape[0], vol.shape[0])
         samples_np = np.hstack((dev[:min_len], vol[:min_len]))
-        full_param_names = ("C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E", "D1", "D2", "D3")
+        all_dev_names = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E"]
+        all_vol_names = ["D1", "D2", "D3"]
+        full_param_names = all_dev_names[:dev.shape[1]] + all_vol_names[:vol.shape[1]]
     df = pd.DataFrame(samples_np, columns=full_param_names)
+
+    # Calculate cumulative RMSE
+    rmse_history = []
+    
+    if args.distill_target == "sef_split":
+        for k in range(1, len(sorted_params) + 1):
+            active_params_k = sorted_params[:k]
+            
+            # Construct mean parameters
+            theta_dev = np.zeros(9)
+            theta_vol = np.zeros(3)
+            
+            for p in active_params_k:
+                clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+                mean_val = df[clean_p].values.mean()
+                if param_types[p] == "dev":
+                    if clean_p in all_dev_names:
+                        idx = all_dev_names.index(clean_p)
+                        if idx < 9:
+                            theta_dev[idx] = mean_val
+                else:
+                    if clean_p in all_vol_names:
+                        idx = all_vol_names.index(clean_p)
+                        if idx < 3:
+                            theta_vol[idx] = mean_val
+                    
+            # Compute RMSE across all modes
+            total_sq_err = 0.0
+            total_pts = 0
+            for mode in range(len(mode_names)):
+                s_psi = get_distilled_energy_stress_split(theta_dev, theta_vol, F_all[mode])
+                total_sq_err += np.sum((s_psi - psi_true[mode])**2)
+                total_pts += len(s_psi)
+            rmse = np.sqrt(total_sq_err / total_pts)
+            rmse_history.append(float(rmse))
+    else:
+        rmse_history = [0.0] * len(sorted_params)
+
 
     # True params dirty extract
     true_val_dict = {}
@@ -429,6 +469,13 @@ def main():
     ax_viol.text(-1.2, 2.60, "Mean", ha='left', va='bottom', fontsize=8, color='black', clip_on=False)
     ax_viol.text(-1.2, 2.95, "True", ha='left', va='bottom', fontsize=8, color='black', clip_on=False)
 
+    # Add RMSE secondary axis for violin plot
+    ax3 = ax_viol.twinx()
+    ax3.plot(range(len(sorted_params)), rmse_history, color='black', marker='s', linestyle='-', linewidth=1.5, markersize=4, alpha=0.3, zorder=0, label=r"RMSE of $\Psi$")
+    ax3.set_ylabel(r'RMSE of $\Psi$', color='black', fontsize=8, alpha=0.5)
+    ax3.set_ylim(bottom=0)
+    ax3.tick_params(axis='y', labelcolor='black', labelsize=7, colors='black', grid_alpha=0.3)
+
     # Legend for the parameter plot
     import matplotlib.patches as mpatches
     import matplotlib.lines as mlines
@@ -437,62 +484,62 @@ def main():
         mpatches.Patch(color='gray', alpha=0.5, label='Density'),
         mlines.Line2D([0], [0], color='gray', lw=2, label='Mean'),
         mpatches.Patch(color='gray', alpha=0.1, label='95% CI'),
-        mlines.Line2D([0], [0], color='black', lw=1.5, linestyle='--', label='Ground Truth')
+        mlines.Line2D([0], [0], color='black', lw=1.5, linestyle='--', label='Ground Truth'),
+        mlines.Line2D([0], [0], color='black', marker='s', linestyle='-', linewidth=1.5, markersize=4, alpha=0.3, label=r'RMSE of $\Psi$')
     ]
-    ax_viol.legend(handles=viol_legend, loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=4, fontsize=7, frameon=False)
+    ax_viol.legend(handles=viol_legend, loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=5, fontsize=7, frameon=False)
     
     fig_params.savefig(os.path.join(distilled_dir, f"split_params_{true_model_name}.pdf"), dpi=300, bbox_inches='tight')
     plt.close(fig_params)
     
-    # 4. Deviatoric Invariant Space Plot
-    fig_dev_space, ax_dev = plt.subplots(figsize=(6, 5))
+    # 4. Deviatoric and Volumetric Space Combined Plot
+    fig_space, (ax_dev, ax_vol) = plt.subplots(1, 2, figsize=(12, 5))
     
-    # Plot convex hull
+    # --- Deviatoric Space ---
+    # Plot tight boundary by connecting outermost datapoints (Convex Hull)
     dev_hull_pts = np.array(dev_obs)[dev_hull.vertices]
-    # append the first point to close the loop
     dev_hull_pts = np.vstack((dev_hull_pts, dev_hull_pts[0]))
-    ax_dev.plot(dev_hull_pts[:, 0], dev_hull_pts[:, 1], 'k--', lw=1.5, label='Interpolation Boundary (Convex Hull)', zorder=4)
+    ax_dev.plot(dev_hull_pts[:, 0], dev_hull_pts[:, 1], 'k--', lw=1.5, label='Interpolation Boundary', zorder=4)
     ax_dev.fill(dev_hull_pts[:, 0], dev_hull_pts[:, 1], color='gray', alpha=0.1, zorder=1)
     
     # Plot training dataset
     ax_dev.scatter(I_obs_all[:, 0], I_obs_all[:, 1], color='#1f77b4', marker='.', s=10, alpha=0.3, label='Training Dataset', zorder=2)
     
     # Plot inducing points
-    ax_dev.scatter(dev_z[:, 0], dev_z[:, 1], color='black', marker='X', s=50, label='Inducing Points', zorder=5)
+    ax_dev.scatter(dev_z[:, 0], dev_z[:, 1], color='black', marker='X', s=15, linewidths=0.2, label='Inducing Points', zorder=5)
     
-    # Plot mode trajectories
+    # Plot mode trajectories and collect interception text
     mode_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+    extrap_texts_dev = []
+    
     for i, name in enumerate(mode_names):
         dev_I, vol_J = jax.vmap(extractor.extract)(F_all[i])
         ax_dev.plot(dev_I[:, 0], dev_I[:, 1], color=mode_colors[i], lw=1.5, label=f'{name} Trajectory')
         
         dev_info = mode_limits_dev[name]
         if dev_info['always_out']:
-            ax_dev.scatter([3.0], [3.0], color='#E69F00', marker='s', s=30, zorder=6)
-            ax_dev.text(3.1, 3.0 - i*0.15, f"{name}: (Extrap)", fontsize=7, color=mode_colors[i], zorder=7)
+            extrap_texts_dev.append(fr"$\gamma^{{(\mathrm{{{name}}})}}$ (Extrap)")
         else:
             for g_dev, p_dev in dev_info['crossings']:
-                ax_dev.scatter([p_dev[0]], [p_dev[1]], color='#E69F00', marker='s', s=30, zorder=6)
-                ax_dev.text(p_dev[0] + 0.1, p_dev[1] - i*0.08, f"{name}: $\\gamma={g_dev:.2f}$", fontsize=7, color=mode_colors[i], zorder=7)
-    
+                subscript = r"\mathrm{min}" if name in ["UC", "EC"] else r"\mathrm{max}"
+                extrap_texts_dev.append(fr"$\gamma_{{{subscript}}}^{{(\mathrm{{{name}}})}} = {g_dev:.2f}$")
+                
+    # Add boundary intercepts text box outside
+    ax_dev.text(1.02, 0.5, "Boundary Intercepts:\n" + "\n".join(extrap_texts_dev), 
+                transform=ax_dev.transAxes, va='center', fontsize=8, 
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="gray", alpha=0.8))
+                
     # Start point
     ax_dev.scatter([3.0], [3.0], color='black', marker='o', facecolors='none', s=50, label='Undeformed (3, 3)', zorder=5)
     
     ax_dev.set_xlabel(r"$\bar{I}_1$", fontsize=10)
     ax_dev.set_ylabel(r"$\bar{I}_2$", fontsize=10)
     ax_dev.set_title("Deviatoric Invariant Space & Interpolation Limits", fontsize=11)
-    ax_dev.legend(fontsize=8, loc='best', frameon=True)
     ax_dev.grid(True, linestyle=':', alpha=0.6)
     
-    dev_space_path = os.path.join(distilled_dir, f"split_deviatoric_space_{true_model_name}.pdf")
-    fig_dev_space.savefig(dev_space_path, dpi=300, bbox_inches='tight')
-    plt.close(fig_dev_space)
-    
-    # 5. Volumetric Invariant Space Plot (J vs gamma)
-    fig_vol_space, ax_vol = plt.subplots(figsize=(6, 4.5))
-    
+    # --- Volumetric Space ---
     # Plot interpolation bounds
-    ax_vol.axhspan(limit_min_vol[0], limit_max_vol[0], color='gray', alpha=0.15, label='Interpolation Boundary', zorder=1)
+    ax_vol.axhspan(limit_min_vol[0], limit_max_vol[0], color='gray', alpha=0.15, label='Interpolation Boundary (Vol)', zorder=1)
     ax_vol.axhline(limit_min_vol[0], color='k', linestyle='--', lw=1.5, zorder=2)
     ax_vol.axhline(limit_max_vol[0], color='k', linestyle='--', lw=1.5, zorder=2)
     
@@ -501,35 +548,48 @@ def main():
         lbl = 'Inducing Points (J)' if idx == 0 else ""
         ax_vol.axhline(vz[0], color='black', alpha=0.5, ls=':', lw=1, label=lbl, zorder=3)
         
-    # Plot mode trajectories
+    # Plot mode trajectories and collect interception text
+    extrap_texts_vol = []
+    
     for i, name in enumerate(mode_names):
         _, vol_J = jax.vmap(extractor.extract)(F_all[i])
-        ax_vol.plot(gamma, vol_J[:, 0], color=mode_colors[i], lw=2.0, label=f'{name} Trajectory', zorder=4)
+        ax_vol.plot(gamma, vol_J[:, 0], color=mode_colors[i], lw=2.0, zorder=4)
         
         vol_info = mode_limits_vol[name]
         if vol_info['always_out']:
-            ax_vol.scatter([0.0], [1.0], color='#E69F00', marker='s', s=30, zorder=6)
-            ax_vol.text(0.02, 1.0 - 0.05 - i*0.03, f"{name}: (Extrap)", fontsize=7, color=mode_colors[i], zorder=7)
+            extrap_texts_vol.append(fr"$\gamma^{{(\mathrm{{{name}}})}}$ (Extrap)")
         else:
             for g_vol, p_vol in vol_info['crossings']:
-                ax_vol.scatter([g_vol], [p_vol], color='#E69F00', marker='s', s=30, zorder=6)
-                ax_vol.text(g_vol + 0.02, p_vol + 0.02 + i*0.03, f"{name}: $\\gamma={g_vol:.2f}$", fontsize=7, color=mode_colors[i], zorder=7)
+                subscript = r"\mathrm{min}" if name in ["UC", "EC"] else r"\mathrm{max}"
+                extrap_texts_vol.append(fr"$\gamma_{{{subscript}}}^{{(\mathrm{{{name}}})}} = {g_vol:.2f}$")
+                
+    # Add boundary intercepts text box outside
+    ax_vol.text(1.02, 0.5, "Boundary Intercepts:\n" + "\n".join(extrap_texts_vol), 
+                transform=ax_vol.transAxes, va='center', fontsize=8, 
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="gray", alpha=0.8))
         
     ax_vol.scatter([0.0], [1.0], color='black', marker='o', facecolors='none', s=50, label='Undeformed (J=1)', zorder=5)
     
     ax_vol.set_xlabel(r"Deformation ($\gamma$)", fontsize=10)
     ax_vol.set_ylabel(r"Volumetric Invariant ($J$)", fontsize=10)
     ax_vol.set_title("Volumetric Invariant Space & Interpolation Limits", fontsize=11)
-    
-    # Move legend outside to avoid clutter
-    ax_vol.legend(fontsize=8, loc='center left', bbox_to_anchor=(1.0, 0.5), frameon=True)
     ax_vol.grid(True, linestyle=':', alpha=0.6)
     
-    vol_space_path = os.path.join(distilled_dir, f"split_volumetric_space_{true_model_name}.pdf")
-    fig_vol_space.savefig(vol_space_path, dpi=300, bbox_inches='tight')
-    plt.close(fig_vol_space)
+    # Merge legends and place at bottom
+    handles_dev, labels_dev = ax_dev.get_legend_handles_labels()
+    handles_vol, labels_vol = ax_vol.get_legend_handles_labels()
     
-
+    # Deduplicate labels
+    by_label = dict(zip(labels_dev + labels_vol, handles_dev + handles_vol))
+    fig_space.legend(by_label.values(), by_label.keys(), loc='upper center', bbox_to_anchor=(0.5, 0.0), ncol=4, fontsize=8, frameon=True)
+    
+    # Adjust layout to make room for bottom legend and right text boxes
+    fig_space.subplots_adjust(bottom=0.25, right=0.85, wspace=0.6)
+    
+    space_path = os.path.join(distilled_dir, f"split_invariant_spaces_{true_model_name}.pdf")
+    fig_space.savefig(space_path, dpi=300, bbox_inches='tight')
+    plt.close(fig_space)
+    
     print(f"Saved split summary plots to {distilled_dir}")
 
 if __name__ == "__main__":
