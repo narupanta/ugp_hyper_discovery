@@ -26,8 +26,9 @@ class IsotropicFeatureExtractor(FeatureExtractor):
         return dev, vol
 
 class AnisotropicFeatureExtractor(FeatureExtractor):
-    def __init__(self, a0: jnp.ndarray):
+    def __init__(self, a0: jnp.ndarray, cap_compression: bool = True):
         self.a0 = jnp.asarray(a0, dtype=jnp.float64)
+        self.cap_compression = cap_compression
 
     def extract(self, f: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """
@@ -44,7 +45,14 @@ class AnisotropicFeatureExtractor(FeatureExtractor):
         I4_bar = I4_func(C_bar, self.a0)
         I5_bar = I5_func(C_bar, self.a0)
         
-        # Cap at 0.0 to enforce that fibers do not resist compression.
-        aniso = jnp.stack([jnp.maximum(I4_bar - 1.0, 0.0), jnp.maximum(I5_bar - 1.0, 0.0)], axis=-1)
+        I4_val = I4_bar - 1.0
+        I5_val = I5_bar - 1.0
+        
+        # Optionally cap at 0.0 to enforce that fibers do not resist compression.
+        if self.cap_compression:
+            I4_val = jnp.maximum(I4_val, 0.0)
+            I5_val = jnp.maximum(I5_val, 0.0)
+            
+        aniso = jnp.stack([I4_val, I5_val], axis=-1)
         
         return dev, vol, aniso
