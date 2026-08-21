@@ -368,36 +368,13 @@ if __name__ == "__main__" :
         return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k_loss, number_of_mci_sampling)
 
     if args.model_mode == "aniso_unk_fiber":
-        print("Performing Deterministic Multi-Start grid search for best initial fiber angle...")
-        best_loss = jnp.inf
-        best_raw_theta = 0.0
+        deg = 1.0
+        print(f"Initializing fiber angle mean at {deg} degrees for testing...")
+        val = (deg / 180.0) + 0.5
+        raw_val = float(jnp.log(val / (1.0 - val)))
         
-        # Test 9 angles uniformly spaced from -80 to 80 degrees
-        test_angles = jnp.linspace(-80, 80, 9)
-        
-        # Disable variance temporarily for grid search so we evaluate exactly at the mean
-        temp_var = jnp.array(inv_softplus(1e-6))
-        
-        for deg in test_angles.tolist():
-            val = (deg / 180.0) + 0.5
-            raw_val = float(jnp.log(val / (1.0 - val)))
-            
-            test_params = params._replace(
-                raw_aniso_theta_mean=jnp.array(raw_val),
-                raw_aniso_theta_var=temp_var
-            )
-            
-            l_val, _ = loss_fn(test_params, k1)
-            
-            if l_val < best_loss:
-                best_loss = l_val
-                best_raw_theta = raw_val
-                
-        print(f"Best initial angle found: {180.0 * (float(jax.nn.sigmoid(best_raw_theta)) - 0.5):.2f} degrees with initial loss {best_loss:.4f}")
-        
-        # Permanently set the optimal mean, keeping the original high variance for Variational Inference
         params = params._replace(
-            raw_aniso_theta_mean=jnp.array(best_raw_theta)
+            raw_aniso_theta_mean=jnp.array(raw_val)
         )
 
     if args.final_learning_rate is not None and args.final_learning_rate != learning_rate:
