@@ -49,6 +49,7 @@ def parse_args():
     # Booleans (using 0/1 as integers is often safer in shell scripts)
     parser.add_argument('--is_fixed_reaction_force_noise', type=int, default=1)
     parser.add_argument('--is_fixed_inducing_points', type=int, default=1, help="Set to 1 to freeze inducing points at FPS picked locations, 0 to optimize them")
+    parser.add_argument('--cap_compression', type=int, default=1, help="Set to 1 to cap anisotropic invariants to >= 0 (no compression stiffness)")
 
     # Handling the List [1, 5, 9] to cover the 10 steps range
     parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[1, 5, 9])
@@ -184,7 +185,7 @@ if __name__ == "__main__" :
 
     if args.model_mode in ["anisotropic", "aniso_unk_fiber"]:
         a0 = jnp.asarray(prep_data.get("a0", [1.0, 0.0, 0.0]))
-        extractor = AnisotropicFeatureExtractor(a0)
+        extractor = AnisotropicFeatureExtractor(a0, cap_compression=args.cap_compression == 1)
         dev, vol, aniso = jax.vmap(jax.vmap(extractor.extract))(f3x3)
         I_all = jnp.concatenate([dev, vol, aniso], axis=-1)
         aniso_flat = aniso.reshape(-1, aniso.shape[-1])
@@ -362,7 +363,7 @@ if __name__ == "__main__" :
             theta_mean = jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta_mean) - 0.5)
             theta_sample = theta_mean
             a0 = jnp.array([jnp.cos(theta_sample), jnp.sin(theta_sample), 0.0])
-            dyn_extractor = AnisotropicFeatureExtractor(a0)
+            dyn_extractor = AnisotropicFeatureExtractor(a0, cap_compression=args.cap_compression == 1)
             local_model = SparseHyperelasticityGP(
                 raw_params=p,
                 I_z=I_z,
@@ -434,7 +435,7 @@ if __name__ == "__main__" :
     if args.model_mode == "aniso_unk_fiber":
         theta_pred = jnp.pi * (jax.nn.sigmoid(best_params.raw_aniso_theta_mean) - 0.5)
         a0_pred = jnp.array([jnp.cos(theta_pred), jnp.sin(theta_pred), 0.0])
-        extractor = AnisotropicFeatureExtractor(a0_pred)
+        extractor = AnisotropicFeatureExtractor(a0_pred, cap_compression=args.cap_compression == 1)
         pred_deg = float(jnp.degrees(theta_pred))
         print(f"Predicted Fiber Angle: {pred_deg:.2f} degrees")
         import matplotlib.pyplot as plt
