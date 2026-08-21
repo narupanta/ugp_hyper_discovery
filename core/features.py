@@ -44,7 +44,7 @@ class AnisotropicFeatureExtractor(FeatureExtractor):
         I4_bar = I4_func(C_bar, self.a0)
         I5_bar = I5_func(C_bar, self.a0)
         
-        # When I4_bar is 1 and I5_bar is 1, aniso energy should be 0.
-        aniso = jnp.stack([I4_bar - 1.0, I5_bar - 1.0], axis=-1)
+        # Cap at 0.0 to enforce that fibers do not resist compression.
+        aniso = jnp.stack([jnp.maximum(I4_bar - 1.0, 0.0), jnp.maximum(I5_bar - 1.0, 0.0)], axis=-1)
         
         return dev, vol, aniso

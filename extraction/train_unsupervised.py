@@ -117,8 +117,7 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
                 "raw_dev_z": jnp.zeros_like(grads.raw_dev_z),
                 "raw_vol_z": jnp.zeros_like(grads.raw_vol_z)
             }
-            if getattr(grads, "raw_aniso_z", None) is not None:
-                replace_kwargs["raw_aniso_z"] = jnp.zeros_like(grads.raw_aniso_z)
+            # Anisotropic inducing points deliberately left un-frozen so they track the shifting data manifold.
             grads = grads._replace(**replace_kwargs)
         return grads
     return freeze_fn
