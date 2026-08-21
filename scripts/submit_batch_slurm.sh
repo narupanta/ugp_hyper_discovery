@@ -1,4 +1,14 @@
 #!/bin/bash
+#SBATCH --partition=iam
+#SBATCH --qos=iam_qos
+#SBATCH --nodes=1
+#SBATCH --time=20:00:00
+#SBATCH --job-name=ext_rob
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mail-type=FAIL
+#SBATCH --mail-user=n.pantapalin@tu-braunschweig.de
 if [ "$#" -lt 1 ]; then
     echo "Usage: $0 <recipe> [num_seeds]"
     echo "Example: $0 isihara 20"
