@@ -28,7 +28,11 @@ def to_latex(name):
     return rf"${name}$"
 
 def get_comp_color(name):
-    return "#D55E00" if name.startswith("D") else "#0072B2"
+    if name.startswith("D"):
+        return "#D55E00"
+    elif name.startswith("C4") or name.startswith("C6"):
+        return "#CC79A7"
+    return "#0072B2"
 
 def generate_standard_modes(num_points=100, max_gamma=2.0):
     gamma = jnp.linspace(0.0, max_gamma, num_points)
@@ -122,34 +126,77 @@ def main():
 
     model_folder_name = os.path.basename(os.path.normpath(saved_model_dir))
     parts = model_folder_name.split('_')
-    true_model_name = parts[1] if len(parts) > 1 else "isihara"
+    true_model_name = "isihara"
+    if len(parts) > 1 and parts[1] in ["ortho45", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+        true_model_name = parts[1]
+    else:
+        for p in ["ortho45", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+            if p in parts or p in model_folder_name.lower():
+                true_model_name = p
+                break
     true_model = get_material(true_model_name, jit_P=False)
     
     best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
     gp_params = GPRawParams(**best_params_dict)
     I_z = jnp.load(os.path.join(saved_model_dir, "I_z.npy"))
-    I_obs_all = jnp.load(os.path.join(saved_model_dir, "I_obs_all.npy")).reshape(-1, 3)
     
     dev_z = I_z[:, :2]
-    vol_z = I_z[:, 2:]
+    vol_z = I_z[:, 2:3] if I_z.shape[1] > 3 else I_z[:, 2:]
+    aniso_z = I_z[:, 3:] if I_z.shape[1] > 3 else None
+    
     min_dev, max_dev = jnp.min(dev_z, axis=0), jnp.max(dev_z, axis=0)
     min_vol, max_vol = jnp.min(vol_z, axis=0), jnp.max(vol_z, axis=0)
-    dev_obs = I_obs_all[:, :2]
-    vol_obs = I_obs_all[:, 2:]
-    limit_min_vol, limit_max_vol = jnp.min(vol_obs, axis=0), jnp.max(vol_obs, axis=0)
+    min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
+    max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
     
+    obs_path = os.path.join(saved_model_dir, "I_obs_all.npy")
+    if os.path.exists(obs_path):
+        I_obs_all = jnp.load(obs_path)
+        I_obs_all = I_obs_all.reshape(-1, I_obs_all.shape[-1])
+        dev_obs = I_obs_all[:, :2]
+        vol_obs = I_obs_all[:, 2:3]
+    else:
+        dev_obs = dev_z
+        vol_obs = vol_z
+        I_obs_all = I_z
+        
+    limit_min_vol, limit_max_vol = jnp.min(vol_obs, axis=0), jnp.max(vol_obs, axis=0)
     dev_hull = ConvexHull(np.array(dev_obs))
     hull_eqs = dev_hull.equations
     dev_tol = 0.001
     vol_tol = 0.001
-    
-    learned_gp = SparseHyperelasticityGP(gp_params, I_z, min_dev, min_vol, max_dev, max_vol, beta=1.0)
+
+    feature_extractor = None
+    if aniso_z is not None:
+        from core.features import AnisotropicFeatureExtractor
+        if aniso_z.shape[1] == 4:
+            a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
+            a1 = np.array([np.cos(-np.pi / 4.0), np.sin(-np.pi / 4.0), 0.0])
+            feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
+        else:
+            a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
+            feature_extractor = AnisotropicFeatureExtractor(a0)
+
+    import json
+    metadata_path = os.path.join(saved_model_dir, "metadata.json")
+    cov_mode = "diag"
+    if os.path.exists(metadata_path):
+        with open(metadata_path, "r") as f:
+            cov_mode = json.load(f).get("covariance_mode", "diag")
+            
+    learned_gp = SparseHyperelasticityGP(
+        gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
+        beta=1.0, feature_extractor=feature_extractor,
+        aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,
+        covariance_mode=cov_mode
+    )
     
     # Generate Data
+
     F_all, gamma = generate_standard_modes(num_points=100, max_gamma=1.0)
     mode_names = ["UT", "ET", "PS", "UC", "EC", "SS"]
     
-    extractor = IsotropicFeatureExtractor()
+    extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
 
     psi_true = jax.vmap(true_model.psi)(F_all)
     psi_dist_mean = [learned_gp.psi_dist(F_all[mode]).mean for mode in range(len(mode_names))]
@@ -157,20 +204,54 @@ def main():
 
     # Distilled Samples
     num_samples = 32
+    has_aniso = os.path.exists(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
+    
     if args.distill_target == "sef_split":
         dev_samples = np.load(os.path.join(distilled_dir, "dev_flow_samples.npy"))[:num_samples]
         vol_samples = np.load(os.path.join(distilled_dir, "vol_flow_samples.npy"))[:num_samples]
+        aniso_samples = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy"))[:num_samples] if has_aniso else None
         
+        def psi_aniso_single(theta_aniso, F_single):
+            if F_single.shape == (2, 2):
+                F_s = jnp.array([[F_single[0, 0], F_single[0, 1], 0.0],
+                                 [F_single[1, 0], F_single[1, 1], 0.0],
+                                 [0.0, 0.0, 1.0]])
+            else:
+                F_s = F_single
+            from core.utils import C_func, I3_func
+            C = C_func(F_s)
+            I3_safe = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
+            C_bar = (I3_safe**(-1/3)) * C
+            a1 = jnp.array([jnp.cos(jnp.pi/4), jnp.sin(jnp.pi/4), 0.0])
+            a2 = jnp.array([jnp.cos(-jnp.pi/4), jnp.sin(-jnp.pi/4), 0.0])
+            I4_bar_1 = jnp.einsum('i,ij,j->', a1, C_bar, a1)
+            I4_bar_2 = jnp.einsum('i,ij,j->', a2, C_bar, a2)
+            I4_m1 = I4_bar_1 - 1.0
+            I6_m1 = I4_bar_2 - 1.0
+            return (theta_aniso[0] * I4_m1 + theta_aniso[1] * I4_m1**2 + 
+                    theta_aniso[2] * I6_m1 + theta_aniso[3] * I6_m1**2)
+
         def get_distilled_energy_stress_split(theta_dev, theta_vol, F_chunk):
             dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
             vol_theta = [0.0]*9 + list(theta_vol)
             mat_dev = get_material("gmr", dev_params=dev_theta[:9], vol_params=dev_theta[9:12], jit_P=False)
             mat_vol = get_material("gmr", dev_params=vol_theta[:9], vol_params=vol_theta[9:12], jit_P=False)
             return jax.vmap(mat_dev.psi)(F_chunk) + jax.vmap(mat_vol.psi)(F_chunk)
+
+        def get_distilled_energy_stress_split_3(theta_dev, theta_vol, theta_aniso, F_chunk):
+            dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
+            vol_theta = [0.0]*9 + list(theta_vol)
+            mat_dev = get_material("gmr", dev_params=dev_theta[:9], vol_params=dev_theta[9:12], jit_P=False)
+            mat_vol = get_material("gmr", dev_params=vol_theta[:9], vol_params=vol_theta[9:12], jit_P=False)
+            s_psi_aniso = jax.vmap(lambda f: psi_aniso_single(theta_aniso, f))(F_chunk)
+            return jax.vmap(mat_dev.psi)(F_chunk) + jax.vmap(mat_vol.psi)(F_chunk) + s_psi_aniso
             
         dist_psi_samples = []
         for mode in range(len(mode_names)):
-            s_psi = jax.vmap(lambda td, tv: get_distilled_energy_stress_split(td, tv, F_all[mode]))(dev_samples, vol_samples)
+            if has_aniso:
+                s_psi = jax.vmap(lambda td, tv, ta: get_distilled_energy_stress_split_3(td, tv, ta, F_all[mode]))(dev_samples, vol_samples, aniso_samples)
+            else:
+                s_psi = jax.vmap(lambda td, tv: get_distilled_energy_stress_split(td, tv, F_all[mode]))(dev_samples, vol_samples)
             dist_psi_samples.append(s_psi)
 
     # Sensitivity
@@ -182,10 +263,13 @@ def main():
     if is_split:
         dev_tot, dev_first = get_sensitivities(distilled_dir, "dev_", "dev_sensitivities")
         vol_tot, vol_first = get_sensitivities(distilled_dir, "vol_", "vol_sensitivities")
+        aniso_tot, aniso_first = get_sensitivities(distilled_dir, "aniso_", "aniso_sensitivities")
         for k, v in dev_tot.items():
             tot_means_all[k], first_means_all[k], param_types[k] = v, dev_first.get(k, 0.0), "dev"
         for k, v in vol_tot.items():
             tot_means_all[k], first_means_all[k], param_types[k] = v, vol_first.get(k, 0.0), "vol"
+        for k, v in aniso_tot.items():
+            tot_means_all[k], first_means_all[k], param_types[k] = v, aniso_first.get(k, 0.0), "aniso"
     
     sorted_params = sorted(tot_means_all.keys(), key=lambda k: tot_means_all[k], reverse=True)
     sorted_tot_means = np.array([tot_means_all[k] for k in sorted_params])
@@ -193,20 +277,28 @@ def main():
     
     denominator = max(np.sum(sorted_first_means), np.sum(sorted_tot_means), 1.0)
     est_coverage_pct = (np.cumsum(sorted_tot_means) / denominator) * 100.0
+    
     # Violin data
     if is_split:
         dev = np.load(os.path.join(distilled_dir, "dev_flow_samples.npy"))
         vol = np.load(os.path.join(distilled_dir, "vol_flow_samples.npy"))
-        min_len = min(dev.shape[0], vol.shape[0])
-        samples_np = np.hstack((dev[:min_len], vol[:min_len]))
+        all_samples = [dev, vol]
         all_dev_names = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E"]
         all_vol_names = ["D1", "D2", "D3"]
         full_param_names = all_dev_names[:dev.shape[1]] + all_vol_names[:vol.shape[1]]
-    df = pd.DataFrame(samples_np, columns=full_param_names)
+        
+        if has_aniso:
+            aniso = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
+            all_samples.append(aniso)
+            all_aniso_names = ["C41", "C42", "C61", "C62"]
+            full_param_names += all_aniso_names[:aniso.shape[1]]
+            
+        min_len = min(s.shape[0] for s in all_samples)
+        samples_np = np.hstack([s[:min_len] for s in all_samples])
+        df = pd.DataFrame(samples_np, columns=full_param_names)
 
     # Calculate cumulative RMSE
     rmse_history = []
-    
     if args.distill_target == "sef_split":
         for k in range(1, len(sorted_params) + 1):
             active_params_k = sorted_params[:k]
@@ -214,26 +306,36 @@ def main():
             # Construct mean parameters
             theta_dev = np.zeros(9)
             theta_vol = np.zeros(3)
+            theta_aniso = np.zeros(4)
             
             for p in active_params_k:
                 clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
-                mean_val = df[clean_p].values.mean()
-                if param_types[p] == "dev":
-                    if clean_p in all_dev_names:
-                        idx = all_dev_names.index(clean_p)
-                        if idx < 9:
-                            theta_dev[idx] = mean_val
-                else:
-                    if clean_p in all_vol_names:
-                        idx = all_vol_names.index(clean_p)
-                        if idx < 3:
-                            theta_vol[idx] = mean_val
+                if clean_p in df.columns:
+                    mean_val = df[clean_p].values.mean()
+                    if param_types.get(p) == "dev":
+                        if clean_p in all_dev_names:
+                            idx = all_dev_names.index(clean_p)
+                            if idx < 9:
+                                theta_dev[idx] = mean_val
+                    elif param_types.get(p) == "vol":
+                        if clean_p in all_vol_names:
+                            idx = all_vol_names.index(clean_p)
+                            if idx < 3:
+                                theta_vol[idx] = mean_val
+                    elif param_types.get(p) == "aniso" and has_aniso:
+                        if clean_p in all_aniso_names:
+                            idx = all_aniso_names.index(clean_p)
+                            if idx < 4:
+                                theta_aniso[idx] = mean_val
                     
             # Compute RMSE across all modes
             total_sq_err = 0.0
             total_pts = 0
             for mode in range(len(mode_names)):
-                s_psi = get_distilled_energy_stress_split(theta_dev, theta_vol, F_all[mode])
+                if has_aniso:
+                    s_psi = get_distilled_energy_stress_split_3(theta_dev, theta_vol, theta_aniso, F_all[mode])
+                else:
+                    s_psi = get_distilled_energy_stress_split(theta_dev, theta_vol, F_all[mode])
                 total_sq_err += np.sum((s_psi - psi_true[mode])**2)
                 total_pts += len(s_psi)
             rmse = np.sqrt(total_sq_err / total_pts)
@@ -241,10 +343,15 @@ def main():
     else:
         rmse_history = [0.0] * len(sorted_params)
 
-
-    # True params dirty extract
+    # True params extract
     true_val_dict = {}
-    if true_model_name in ["c20d10d05", "c20_d10_d05"]:
+    if true_model_name == "ortho45":
+        true_params_set = {"C10", "D1", "C42", "C62"}
+        true_val_dict = {"C10": 0.5, "D1": 1.0, "C41": 0.0, "C42": 0.7, "C61": 0.0, "C62": 0.9}
+    elif true_model_name == "aniso30":
+        true_params_set = {"C10", "D1", "C42"}
+        true_val_dict = {"C10": 0.5, "D1": 1.0, "C41": 0.0, "C42": 0.7}
+    elif true_model_name in ["c20d10d05", "c20_d10_d05"]:
         true_params_set = {"C10", "D1", "D2"}
         true_val_dict = {"C10": 2.0, "D1": 1.0, "D2": 0.5}
     elif true_model_name in ["nh2", "neohookean"]:
@@ -258,6 +365,8 @@ def main():
         true_val_dict = {"C10": 0.5, "E": 1.0, "D1": 1.5}
     else:
         true_params_set = {"C10", "D1"}
+        true_val_dict = {"C10": 0.5, "D1": 1.0}
+
 
     # Figure dimensions
     fig_width = 8.27
@@ -323,7 +432,8 @@ def main():
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=dist_color, lw=0.5, alpha=0.8), zorder=6)
         
         # Interpolation Limit boundary
-        dev_I, vol_J = jax.vmap(extractor.extract)(F_all[i])
+        feats_ext = jax.vmap(extractor.extract)(F_all[i])
+        dev_I, vol_J = feats_ext[0], feats_ext[1]
         inside_vol = (vol_J[:, 0] >= limit_min_vol[0] - vol_tol) & (vol_J[:, 0] <= limit_max_vol[0] + vol_tol)
         dev_I_np = np.array(dev_I)
         inside_dev = np.all(dev_I_np @ hull_eqs[:, :-1].T + hull_eqs[:, -1] <= dev_tol, axis=1)
@@ -370,8 +480,9 @@ def main():
     plt.close(fig_energy)
 
     # 2. Parameters Figure (Sensitivity + Violin)
+    h_params = 5.2
     fig_params = plt.figure(figsize=(fig_width, h_params))
-    gs_params = fig_params.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.4)
+    gs_params = fig_params.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.85)
     
     ax_sens = fig_params.add_subplot(gs_params[0, 0])
     x_pos = np.arange(len(sorted_params))
@@ -381,11 +492,19 @@ def main():
         clean_p = p.replace('$', '').replace('{', '').replace('}', '').replace('_', '')
         if clean_p in true_params_set:
             label_gt = "Ground Truth Parameter" if not gt_label_added else ""
-            ax_sens.axvspan(i - 0.25, i + 0.25, color='#E0E0E0', alpha=0.8, zorder=1, edgecolor='none', label=label_gt)
+            ax_sens.axvspan(i - 0.25, i + 0.25, color='#E0E0E0', alpha=0.8, zorder=1, label=label_gt)
             gt_label_added = True
             
-        color = "#0072B2" if param_types[p] == "dev" else "#D55E00"
-        label = "Mean Total-Order (Dev)" if param_types[p] == "dev" else "Mean Total-Order (Vol)"
+        if param_types.get(p) == "dev":
+            color = "#0072B2"
+            label = "Mean Total-Order (Dev)"
+        elif param_types.get(p) == "vol":
+            color = "#D55E00"
+            label = "Mean Total-Order (Vol)"
+        else:
+            color = "#CC79A7"
+            label = "Mean Total-Order (Aniso)"
+            
         handles, labels = ax_sens.get_legend_handles_labels()
         if label not in labels:
             ax_sens.bar(x_pos[i], sorted_tot_means[i], width=0.5, color=color, alpha=0.9, zorder=3, label=label)
@@ -393,7 +512,7 @@ def main():
             ax_sens.bar(x_pos[i], sorted_tot_means[i], width=0.5, color=color, alpha=0.9, zorder=3)
         
     ax_sens.set_yscale('log')
-    ax_sens.set_ylim(bottom=max(1e-5, args.sobol_threshold * 0.1))
+    ax_sens.set_ylim(bottom=max(1e-5, args.sobol_threshold * 0.1), top=10.0)
     ax_sens.axhline(args.sobol_threshold, color='black', linestyle='--', linewidth=1.5, label=f"Threshold ({args.sobol_threshold})")
     ax_sens.set_ylabel('Sobol Sensitivity', fontsize=8)
     
@@ -413,9 +532,12 @@ def main():
     
     lines_1, labels_1 = ax_sens.get_legend_handles_labels()
     lines_2, labels_2 = ax2.get_legend_handles_labels()
-    ax_sens.legend(lines_1 + lines_2, labels_1 + labels_2, fontsize=6, loc='center right', bbox_to_anchor=(1.0, 0.6))
+    by_label_sens = dict(zip(labels_1 + labels_2, lines_1 + lines_2))
+    ax_sens.legend(by_label_sens.values(), by_label_sens.keys(), fontsize=6.5, loc='upper center', bbox_to_anchor=(0.5, -0.14), ncol=3, frameon=False)
     
     plt.setp(ax_sens.get_xticklabels(), visible=False)
+
+
 
     # 3. Violin Plot (Row 3)
     ax_viol = fig_params.add_subplot(gs_params[1, 0], sharex=ax_sens)
@@ -447,34 +569,37 @@ def main():
             
             ax_viol.plot([i - 0.35, i + 0.35], [mean_val, mean_val], color=color, lw=2)
             
-            ax_viol.text(i, 2.60, fr"${mean_val:.3f}$", 
-                    ha='center', va='bottom', fontsize=7, color=color,
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor=color, lw=0.5), zorder=10, clip_on=False)
+            ax_viol.text(i, 2.65, fr"${mean_val:.3f}$", 
+                    ha='center', va='center', fontsize=6.5, color=color,
+                    bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor=color, lw=0.5), zorder=10)
         
         if is_true:
             ax_viol.plot([i - 0.35, i + 0.35], [true_val, true_val], color='black', lw=1.5, linestyle='--')
             
             ax_viol.text(i, 2.95, fr"${true_val:.3f}$", 
-                    ha='center', va='bottom', fontsize=7, color='black',
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor='black', lw=0.5), zorder=10, clip_on=False)
+                    ha='center', va='center', fontsize=6.5, color='black',
+                    bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor='black', lw=0.5), zorder=10)
                 
     ax_viol.set_xticks(range(len(sorted_params)))
     ax_viol.set_xticklabels(sorted_params, fontsize=9)
     ax_viol.set_ylabel('Parameter Value', fontsize=8)
-    ax_viol.set_ylim([0, 2.5])
+    ax_viol.set_ylim([0, 3.25])
+    ax_viol.set_yticks([0.0, 0.5, 1.0, 1.5, 2.0, 2.5])
     ax_viol.tick_params(axis='y', labelsize=7)
     ax_viol.grid(False)
     
-    # Row labels for the text boxes
-    ax_viol.text(-1.2, 2.60, "Mean", ha='left', va='bottom', fontsize=8, color='black', clip_on=False)
-    ax_viol.text(-1.2, 2.95, "True", ha='left', va='bottom', fontsize=8, color='black', clip_on=False)
+    # Row labels for the text boxes placed cleanly to the left of the y-axis spine
+    ax_viol.text(-0.025, 2.65 / 3.25, "Mean", transform=ax_viol.transAxes, ha='right', va='center', fontsize=7.5, fontweight='bold', color='black')
+    ax_viol.text(-0.025, 2.95 / 3.25, "True", transform=ax_viol.transAxes, ha='right', va='center', fontsize=7.5, fontweight='bold', color='black')
 
-    # Add RMSE secondary axis for violin plot
+    # Add RMSE secondary axis for violin plot with headroom to prevent crossing text boxes
     ax3 = ax_viol.twinx()
     ax3.plot(range(len(sorted_params)), rmse_history, color='black', marker='s', linestyle='-', linewidth=1.5, markersize=4, alpha=0.3, zorder=0, label=r"RMSE of $\Psi$")
     ax3.set_ylabel(r'RMSE of $\Psi$', color='black', fontsize=8, alpha=0.5)
-    ax3.set_ylim(bottom=0)
+    max_rmse = max(rmse_history) if len(rmse_history) > 0 and max(rmse_history) > 0 else 1.0
+    ax3.set_ylim(bottom=0, top=max_rmse * 1.35)
     ax3.tick_params(axis='y', labelcolor='black', labelsize=7, colors='black', grid_alpha=0.3)
+
 
     # Legend for the parameter plot
     import matplotlib.patches as mpatches
@@ -490,6 +615,7 @@ def main():
     ax_viol.legend(handles=viol_legend, loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=5, fontsize=7, frameon=False)
     
     fig_params.savefig(os.path.join(distilled_dir, f"split_params_{true_model_name}.pdf"), dpi=300, bbox_inches='tight')
+    fig_params.savefig(os.path.join(distilled_dir, f"split_params_{true_model_name}.png"), dpi=300, bbox_inches='tight')
     plt.close(fig_params)
     
     # 4. Deviatoric and Volumetric Space Combined Plot
@@ -513,7 +639,8 @@ def main():
     extrap_texts_dev = []
     
     for i, name in enumerate(mode_names):
-        dev_I, vol_J = jax.vmap(extractor.extract)(F_all[i])
+        feats_ext = jax.vmap(extractor.extract)(F_all[i])
+        dev_I, vol_J = feats_ext[0], feats_ext[1]
         ax_dev.plot(dev_I[:, 0], dev_I[:, 1], color=mode_colors[i], lw=1.5, label=f'{name} Trajectory')
         
         dev_info = mode_limits_dev[name]
@@ -552,7 +679,8 @@ def main():
     extrap_texts_vol = []
     
     for i, name in enumerate(mode_names):
-        _, vol_J = jax.vmap(extractor.extract)(F_all[i])
+        feats_ext = jax.vmap(extractor.extract)(F_all[i])
+        vol_J = feats_ext[1]
         ax_vol.plot(gamma, vol_J[:, 0], color=mode_colors[i], lw=2.0, zorder=4)
         
         vol_info = mode_limits_vol[name]

@@ -28,7 +28,8 @@ def main():
     parser = argparse.ArgumentParser(description="Plot invariant-dependent Sobol indices")
     parser.add_argument("--distilled_dir", type=str, required=True, help="Path to the distilled model directory")
     parser.add_argument("--active_params", type=str, default=None, help="Comma-separated list of active parameters")
-    parser.add_argument("--component", type=str, default="dev", choices=["dev", "vol"], help="Component for split model")
+    parser.add_argument("--component", type=str, default="dev", choices=["dev", "vol", "aniso"], help="Component for split model")
+
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
     args = parser.parse_args()
 

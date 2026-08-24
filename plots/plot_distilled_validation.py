@@ -42,7 +42,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, default=None)
     parser.add_argument("--distilled_dir", type=str, required=True)
-    parser.add_argument("--material_model", type=str, default="isihara", choices=["ogden", "gmr", "gmr_log", "gmr_nolog", "isihara"])
+    parser.add_argument("--material_model", type=str, default="isihara", choices=["ogden", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
     args = parser.parse_args()
     
@@ -73,11 +73,40 @@ def main():
     I_z = jnp.load(os.path.join(saved_model_dir, "I_z.npy"))
     
     dev_z = I_z[:, :2]
-    vol_z = I_z[:, 2:]
+    if I_z.shape[1] > 3:
+        vol_z = I_z[:, 2:3]
+        aniso_z = I_z[:, 3:]
+    elif I_z.shape[1] == 3:
+        vol_z = I_z[:, 2:3]
+        aniso_z = None
+    else:
+        vol_z = I_z[:, 2:]
+        aniso_z = None
+
     min_dev = jnp.min(dev_z, axis=0)
     min_vol = jnp.min(vol_z, axis=0)
     max_dev = jnp.max(dev_z, axis=0)
     max_vol = jnp.max(vol_z, axis=0)
+
+    min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
+    max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
+
+    feature_extractor = None
+    if aniso_z is not None:
+        from core.features import AnisotropicFeatureExtractor
+        if aniso_z.shape[1] == 4:
+            a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
+            a1 = np.array([np.cos(-np.pi / 4.0), np.sin(-np.pi / 4.0), 0.0])
+            feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
+        else:
+            if getattr(gp_params, "raw_aniso_theta_mean", None) is not None:
+                raw_th = gp_params.raw_aniso_theta_mean
+                theta = float(np.pi * (1.0 / (1.0 + np.exp(-raw_th)) - 0.5))
+            else:
+                theta = np.pi / 4.0
+            a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
+            feature_extractor = AnisotropicFeatureExtractor(a0)
+
     
     import json
     metadata_path = os.path.join(saved_model_dir, "metadata.json")
@@ -87,7 +116,13 @@ def main():
     else:
         cov_mode = "full" if gp_params.raw_dev_u_var.ndim == 2 else "diag"
         
-    learned_gp = SparseHyperelasticityGP(gp_params, I_z, min_dev, min_vol, max_dev, max_vol, beta=1.0, covariance_mode=cov_mode)
+    learned_gp = SparseHyperelasticityGP(
+        gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
+        beta=1.0, feature_extractor=feature_extractor,
+        aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,
+        covariance_mode=cov_mode
+    )
+
     
     # 3. Load Distilled Samples
     if args.distill_target == "sef_split":
@@ -142,26 +177,101 @@ def main():
     vol_psi_dist_mean = [learned_gp.vol_psi_dist(F_all[mode]).mean for mode in range(len(mode_names))]
     vol_psi_dist_var = [learned_gp.vol_psi_dist(F_all[mode]).var for mode in range(len(mode_names))]
     
+    has_aniso = os.path.exists(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
+    
+    true_params = {}
+    if true_model_name == "ortho45":
+        true_params = {
+            "$C_{10}$": 0.5, "$C_{01}$": 0.0, "$C_{20}$": 0.0, "$C_{11}$": 0.0, "$C_{02}$": 0.0,
+            "$C_{30}$": 0.0, "$C_{21}$": 0.0, "$C_{12}$": 0.0, "$C_{03}$": 0.0,
+            "$D_{1}$": 1.0, "$D_{2}$": 0.0, "$D_{3}$": 0.0,
+            "$C_{41}$": 0.0, "$C_{42}$": 0.7, "$C_{61}$": 0.0, "$C_{62}$": 0.9
+        }
+    elif true_model_name == "aniso30":
+        true_params = {
+            "$C_{10}$": 0.5, "$C_{01}$": 0.0, "$C_{20}$": 0.0, "$C_{11}$": 0.0, "$C_{02}$": 0.0,
+            "$C_{30}$": 0.0, "$C_{21}$": 0.0, "$C_{12}$": 0.0, "$C_{03}$": 0.0,
+            "$D_{1}$": 1.0, "$D_{2}$": 0.0, "$D_{3}$": 0.0,
+            "$C_{41}$": 0.0, "$C_{42}$": 0.7
+        }
+    elif true_model_name == "isihara":
+        true_params = {"$C_{10}$": true_model.c10, "$C_{01}$": true_model.c01, "$C_{20}$": true_model.c20, "$D_{1}$": true_model.d1}
+    elif true_model_name in ["nh", "neohookean2", "nh2"]:
+        true_params = {"$C_{10}$": true_model.dev_params[0], "$D_{1}$": true_model.vol_params[0]}
+    elif true_model_name in ["nh4", "neohookean4"]:
+        true_params = {"$C_{10}$": true_model.dev_params[0], "$D_{2}$": true_model.vol_params[1]}
+    elif true_model_name in ["gentthomas"]:
+        true_params = {"$C_{10}$": true_model.dev_params[0], "$E$": true_model.dev_params[9], "$D_{1}$": true_model.vol_params[0]}
+    elif true_model_name in ["c20d10d05", "c20_d10_d05"]:
+        true_params = {"$C_{10}$": true_model.dev_params[0], "$D_{1}$": true_model.vol_params[0], "$D_{2}$": true_model.vol_params[1]}
+
     if args.distill_target == "sef_split":
-        # Load samples for both components
+        # Load samples for components
         dev_samples = np.load(os.path.join(distilled_dir, "dev_flow_samples.npy"))[:num_samples]
         vol_samples = np.load(os.path.join(distilled_dir, "vol_flow_samples.npy"))[:num_samples]
+        aniso_samples = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy"))[:num_samples] if has_aniso else None
         
+        def psi_aniso_single(theta_aniso, F_single):
+            if F_single.shape == (2, 2):
+                F_s = jnp.array([[F_single[0, 0], F_single[0, 1], 0.0],
+                                 [F_single[1, 0], F_single[1, 1], 0.0],
+                                 [0.0, 0.0, 1.0]])
+            else:
+                F_s = F_single
+            from core.utils import C_func, I3_func
+            C = C_func(F_s)
+            I3_safe = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
+            C_bar = (I3_safe**(-1/3)) * C
+            a1 = jnp.array([jnp.cos(jnp.pi/4), jnp.sin(jnp.pi/4), 0.0])
+            a2 = jnp.array([jnp.cos(-jnp.pi/4), jnp.sin(-jnp.pi/4), 0.0])
+            I4_bar_1 = jnp.einsum('i,ij,j->', a1, C_bar, a1)
+            I4_bar_2 = jnp.einsum('i,ij,j->', a2, C_bar, a2)
+            I4_m1 = I4_bar_1 - 1.0
+            I6_m1 = I4_bar_2 - 1.0
+            return (theta_aniso[0] * I4_m1 + theta_aniso[1] * I4_m1**2 + 
+                    theta_aniso[2] * I6_m1 + theta_aniso[3] * I6_m1**2)
+
         def get_distilled_energy_stress_split(theta_dev, theta_vol, F_chunk):
             dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
             vol_theta = [0.0]*9 + list(theta_vol)
             mat_dev = get_material("gmr", dev_params=dev_theta[:9], vol_params=dev_theta[9:12], jit_P=False)
             mat_vol = get_material("gmr", dev_params=vol_theta[:9], vol_params=vol_theta[9:12], jit_P=False)
             return jax.vmap(mat_dev.psi)(F_chunk), jax.vmap(mat_vol.psi)(F_chunk), jax.vmap(mat_dev.P)(F_chunk) + jax.vmap(mat_vol.P)(F_chunk)
+
+        def get_distilled_energy_stress_split_3(theta_dev, theta_vol, theta_aniso, F_chunk):
+            dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
+            vol_theta = [0.0]*9 + list(theta_vol)
+            mat_dev = get_material("gmr", dev_params=dev_theta[:9], vol_params=dev_theta[9:12], jit_P=False)
+            mat_vol = get_material("gmr", dev_params=vol_theta[:9], vol_params=vol_theta[9:12], jit_P=False)
             
-        dist_psi_dev_samples, dist_psi_vol_samples, dist_psi_samples, dist_p_samples = [], [], [], []
+            p_aniso_single = jax.grad(lambda f: psi_aniso_single(theta_aniso, f))
+            s_psi_aniso = jax.vmap(lambda f: psi_aniso_single(theta_aniso, f))(F_chunk)
+            s_p_aniso = jax.vmap(p_aniso_single)(F_chunk)
+            
+            s_psi_dev = jax.vmap(mat_dev.psi)(F_chunk)
+            s_psi_vol = jax.vmap(mat_vol.psi)(F_chunk)
+            s_p_dev = jax.vmap(mat_dev.P)(F_chunk)
+            s_p_vol = jax.vmap(mat_vol.P)(F_chunk)
+            
+            return s_psi_dev, s_psi_vol, s_psi_aniso, s_p_dev + s_p_vol + s_p_aniso
+            
+        dist_psi_dev_samples, dist_psi_vol_samples, dist_psi_aniso_samples, dist_psi_samples, dist_p_samples = [], [], [], [], []
         for mode in range(len(mode_names)):
             mode_F = F_all[mode]
-            s_psi_dev, s_psi_vol, s_p = jax.vmap(lambda td, tv: get_distilled_energy_stress_split(td, tv, mode_F))(dev_samples, vol_samples)
-            dist_psi_dev_samples.append(s_psi_dev)
-            dist_psi_vol_samples.append(s_psi_vol)
-            dist_psi_samples.append(s_psi_dev + s_psi_vol)
-            dist_p_samples.append(s_p)
+            if has_aniso:
+                s_psi_dev, s_psi_vol, s_psi_aniso, s_p = jax.vmap(lambda td, tv, ta: get_distilled_energy_stress_split_3(td, tv, ta, mode_F))(dev_samples, vol_samples, aniso_samples)
+                dist_psi_dev_samples.append(s_psi_dev)
+                dist_psi_vol_samples.append(s_psi_vol)
+                dist_psi_aniso_samples.append(s_psi_aniso)
+                dist_psi_samples.append(s_psi_dev + s_psi_vol + s_psi_aniso)
+                dist_p_samples.append(s_p)
+            else:
+                s_psi_dev, s_psi_vol, s_p = jax.vmap(lambda td, tv: get_distilled_energy_stress_split(td, tv, mode_F))(dev_samples, vol_samples)
+                dist_psi_dev_samples.append(s_psi_dev)
+                dist_psi_vol_samples.append(s_psi_vol)
+                dist_psi_samples.append(s_psi_dev + s_psi_vol)
+                dist_p_samples.append(s_p)
+
     else:
         def get_distilled_energy_stress(theta, F_chunk):
             if args.material_model == "ogden":
@@ -301,6 +411,7 @@ def main():
     if args.distill_target == "sef_split":
         psi_true_dev = []
         psi_true_vol = []
+        psi_true_aniso = []
         for F_mode in F_all:
             if hasattr(true_model, 'psi_dev') and hasattr(true_model, 'psi_vol'):
                 psi_true_dev.append(jax.vmap(true_model.psi_dev)(F_mode))
@@ -316,9 +427,93 @@ def main():
                 # Fallback to total energy if model cannot be split
                 psi_true_dev.append(jax.vmap(true_model.psi)(F_mode))
                 psi_true_vol.append(jax.vmap(true_model.psi)(F_mode))
+                
+            if has_aniso and hasattr(true_model, 'psi_aniso'):
+                psi_true_aniso.append(jax.vmap(true_model.psi_aniso)(F_mode))
+            elif has_aniso:
+                psi_true_aniso.append(jnp.zeros(len(F_mode)))
+
+        aniso_psi_dist_mean = [learned_gp.aniso_psi_dist(F_all[mode]).mean for mode in range(len(mode_names))]
+        aniso_psi_dist_var = [learned_gp.aniso_psi_dist(F_all[mode]).var for mode in range(len(mode_names))]
+
         generate_energy_plot(dist_psi_dev_samples, psi_true_dev, "DEV Energy", f"distilled_validation_energy_dev_{args.material_model}.pdf", dev_psi_dist_mean, dev_psi_dist_var, ylabel=r"Deviatoric SEF ($\Psi_{\mathrm{dev}}$)", dist_color="#0072B2")
         generate_energy_plot(dist_psi_vol_samples, psi_true_vol, "VOL Energy", f"distilled_validation_energy_vol_{args.material_model}.pdf", vol_psi_dist_mean, vol_psi_dist_var, ylabel=r"Volumetric SEF ($\Psi_{\mathrm{vol}}$)", dist_color="#D55E00")
+        if has_aniso:
+            generate_energy_plot(dist_psi_aniso_samples, psi_true_aniso, "ANISO Energy", f"distilled_validation_energy_aniso_{args.material_model}.pdf", aniso_psi_dist_mean, aniso_psi_dist_var, ylabel=r"Anisotropic SEF ($\Psi_{\mathrm{aniso}}$)", dist_color="#CC79A7")
         generate_energy_plot(dist_psi_samples, psi_true, "TOTAL Energy", f"distilled_validation_energy_total_{args.material_model}.pdf", psi_dist_mean, psi_dist_var, dist_color="#009E73")
+        
+        # Save split_energy plot
+        import shutil
+        shutil.copy(os.path.join(distilled_dir, f"distilled_validation_energy_total_{args.material_model}.pdf"), os.path.join(distilled_dir, "split_energy.pdf"))
+        
+        # Save split_parameters plot
+        try:
+            import pandas as pd
+            import seaborn as sns
+            
+            dev_df_samples = np.load(os.path.join(distilled_dir, "dev_flow_samples.npy"))
+            vol_df_samples = np.load(os.path.join(distilled_dir, "vol_flow_samples.npy"))
+            
+            # Form param names
+            dev_names = ["$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$"]
+            if dev_df_samples.shape[1] == 10:
+                dev_names.append("$E$")
+            elif dev_df_samples.shape[1] < len(dev_names):
+                dev_names = [f"$C_{{{i+1}}}$" for i in range(dev_df_samples.shape[1])]
+                
+            vol_names = ["$D_{1}$", "$D_{2}$", "$D_{3}$"]
+            if vol_df_samples.shape[1] != 3:
+                vol_names = [f"$D_{{{i+1}}}$" for i in range(vol_df_samples.shape[1])]
+                
+            all_samples_list = [dev_df_samples, vol_df_samples]
+            all_names_list = list(dev_names) + list(vol_names)
+            
+            if has_aniso:
+                aniso_df_samples = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
+                aniso_names = ["$C_{41}$", "$C_{42}$", "$C_{61}$", "$C_{62}$"]
+                if aniso_df_samples.shape[1] == 2:
+                    aniso_names = ["$C_{41}$", "$C_{42}$"]
+                elif aniso_df_samples.shape[1] != len(aniso_names):
+                    aniso_names = [f"$C_{{aniso_{i+1}}}$" for i in range(aniso_df_samples.shape[1])]
+                all_samples_list.append(aniso_df_samples)
+                all_names_list.extend(aniso_names)
+                
+            full_samples_arr = np.concatenate(all_samples_list, axis=-1)
+            df_split_params = pd.DataFrame(full_samples_arr, columns=all_names_list)
+            
+            n_p = len(all_names_list)
+            cols_p = 4
+            rows_p = (n_p + cols_p - 1) // cols_p
+            fig_p_dist, axes_p_dist = plt.subplots(rows_p, cols_p, figsize=(cols_p * 4, rows_p * 3.5))
+            axes_p_dist = axes_p_dist.flatten()
+            
+            means_all = df_split_params.mean()
+            for idx, p_name in enumerate(all_names_list):
+                ax = axes_p_dist[idx]
+                color = "#0072B2" if p_name.startswith("$C_{") and not p_name.startswith("$C_{4") and not p_name.startswith("$C_{6") else ("#D55E00" if p_name.startswith("$D_") else "#CC79A7")
+                sns.histplot(df_split_params[p_name], ax=ax, color=color, bins=30, kde=True, edgecolor="black", alpha=0.7)
+                m_val = means_all[p_name]
+                ax.axvline(m_val, color='#c0392b', linestyle='--', linewidth=2, label=f"Mean: {m_val:.4f}")
+                if p_name in true_params:
+                    t_val = true_params[p_name]
+                    ax.axvline(t_val, color='#27ae60', linestyle=':', linewidth=2, label=f"True: {t_val:.4f}")
+                    ax.set_title(f"{p_name}\nMean: {m_val:.4f} (True: {t_val:.4f})", fontsize=11, fontweight='bold')
+                else:
+                    ax.set_title(f"{p_name}\nMean: {m_val:.4f}", fontsize=11, fontweight='bold')
+                ax.legend(fontsize=8, loc='best')
+                
+            for j in range(n_p, len(axes_p_dist)):
+                axes_p_dist[j].set_visible(False)
+                
+            plt.tight_layout()
+            split_param_path = os.path.join(distilled_dir, "split_parameters.pdf")
+            fig_p_dist.savefig(split_param_path, dpi=200)
+            fig_p_dist.savefig(os.path.join(distilled_dir, f"distilled_split_parameters_{args.material_model}.pdf"), dpi=200)
+            plt.close(fig_p_dist)
+            print(f"Saved split parameters plot to {split_param_path}")
+        except Exception as e:
+            print(f"Error generating split parameters plot: {e}")
+
     
     fig_psi, axes_psi = plt.subplots(3, 2, figsize=(fig_width, fig_height), sharex=True)
     fig_p, axes_p = plt.subplots(3, 2, figsize=(fig_width, fig_height), sharex=True)
