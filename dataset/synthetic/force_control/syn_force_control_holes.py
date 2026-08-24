@@ -645,6 +645,10 @@ if __name__ == "__main__" :
     precomputed_vfm = dict(mesh_pos = mesh_pos, cells = cells, node_type = d["node_type"], load = load_array, u = u_array, F = F_array, dNdX = dNdX, dA = dA, f_neu = f_neu_array, load_noise_std = load_noise_std, load_noise_std_steps = load_noise_std_steps)
     if hasattr(true_mat_model, 'a0'):
         precomputed_vfm['a0'] = true_mat_model.a0
+    if hasattr(true_mat_model, 'a1'):
+        precomputed_vfm['a1'] = true_mat_model.a1
+    if hasattr(true_mat_model, 'a2'):
+        precomputed_vfm['a2'] = true_mat_model.a2
     dataset_name = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}_{args.geometry}"
     np.savez_compressed(os.path.join(precomputed_dir, f"{dataset_name}.npz"), **precomputed_vfm)
     

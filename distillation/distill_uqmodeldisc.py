@@ -709,10 +709,10 @@ def main():
         parts = model_folder_name.split('_')
         
         true_model_name = "isihara"
-        if len(parts) > 1 and parts[1] in ["ortho45", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+        if len(parts) > 1 and parts[1] in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
             true_model_name = parts[1]
         else:
-            for p in ["ortho45", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+            for p in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
                 if p in parts or p in model_folder_name.lower():
                     true_model_name = p
                     break
@@ -720,7 +720,7 @@ def main():
         true_model = get_material(true_model_name, jit_P=False)
         
         true_params = {}
-        if true_model_name == "ortho45":
+        if true_model_name in ["ortho45", "symnonortho60"]:
             true_params = {
                 "$C_{10}$": 0.5, "$C_{01}$": 0.0, "$C_{20}$": 0.0, "$C_{11}$": 0.0, "$C_{02}$": 0.0,
                 "$C_{30}$": 0.0, "$C_{21}$": 0.0, "$C_{12}$": 0.0, "$C_{03}$": 0.0,

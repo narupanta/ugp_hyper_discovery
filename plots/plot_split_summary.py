@@ -127,10 +127,10 @@ def main():
     model_folder_name = os.path.basename(os.path.normpath(saved_model_dir))
     parts = model_folder_name.split('_')
     true_model_name = "isihara"
-    if len(parts) > 1 and parts[1] in ["ortho45", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+    if len(parts) > 1 and parts[1] in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
         true_model_name = parts[1]
     else:
-        for p in ["ortho45", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+        for p in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
             if p in parts or p in model_folder_name.lower():
                 true_model_name = p
                 break
@@ -143,11 +143,32 @@ def main():
     dev_z = I_z[:, :2]
     vol_z = I_z[:, 2:3] if I_z.shape[1] > 3 else I_z[:, 2:]
     aniso_z = I_z[:, 3:] if I_z.shape[1] > 3 else None
-    
-    min_dev, max_dev = jnp.min(dev_z, axis=0), jnp.max(dev_z, axis=0)
-    min_vol, max_vol = jnp.min(vol_z, axis=0), jnp.max(vol_z, axis=0)
+
+    min_dev = jnp.min(dev_z, axis=0)
+    min_vol = jnp.min(vol_z, axis=0)
+    max_dev = jnp.max(dev_z, axis=0)
+    max_vol = jnp.max(vol_z, axis=0)
+
     min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
     max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
+
+    feature_extractor = None
+    if aniso_z is not None:
+        from core.features import AnisotropicFeatureExtractor
+        if hasattr(true_model, 'a1') and hasattr(true_model, 'a2'):
+            a0 = np.array(true_model.a1)
+            a1 = np.array(true_model.a2)
+            feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
+        elif hasattr(true_model, 'a0'):
+            a0 = np.array(true_model.a0)
+            feature_extractor = AnisotropicFeatureExtractor(a0)
+        elif aniso_z.shape[1] == 4:
+            a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
+            a1 = np.array([np.cos(-np.pi / 4.0), np.sin(-np.pi / 4.0), 0.0])
+            feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
+        else:
+            a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
+            feature_extractor = AnisotropicFeatureExtractor(a0)
     
     obs_path = os.path.join(saved_model_dir, "I_obs_all.npy")
     if os.path.exists(obs_path):
@@ -345,7 +366,7 @@ def main():
 
     # True params extract
     true_val_dict = {}
-    if true_model_name == "ortho45":
+    if true_model_name in ["ortho45", "symnonortho60"]:
         true_params_set = {"C10", "D1", "C42", "C62"}
         true_val_dict = {"C10": 0.5, "D1": 1.0, "C41": 0.0, "C42": 0.7, "C61": 0.0, "C62": 0.9}
     elif true_model_name == "aniso30":

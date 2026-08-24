@@ -431,6 +431,49 @@ class Ortho45(BaseMaterialModel):
         return 0.7 * (I4_bar_1 - 1.0)**2 + 0.9 * (I4_bar_2 - 1.0)**2
 
 
+@register_material("symnonortho60")
+class SymNonOrtho60(BaseMaterialModel):
+    def __init__(self, c10=0.5, d1=1.0, theta1=jnp.pi/3.0, theta2=-jnp.pi/3.0, jit_P: bool = True):
+        super().__init__(jit_P=jit_P)
+        self.c10 = c10
+        self.d1 = d1
+        self.a1 = jnp.array([jnp.cos(theta1), jnp.sin(theta1), 0.0])
+        self.a2 = jnp.array([jnp.cos(theta2), jnp.sin(theta2), 0.0])
+
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
+        return self.psi_dev(F) + self.psi_vol(F) + self.psi_aniso(F)
+
+    def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
+        if F.shape[-2:] == (2, 2):
+            F = jnp.array([[F[0, 0], F[0, 1], 0.], 
+                           [F[1, 0], F[1, 1], 0.],
+                           [0.,      0.,     1. ]])
+        C = C_func(F)
+        I3_safe = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
+        C_bar = (I3_safe**(-1/3))[..., None, None] * C
+        return self.c10 * (I1_func(C_bar) - 3.0)
+
+    def psi_vol(self, F: jnp.ndarray) -> jnp.ndarray:
+        if F.shape[-2:] == (2, 2):
+            F = jnp.array([[F[0, 0], F[0, 1], 0.], 
+                           [F[1, 0], F[1, 1], 0.],
+                           [0.,      0.,     1. ]])
+        C = C_func(F)
+        I3_safe = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
+        return self.d1 * (jnp.sqrt(I3_safe) - 1.0)**2
+
+    def psi_aniso(self, F: jnp.ndarray) -> jnp.ndarray:
+        if F.shape[-2:] == (2, 2):
+            F = jnp.array([[F[0, 0], F[0, 1], 0.], 
+                           [F[1, 0], F[1, 1], 0.],
+                           [0.,      0.,     1. ]])
+        C = C_func(F)
+        I3_safe = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
+        C_bar = (I3_safe**(-1/3))[..., None, None] * C
+        I4_bar_1 = jnp.einsum('i,...ij,j->...', self.a1, C_bar, self.a1)
+        I4_bar_2 = jnp.einsum('i,...ij,j->...', self.a2, C_bar, self.a2)
+        return 0.7 * (I4_bar_1 - 1.0)**2 + 0.9 * (I4_bar_2 - 1.0)**2
+
 
 @register_material("ogden")
 class Ogden(BaseMaterialModel):
