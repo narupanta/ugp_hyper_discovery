@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.utils import fto3x3, farthest_point_sampling
-from core.features import IsotropicFeatureExtractor
+from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 
 def generate_standard_modes(num_points=32, max_gamma=1.0):
     gamma = np.linspace(0.0, max_gamma, num_points)
@@ -132,11 +132,39 @@ def main():
     I_z = jnp.load(os.path.join(args.saved_model_dir, "I_z.npy"))
     
     dev_z = I_z[:, :2]
-    vol_z = I_z[:, 2:]
+    if I_z.shape[1] > 3:
+        vol_z = I_z[:, 2:3]
+        aniso_z = I_z[:, 3:]
+    elif I_z.shape[1] == 3:
+        vol_z = I_z[:, 2:3]
+        aniso_z = None
+    else:
+        vol_z = I_z[:, 2:]
+        aniso_z = None
+
     min_dev = jnp.min(dev_z, axis=0)
     min_vol = jnp.min(vol_z, axis=0)
     max_dev = jnp.max(dev_z, axis=0)
     max_vol = jnp.max(vol_z, axis=0)
+
+    min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
+    max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
+
+    feature_extractor = None
+    if aniso_z is not None:
+        if aniso_z.shape[1] == 4:
+            a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
+            a1 = np.array([np.cos(-np.pi / 4.0), np.sin(-np.pi / 4.0), 0.0])
+            feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
+        else:
+            if getattr(gp_params, "raw_aniso_theta_mean", None) is not None:
+                raw_th = gp_params.raw_aniso_theta_mean
+                theta = float(np.pi * (1.0 / (1.0 + np.exp(-raw_th)) - 0.5))
+            else:
+                theta = np.pi / 4.0
+            a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
+            feature_extractor = AnisotropicFeatureExtractor(a0)
+
     
     import json
     metadata_path = os.path.join(args.saved_model_dir, "metadata.json")
@@ -146,7 +174,13 @@ def main():
     else:
         cov_mode = "full" if gp_params.raw_dev_u_var.ndim == 2 else "diag"
         
-    gp_model = SparseHyperelasticityGP(gp_params, I_z, min_dev, min_vol, max_dev, max_vol, beta=1.0, covariance_mode=cov_mode)
+    gp_model = SparseHyperelasticityGP(
+        gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
+        beta=1.0, feature_extractor=feature_extractor,
+        aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,
+        covariance_mode=cov_mode
+    )
+
     
     # Try to load the dataset for background plotting and dataset_* modes
     dataset_F_flat_2x2 = None
@@ -283,6 +317,15 @@ def main():
         w, v = np.linalg.eigh(cov_vol)
         w = np.clip(w, a_min=1e-8, a_max=None)
         cov_vol = v @ np.diag(w) @ v.T
+
+        if gp_model.is_anisotropic:
+            aniso_feats = feats[2]
+            mean_aniso = np.array(gp_model.aniso_gp_mean(aniso_feats))
+            cov_aniso = np.array(gp_model.aniso_psi_joint_cov(f3x3_flat))
+            cov_aniso = 0.5 * (cov_aniso + cov_aniso.T)
+            w, v = np.linalg.eigh(cov_aniso)
+            w = np.clip(w, a_min=1e-8, a_max=None)
+            cov_aniso = v @ np.diag(w) @ v.T
     elif args.distill_target in ["sef_stress", "sef_cauchy"]:
         print(f"Drawing 2048 GP Pathwise realizations for joint SEF + {args.distill_target.upper()} covariance estimation over {f3x3_flat.shape[0]} points...")
         keys = jax.random.split(jax.random.PRNGKey(42), 2048)
@@ -316,8 +359,12 @@ def main():
         np.save(os.path.join(out_dir, "cov_dev.npy"), np.array(cov_dev))
         np.save(os.path.join(out_dir, "mean_vol.npy"), np.array(mean_vol))
         np.save(os.path.join(out_dir, "cov_vol.npy"), np.array(cov_vol))
+        if gp_model.is_anisotropic:
+            np.save(os.path.join(out_dir, "mean_aniso.npy"), np.array(mean_aniso))
+            np.save(os.path.join(out_dir, "cov_aniso.npy"), np.array(cov_aniso))
         np.save(os.path.join(out_dir, "f3x3.npy"), np.array(f3x3_flat))
-        print(f"Exported GP Target Mean and Cov for DEV and VOL to {out_dir}")
+        print(f"Exported GP Target Mean and Cov for DEV, VOL (and ANISO if present) to {out_dir}")
+
     else:
         np.save(os.path.join(out_dir, "mean_psi.npy"), np.array(mean_psi))
         np.save(os.path.join(out_dir, "cov_psi.npy"), np.array(cov_psi))
@@ -391,29 +438,58 @@ def main():
         plt.close(fig)
         
         # 2. Distribution Plot
-        dev_psi_mean = np.array(jax.vmap(gp_model.dev_gp_mean)(jnp.array(dev_feat)))
-        vol_psi_mean = np.array(jax.vmap(gp_model.vol_gp_mean)(jnp.array(vol_feat)))
-        total_psi_mean = dev_psi_mean + vol_psi_mean
+        feats_all = jax.vmap(gp_model.feature_extractor.extract)(f3x3_flat)
+        dev_feat, vol_feat = feats_all[0], feats_all[1]
         
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+        dev_psi_mean = np.array(jax.vmap(gp_model.dev_gp_mean)(dev_feat))
+        vol_psi_mean = np.array(jax.vmap(gp_model.vol_gp_mean)(vol_feat))
         
-        axes[0].hist(total_psi_mean, bins=30, color='blue', alpha=0.7, edgecolor='black')
-        axes[0].set_title("Total Mean Energy Distribution")
-        axes[0].set_xlabel("Strain Energy (SEF)")
-        axes[0].set_ylabel("Count")
-        
-        axes[1].hist(dev_psi_mean, bins=30, color='purple', alpha=0.7, edgecolor='black')
-        axes[1].set_title("Deviatoric Mean Energy Distribution")
-        axes[1].set_xlabel("Deviatoric Energy")
-        
-        axes[2].hist(vol_psi_mean, bins=30, color='green', alpha=0.7, edgecolor='black')
-        axes[2].set_title("Volumetric Mean Energy Distribution")
-        axes[2].set_xlabel("Volumetric Energy")
+        if gp_model.is_anisotropic:
+            aniso_feat = feats_all[2]
+            aniso_psi_mean = np.array(jax.vmap(gp_model.aniso_gp_mean)(aniso_feat))
+            total_psi_mean = dev_psi_mean + vol_psi_mean + aniso_psi_mean
+            
+            fig, axes = plt.subplots(1, 4, figsize=(20, 4))
+            
+            axes[0].hist(total_psi_mean, bins=30, color='blue', alpha=0.7, edgecolor='black')
+            axes[0].set_title("Total Mean Energy Distribution")
+            axes[0].set_xlabel("Strain Energy (SEF)")
+            axes[0].set_ylabel("Count")
+            
+            axes[1].hist(dev_psi_mean, bins=30, color='purple', alpha=0.7, edgecolor='black')
+            axes[1].set_title("Deviatoric Mean Energy Distribution")
+            axes[1].set_xlabel("Deviatoric Energy")
+            
+            axes[2].hist(vol_psi_mean, bins=30, color='green', alpha=0.7, edgecolor='black')
+            axes[2].set_title("Volumetric Mean Energy Distribution")
+            axes[2].set_xlabel("Volumetric Energy")
+
+            axes[3].hist(aniso_psi_mean, bins=30, color='orange', alpha=0.7, edgecolor='black')
+            axes[3].set_title("Anisotropic Mean Energy Distribution")
+            axes[3].set_xlabel("Anisotropic Energy")
+        else:
+            total_psi_mean = dev_psi_mean + vol_psi_mean
+            
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+            
+            axes[0].hist(total_psi_mean, bins=30, color='blue', alpha=0.7, edgecolor='black')
+            axes[0].set_title("Total Mean Energy Distribution")
+            axes[0].set_xlabel("Strain Energy (SEF)")
+            axes[0].set_ylabel("Count")
+            
+            axes[1].hist(dev_psi_mean, bins=30, color='purple', alpha=0.7, edgecolor='black')
+            axes[1].set_title("Deviatoric Mean Energy Distribution")
+            axes[1].set_xlabel("Deviatoric Energy")
+            
+            axes[2].hist(vol_psi_mean, bins=30, color='green', alpha=0.7, edgecolor='black')
+            axes[2].set_title("Volumetric Mean Energy Distribution")
+            axes[2].set_xlabel("Volumetric Energy")
         
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, "export_energy_distribution.pdf"), dpi=150)
         plt.close(fig)
         print("Successfully saved invariant space and energy distribution plots.")
+
     except Exception as e:
         print(f"Failed to generate extra export plots: {e}")
 

@@ -496,6 +496,18 @@ class SparseHyperelasticityGP:
         cov_mat_vol = k_vv - k_vz @ w.vol_M_mat @ k_vz.T
         return 0.5 * (cov_mat_vol + cov_mat_vol.T)
 
+    def aniso_psi_joint_cov(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
+        p, w = self._resolve_state(params, weights)
+        if f.ndim == 2:
+            f = f[None, ...]
+        feats = jax.vmap(self.feature_extractor.extract)(f)
+        aniso = feats[2]
+        k_az = rbf(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls)
+        k_aa = rbf(aniso, aniso, p.aniso_sig, p.aniso_ls)
+        cov_mat_aniso = k_aa - k_az @ w.aniso_M_mat @ k_az.T
+        return 0.5 * (cov_mat_aniso + cov_mat_aniso.T)
+
+
     def piola_gp_cov_pair(self, f1: jnp.ndarray, f2: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         """Computes double-differentiation cross-covariance between two deformation gradient tensors."""
         p, w = self._resolve_state(params, weights)

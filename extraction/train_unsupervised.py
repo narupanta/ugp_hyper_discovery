@@ -184,8 +184,9 @@ if __name__ == "__main__" :
     piola_true_func = lambda f: true_mat_model.P(f)
 
     if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
-        a0 = jnp.asarray(prep_data.get("a0", [1.0, 0.0, 0.0]))
-        extractor = AnisotropicFeatureExtractor(a0, cap_compression=args.cap_compression == 1)
+        a0 = jnp.asarray(getattr(true_mat_model, "a1", getattr(true_mat_model, "a0", prep_data.get("a0", [1.0, 0.0, 0.0]))))
+        a1 = jnp.asarray(true_mat_model.a2) if hasattr(true_mat_model, "a2") else None
+        extractor = AnisotropicFeatureExtractor(a0, a1=a1, cap_compression=args.cap_compression == 1)
         dev, vol, aniso = jax.vmap(jax.vmap(extractor.extract))(f3x3)
         I_all = jnp.concatenate([dev, vol, aniso], axis=-1)
         aniso_flat = aniso.reshape(-1, aniso.shape[-1])
@@ -208,9 +209,9 @@ if __name__ == "__main__" :
         resume_dir = os.path.join(base_save_path, args.resume_from)
         I_z = jnp.load(os.path.join(resume_dir, "I_z.npy"))
         dev_z = I_z[:, :2]
-        vol_z = I_z[:, 2:]
+        vol_z = I_z[:, 2:3] if I_z.shape[1] > 3 else I_z[:, 2:]
         if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
-            aniso_z = I_z[:, 3:] # assuming aniso is 1D
+            aniso_z = I_z[:, 3:]
             min_aniso = jnp.min(aniso_flat, axis=0)
             max_aniso = jnp.max(aniso_flat, axis=0)
     else:
@@ -218,7 +219,7 @@ if __name__ == "__main__" :
         vol_z = farthest_point_sampling_with_fixed_point(vol_flat, n_ip, jnp.array([1.0]))
         I_z_list = [dev_z, vol_z]
         if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
-            aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, jnp.array([0.0, 0.0]))
+            aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, jnp.zeros(aniso_flat.shape[-1]))
             min_aniso = jnp.min(aniso_flat, axis=0)
             max_aniso = jnp.max(aniso_flat, axis=0)
             I_z_list.append(aniso_z)
@@ -233,11 +234,11 @@ if __name__ == "__main__" :
     if args.resume_from:
         resume_dir = os.path.join(base_save_path, args.resume_from)
         best_params_dict = np.load(os.path.join(resume_dir, "best_params.npy"), allow_pickle=True).item()
-        params = GPRawParams(**best_params_dict)
+        gp_params = GPRawParams(**best_params_dict)
     else:
-        # Initialize inducing point locations directly from FPS picking on training data
         raw_dev_z_fps = inv_softplus(dev_z - jnp.array([3.0, 3.0]))
         raw_vol_z_fps = inv_softplus(vol_z)
+
         
         # Anchor index 0 (free state) in initial parameters for both training modes
         raw_dev_u_mean_init = jax.random.normal(k2, (n_ip,)).at[0].set(0.0)
@@ -261,8 +262,9 @@ if __name__ == "__main__" :
                 raw_aniso_u_var_init = raw_aniso_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
             else:
                 raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+            aniso_dim = aniso_flat.shape[-1]
             aniso_kwargs = dict(
-                raw_aniso_ls=jax.random.normal(k1, (2,)),
+                raw_aniso_ls=jax.random.normal(k1, (aniso_dim,)),
                 raw_aniso_sig=jax.random.normal(k1, ()),
                 raw_aniso_z=raw_aniso_z_fps,
                 raw_aniso_u_mean=raw_aniso_u_mean_init,

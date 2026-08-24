@@ -282,6 +282,24 @@ else
             --sobol_samples_factor "$SOBOL_FACTOR" \
             --seed "$SEED" \
             $SENSITIVITY_FLAG &
+
+        if [ "$MODEL_MODE" == "anisotropic" ] || [ "$MODEL_MODE" == "aniso_unk_fiber" ] || [ "$MODEL_MODE" == "aniso_fixed_fiber" ] || [ "$DIST_MODEL" == "gmr_aniso" ]; then
+            echo "Distilling ANISO component into $SHARED_OUT_DIR..."
+            python3 distillation/distill_uqmodeldisc.py \
+                --saved_model_dir "$SAVED_DIR" \
+                --material_model "$DIST_MODEL" \
+                --n_iterations "$DIST_ITERS" \
+                --distill_target "$DIST_TARGET" \
+                --component "aniso" \
+                --override_out_dir "$SHARED_OUT_DIR" \
+                --sample_mode "$SAMPLE_MODE" \
+                --num_points "$NUM_POINTS" \
+                --max_gamma "$MAX_GAMMA" \
+                --sobol_threshold "$SOBOL_THRESHOLD" \
+                --sobol_samples_factor "$SOBOL_FACTOR" \
+                --seed "$SEED" \
+                $SENSITIVITY_FLAG &
+        fi
             
         wait
         
@@ -291,6 +309,13 @@ else
             --saved_model_dir "$SAVED_DIR" \
             --material_model "$DIST_MODEL" \
             --distill_target "$DIST_TARGET"
+            
+        python3 plots/plot_split_summary.py \
+            --distilled_dir "$SHARED_OUT_DIR" \
+            --saved_model_dir "$SAVED_DIR" \
+            --material_model "$DIST_MODEL" \
+            --distill_target "$DIST_TARGET"
+
             
     else
         python3 distillation/distill_uqmodeldisc.py \
