@@ -18,7 +18,7 @@ jax.config.update("jax_enable_x64", True)
 from core.utils import *
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPParams, GPRawParams
-from core.material_models import get_material
+from core.material_models import get_material, get_material_from_config
 from core.datasetclass import BenchmarkDataset
 
 import numpy as np
@@ -409,7 +409,7 @@ if __name__ == "__main__" :
     save_path.mkdir(parents=True, exist_ok=True)
     # get I_obs_all.npy
 
-    true_material_model = get_material(material_model_name)
+    true_material_model = get_material_from_config(config)
     true_piola_stress_func = lambda f : true_material_model.P(fto3x3(f))[:2, :2]
 
     # Define constitutive relationship.

@@ -30,7 +30,7 @@ class PrecomputedVFMDataset(HyperelasticDataset):
     def get_data(self):
         if not os.path.exists(self.data_path):
             raise FileNotFoundError(f"Dataset not found at {self.data_path}")
-        return dict(jnp.load(self.data_path))
+        return dict(np.load(self.data_path, allow_pickle=True))
 
 class DatasetFactory:
     @staticmethod

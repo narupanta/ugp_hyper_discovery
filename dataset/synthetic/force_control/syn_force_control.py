@@ -18,7 +18,7 @@ jax.config.update("jax_enable_x64", True)
 from core.utils import *
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPParams, GPRawParams
-from core.material_models import get_material
+from core.material_models import get_material, get_material_from_config
 from core.datasetclass import BenchmarkDataset
 
 import numpy as np

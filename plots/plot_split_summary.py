@@ -125,6 +125,9 @@ def main():
             raise ValueError("saved_model_dir not found.")
 
     model_folder_name = os.path.basename(os.path.normpath(saved_model_dir))
+    parent_folder_name = os.path.basename(os.path.dirname(os.path.normpath(saved_model_dir)))
+    if len(model_folder_name.split('_')) < 2 or model_folder_name.isdigit():
+        model_folder_name = parent_folder_name
     parts = model_folder_name.split('_')
     true_model_name = "isihara"
     if len(parts) > 1 and parts[1] in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
@@ -243,14 +246,22 @@ def main():
             C = C_func(F_s)
             I3_safe = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
             C_bar = (I3_safe**(-1/3)) * C
-            a1 = jnp.array([jnp.cos(jnp.pi/4), jnp.sin(jnp.pi/4), 0.0])
-            a2 = jnp.array([jnp.cos(-jnp.pi/4), jnp.sin(-jnp.pi/4), 0.0])
+            if hasattr(feature_extractor, "a1") and feature_extractor.a1 is not None:
+                a1 = feature_extractor.a0
+                a2 = feature_extractor.a1
+            else:
+                a1 = feature_extractor.a0 if feature_extractor is not None else jnp.array([jnp.cos(jnp.pi/4), jnp.sin(jnp.pi/4), 0.0])
+                a2 = jnp.array([jnp.cos(-jnp.pi/4), jnp.sin(-jnp.pi/4), 0.0])
             I4_bar_1 = jnp.einsum('i,ij,j->', a1, C_bar, a1)
             I4_bar_2 = jnp.einsum('i,ij,j->', a2, C_bar, a2)
             I4_m1 = I4_bar_1 - 1.0
             I6_m1 = I4_bar_2 - 1.0
-            return (theta_aniso[0] * I4_m1 + theta_aniso[1] * I4_m1**2 + 
-                    theta_aniso[2] * I6_m1 + theta_aniso[3] * I6_m1**2)
+            ta = list(theta_aniso) + [0.0] * (8 - len(theta_aniso))
+            C42, C44, k1, k2, C62, C64, k3, k4 = ta[:8]
+            exp_arg1 = jnp.clip(k2 * I4_m1**2, -30.0, 30.0)
+            exp_arg2 = jnp.clip(k4 * I6_m1**2, -30.0, 30.0)
+            return (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (jnp.exp(exp_arg1) - 1.0) +
+                    C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
 
         def get_distilled_energy_stress_split(theta_dev, theta_vol, F_chunk):
             dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
@@ -311,7 +322,7 @@ def main():
         if has_aniso:
             aniso = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
             all_samples.append(aniso)
-            all_aniso_names = ["C41", "C42", "C61", "C62"]
+            all_aniso_names = ["C42", "C44", "k1", "k2", "C62", "C64", "k3", "k4"]
             full_param_names += all_aniso_names[:aniso.shape[1]]
             
         min_len = min(s.shape[0] for s in all_samples)
@@ -327,7 +338,7 @@ def main():
             # Construct mean parameters
             theta_dev = np.zeros(9)
             theta_vol = np.zeros(3)
-            theta_aniso = np.zeros(4)
+            theta_aniso = np.zeros(8)
             
             for p in active_params_k:
                 clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
@@ -346,7 +357,7 @@ def main():
                     elif param_types.get(p) == "aniso" and has_aniso:
                         if clean_p in all_aniso_names:
                             idx = all_aniso_names.index(clean_p)
-                            if idx < 4:
+                            if idx < 8:
                                 theta_aniso[idx] = mean_val
                     
             # Compute RMSE across all modes
@@ -364,14 +375,13 @@ def main():
     else:
         rmse_history = [0.0] * len(sorted_params)
 
-    # True params extract
     true_val_dict = {}
     if true_model_name in ["ortho45", "symnonortho60"]:
         true_params_set = {"C10", "D1", "C42", "C62"}
-        true_val_dict = {"C10": 0.5, "D1": 1.0, "C41": 0.0, "C42": 0.7, "C61": 0.0, "C62": 0.9}
+        true_val_dict = {"C10": 0.5, "D1": 1.0, "C42": 0.7, "C62": 0.9}
     elif true_model_name == "aniso30":
         true_params_set = {"C10", "D1", "C42"}
-        true_val_dict = {"C10": 0.5, "D1": 1.0, "C41": 0.0, "C42": 0.7}
+        true_val_dict = {"C10": 0.5, "D1": 1.0, "C42": 0.7}
     elif true_model_name in ["c20d10d05", "c20_d10_d05"]:
         true_params_set = {"C10", "D1", "D2"}
         true_val_dict = {"C10": 2.0, "D1": 1.0, "D2": 0.5}

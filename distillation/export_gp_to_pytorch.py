@@ -150,18 +150,42 @@ def main():
     min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
     max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
 
+    model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
+    parts = model_folder_name.split('_')
+    true_model_name = "isihara"
+    if len(parts) > 1 and parts[1] in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+        true_model_name = parts[1]
+    else:
+        for p in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+            if p in parts or p in model_folder_name.lower():
+                true_model_name = p
+                break
+    from core.material_models import get_material
+    try:
+        true_model = get_material(true_model_name, jit_P=False)
+    except Exception:
+        true_model = None
+
     feature_extractor = None
     if aniso_z is not None:
-        if aniso_z.shape[1] == 4:
+        if true_model is not None and hasattr(true_model, 'a1') and hasattr(true_model, 'a2'):
+            a0 = np.array(true_model.a1)
+            a1 = np.array(true_model.a2)
+            feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
+        elif true_model is not None and hasattr(true_model, 'a0'):
+            a0 = np.array(true_model.a0)
+            feature_extractor = AnisotropicFeatureExtractor(a0)
+        elif getattr(gp_params, "raw_aniso_theta_mean", None) is not None:
+            raw_th = gp_params.raw_aniso_theta_mean
+            theta = float(np.pi * (1.0 / (1.0 + np.exp(-raw_th)) - 0.5))
+            a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
+            feature_extractor = AnisotropicFeatureExtractor(a0)
+        elif aniso_z.shape[1] == 4:
             a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
             a1 = np.array([np.cos(-np.pi / 4.0), np.sin(-np.pi / 4.0), 0.0])
             feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
         else:
-            if getattr(gp_params, "raw_aniso_theta_mean", None) is not None:
-                raw_th = gp_params.raw_aniso_theta_mean
-                theta = float(np.pi * (1.0 / (1.0 + np.exp(-raw_th)) - 0.5))
-            else:
-                theta = np.pi / 4.0
+            theta = np.pi / 4.0
             a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
             feature_extractor = AnisotropicFeatureExtractor(a0)
 
@@ -186,30 +210,29 @@ def main():
     dataset_F_flat_2x2 = None
     try:
         model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
+        parent_folder_name = os.path.basename(os.path.dirname(os.path.normpath(args.saved_model_dir)))
+        
         parts = model_folder_name.split('_')
-        if len(parts) >= 6:
+        if len(parts) < 6 and '_' in parent_folder_name:
+            parts = parent_folder_name.split('_')
+
+        if len(parts) >= 4:
             ugp_model_name = parts[1]
             disp_noise = parts[2]
             load_noise = parts[3]
-            target_load = parts[4]
-            asym_factor = parts[5]
-            geometry = parts[-1]
-            dataset_filename_geom = f"{ugp_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}_{geometry}.npz"
-            dataset_filename_nogeom = f"{ugp_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}.npz"
             
             prep_dataset_path = None
-            for fname in [dataset_filename_geom, dataset_filename_nogeom]:
-                p1 = os.path.join("dataset/preprocessed/syn_f", fname)
-                p2 = os.path.join("dataset/precomputed_vfm", fname)
-                if os.path.exists(p1):
-                    prep_dataset_path = p1
-                    break
-                elif os.path.exists(p2):
-                    prep_dataset_path = p2
+            for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
+                if os.path.exists(search_dir):
+                    for fname in os.listdir(search_dir):
+                        if fname.startswith(f"{ugp_model_name}_{disp_noise}_{load_noise}") and fname.endswith(".npz"):
+                            prep_dataset_path = os.path.join(search_dir, fname)
+                            break
+                if prep_dataset_path is not None:
                     break
                 
             if prep_dataset_path is not None:
-                prep_data = np.load(prep_dataset_path)
+                prep_data = np.load(prep_dataset_path, allow_pickle=True)
                 F_all_steps_2x2 = prep_data["F"]
                 
                 log_file = os.path.join(args.saved_model_dir, "optimization_log.txt")
@@ -380,6 +403,16 @@ def main():
             subprocess.run(["python3", "plots/plot_gp_samples.py", "--export_dir", out_dir, "--model_name", model_name], check=True)
         except Exception as e:
             print(f"Failed to automatically plot GP samples: {e}")
+
+    # Plot GP Posterior vs Ground Truth per component
+    if true_model is not None:
+        try:
+            from core.plotter import plot_energy_decomposition_validation
+            print(f"Generating energy decomposition validation plot (GP Posterior vs Ground Truth) for {out_dir}...")
+            plot_energy_decomposition_validation(gp_model, true_model, out_dir)
+            print("Successfully saved energy_decomposition.pdf in export directory.")
+        except Exception as e:
+            print(f"Failed to plot energy decomposition validation: {e}")
 
     # === ADDITIONAL EXPORT PLOTS ===
     import matplotlib.pyplot as plt

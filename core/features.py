@@ -26,7 +26,7 @@ class IsotropicFeatureExtractor(FeatureExtractor):
         return dev, vol
 
 class AnisotropicFeatureExtractor(FeatureExtractor):
-    def __init__(self, a0: jnp.ndarray, a1: jnp.ndarray = None, cap_compression: bool = True):
+    def __init__(self, a0: jnp.ndarray, a1: jnp.ndarray = None, cap_compression: bool = False):
         self.a0 = jnp.asarray(a0, dtype=jnp.float64)
         self.a1 = jnp.asarray(a1, dtype=jnp.float64) if a1 is not None else None
         self.cap_compression = cap_compression

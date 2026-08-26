@@ -117,6 +117,9 @@ def main():
             raise ValueError("saved_model_dir not found.")
 
     model_folder_name = os.path.basename(os.path.normpath(saved_model_dir))
+    parent_folder_name = os.path.basename(os.path.dirname(os.path.normpath(saved_model_dir)))
+    if len(model_folder_name.split('_')) < 2 or model_folder_name.isdigit():
+        model_folder_name = parent_folder_name
     parts = model_folder_name.split('_')
     true_model_name = parts[1] if len(parts) > 1 else "isihara"
     true_model = get_material(true_model_name, jit_P=False)

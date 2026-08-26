@@ -61,8 +61,10 @@ def main():
         else:
             raise ValueError(f"saved_model_dir must be provided if {source_file} does not exist.")
     
-    # 1. Load True Model dynamically from saved_model_dir folder name
     model_folder_name = os.path.basename(os.path.normpath(saved_model_dir))
+    parent_folder_name = os.path.basename(os.path.dirname(os.path.normpath(saved_model_dir)))
+    if len(model_folder_name.split('_')) < 2 or model_folder_name.isdigit():
+        model_folder_name = parent_folder_name
     parts = model_folder_name.split('_')
     true_model_name = parts[1] if len(parts) > 1 else "isihara"
     true_model = get_material(true_model_name, jit_P=False)
@@ -222,14 +224,22 @@ def main():
             C = C_func(F_s)
             I3_safe = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
             C_bar = (I3_safe**(-1/3)) * C
-            a1 = jnp.array([jnp.cos(jnp.pi/4), jnp.sin(jnp.pi/4), 0.0])
-            a2 = jnp.array([jnp.cos(-jnp.pi/4), jnp.sin(-jnp.pi/4), 0.0])
+            if hasattr(feature_extractor, "a1") and feature_extractor.a1 is not None:
+                a1 = feature_extractor.a0
+                a2 = feature_extractor.a1
+            else:
+                a1 = feature_extractor.a0 if feature_extractor is not None else jnp.array([jnp.cos(jnp.pi/4), jnp.sin(jnp.pi/4), 0.0])
+                a2 = jnp.array([jnp.cos(-jnp.pi/4), jnp.sin(-jnp.pi/4), 0.0])
             I4_bar_1 = jnp.einsum('i,ij,j->', a1, C_bar, a1)
             I4_bar_2 = jnp.einsum('i,ij,j->', a2, C_bar, a2)
             I4_m1 = I4_bar_1 - 1.0
             I6_m1 = I4_bar_2 - 1.0
-            return (theta_aniso[0] * I4_m1 + theta_aniso[1] * I4_m1**2 + 
-                    theta_aniso[2] * I6_m1 + theta_aniso[3] * I6_m1**2)
+            ta = list(theta_aniso) + [0.0] * (8 - len(theta_aniso))
+            C42, C44, k1, k2, C62, C64, k3, k4 = ta[:8]
+            exp_arg1 = jnp.clip(k2 * I4_m1**2, -30.0, 30.0)
+            exp_arg2 = jnp.clip(k4 * I6_m1**2, -30.0, 30.0)
+            return (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (jnp.exp(exp_arg1) - 1.0) +
+                    C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
 
         def get_distilled_energy_stress_split(theta_dev, theta_vol, F_chunk):
             dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
