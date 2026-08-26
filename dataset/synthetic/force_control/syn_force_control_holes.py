@@ -18,7 +18,7 @@ jax.config.update("jax_enable_x64", True)
 from core.utils import *
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPParams, GPRawParams
-from core.material_models import get_material
+from core.material_models import get_material, get_material_from_config
 from core.datasetclass import BenchmarkDataset
 
 import numpy as np
@@ -409,7 +409,7 @@ if __name__ == "__main__" :
     save_path.mkdir(parents=True, exist_ok=True)
     # get I_obs_all.npy
 
-    true_material_model = get_material(material_model_name)
+    true_material_model = get_material_from_config(config)
     true_piola_stress_func = lambda f : true_material_model.P(fto3x3(f))[:2, :2]
 
     # Define constitutive relationship.
@@ -645,6 +645,10 @@ if __name__ == "__main__" :
     precomputed_vfm = dict(mesh_pos = mesh_pos, cells = cells, node_type = d["node_type"], load = load_array, u = u_array, F = F_array, dNdX = dNdX, dA = dA, f_neu = f_neu_array, load_noise_std = load_noise_std, load_noise_std_steps = load_noise_std_steps)
     if hasattr(true_mat_model, 'a0'):
         precomputed_vfm['a0'] = true_mat_model.a0
+    if hasattr(true_mat_model, 'a1'):
+        precomputed_vfm['a1'] = true_mat_model.a1
+    if hasattr(true_mat_model, 'a2'):
+        precomputed_vfm['a2'] = true_mat_model.a2
     dataset_name = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}_{args.geometry}"
     np.savez_compressed(os.path.join(precomputed_dir, f"{dataset_name}.npz"), **precomputed_vfm)
     

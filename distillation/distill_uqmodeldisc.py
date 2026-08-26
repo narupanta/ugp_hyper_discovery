@@ -425,8 +425,8 @@ class PyTorchGMRAnisoCompModel(BasePyTorchMaterialModel):
         self.distill_target = distill_target
         self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
         
-        self._num_parameters = 4
-        self._parameter_names = ("$C_{41}$", "$C_{42}$", "$C_{61}$", "$C_{62}$")
+        self._num_parameters = 8
+        self._parameter_names = ("$C_{42}$", "$C_{44}$", "$k_{1}$", "$k_{2}$", "$C_{62}$", "$C_{64}$", "$k_{3}$", "$k_{4}$")
         
         self._parameter_scales = torch.ones(self._num_parameters, device=device)
         self._device = device
@@ -463,9 +463,15 @@ class PyTorchGMRAnisoCompModel(BasePyTorchMaterialModel):
         I4_m1 = I4_bar_1 - 1.0
         I6_m1 = I4_bar_2 - 1.0
 
-        C41, C42, C61, C62 = full_parameters
+        C42, C44, k1, k2, C62, C64, k3, k4 = full_parameters
 
-        W_aniso = C41 * I4_m1 + C42 * I4_m1**2 + C61 * I6_m1 + C62 * I6_m1**2
+        exp_arg1 = torch.clamp(k2 * I4_m1**2, min=-30.0, max=30.0)
+        exp_arg2 = torch.clamp(k4 * I6_m1**2, min=-30.0, max=30.0)
+        exp_term1 = torch.exp(exp_arg1)
+        exp_term2 = torch.exp(exp_arg2)
+
+        W_aniso = (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (exp_term1 - 1.0) +
+                   C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (exp_term2 - 1.0))
         energy = W_aniso
 
         if self.distill_target in ["sef_stress", "sef_cauchy"]:
@@ -473,8 +479,8 @@ class PyTorchGMRAnisoCompModel(BasePyTorchMaterialModel):
             dI4_1_dF = 2.0 * (J.view(-1, 1, 1)**(-2/3)) * torch.einsum('i,...j->...ij', self.a1, torch.matmul(inputs, self.a1)) - (2.0/3.0) * I4_bar_1.view(-1, 1, 1) * F_inv_T
             dI4_2_dF = 2.0 * (J.view(-1, 1, 1)**(-2/3)) * torch.einsum('i,...j->...ij', self.a2, torch.matmul(inputs, self.a2)) - (2.0/3.0) * I4_bar_2.view(-1, 1, 1) * F_inv_T
             
-            dW_dI4_1 = C41 + 2.0 * C42 * I4_m1
-            dW_dI4_2 = C61 + 2.0 * C62 * I6_m1
+            dW_dI4_1 = 2.0 * C42 * I4_m1 + 4.0 * C44 * I4_m1**3 + 2.0 * k1 * k2 * I4_m1 * exp_term1
+            dW_dI4_2 = 2.0 * C62 * I6_m1 + 4.0 * C64 * I6_m1**3 + 2.0 * k3 * k4 * I6_m1 * exp_term2
             
             P = dW_dI4_1.view(-1, 1, 1) * dI4_1_dF + dW_dI4_2.view(-1, 1, 1) * dI4_2_dF
             if self.distill_target == "sef_cauchy":
@@ -491,11 +497,11 @@ class PyTorchGMRAnisoModel(BasePyTorchMaterialModel):
         self.distill_target = distill_target
         self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
         
-        self._num_parameters = 16
+        self._num_parameters = 20
         self._parameter_names = (
             "$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$",
             "$D_{1}$", "$D_{2}$", "$D_{3}$",
-            "$C_{41}$", "$C_{42}$", "$C_{61}$", "$C_{62}$"
+            "$C_{42}$", "$C_{44}$", "$k_{1}$", "$k_{2}$", "$C_{62}$", "$C_{64}$", "$k_{3}$", "$k_{4}$"
         )
         
         self._parameter_scales = torch.ones(self._num_parameters, device=device)
@@ -536,12 +542,18 @@ class PyTorchGMRAnisoModel(BasePyTorchMaterialModel):
         I4_m1 = I4_bar_1 - 1.0
         I6_m1 = I4_bar_2 - 1.0
 
-        C10, C01, C20, C11, C02, C30, C21, C12, C03, D1, D2, D3, C41, C42, C61, C62 = full_parameters
+        C10, C01, C20, C11, C02, C30, C21, C12, C03, D1, D2, D3, C42, C44, k1, k2, C62, C64, k3, k4 = full_parameters
+
+        exp_arg1 = torch.clamp(k2 * I4_m1**2, min=-30.0, max=30.0)
+        exp_arg2 = torch.clamp(k4 * I6_m1**2, min=-30.0, max=30.0)
+        exp_term1 = torch.exp(exp_arg1)
+        exp_term2 = torch.exp(exp_arg2)
 
         W_dev = (C10 * I1_m3 + C01 * I2_m3 + C20 * I1_m3**2 + C11 * I1_m3 * I2_m3 + C02 * I2_m3**2 +
                  C30 * I1_m3**3 + C21 * (I1_m3**2) * I2_m3 + C12 * I1_m3 * (I2_m3**2) + C03 * I2_m3**3)
         W_vol = D1 * J_m1**2 + D2 * J_m1**4 + D3 * J_m1**6
-        W_aniso = C41 * I4_m1 + C42 * I4_m1**2 + C61 * I6_m1 + C62 * I6_m1**2
+        W_aniso = (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (exp_term1 - 1.0) +
+                   C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (exp_term2 - 1.0))
 
         energy = W_dev + W_vol + W_aniso
 
@@ -558,8 +570,8 @@ class PyTorchGMRAnisoModel(BasePyTorchMaterialModel):
             dW_dI1 = C10 + 2.0 * C20 * I1_m3 + C11 * I2_m3 + 3.0 * C30 * (I1_m3**2) + 2.0 * C21 * I1_m3 * I2_m3 + C12 * (I2_m3**2)
             dW_dI2 = C01 + C11 * I1_m3 + 2.0 * C02 * I2_m3 + C21 * (I1_m3**2) + 2.0 * C12 * I1_m3 * I2_m3 + 3.0 * C03 * (I2_m3**2)
             dW_dJ = 2.0 * D1 * J_m1 + 4.0 * D2 * J_m1**3 + 6.0 * D3 * J_m1**5
-            dW_dI4_1 = C41 + 2.0 * C42 * I4_m1
-            dW_dI4_2 = C61 + 2.0 * C62 * I6_m1
+            dW_dI4_1 = 2.0 * C42 * I4_m1 + 4.0 * C44 * I4_m1**3 + 2.0 * k1 * k2 * I4_m1 * exp_term1
+            dW_dI4_2 = 2.0 * C62 * I6_m1 + 4.0 * C64 * I6_m1**3 + 2.0 * k3 * k4 * I6_m1 * exp_term2
 
             P = dW_dI1.view(-1, 1, 1) * dI1bar_dF + dW_dI2.view(-1, 1, 1) * dI2bar_dF + dW_dJ.view(-1, 1, 1) * dJ_dF + dW_dI4_1.view(-1, 1, 1) * dI4_1_dF + dW_dI4_2.view(-1, 1, 1) * dI4_2_dF
             
@@ -583,6 +595,7 @@ def main():
     parser.add_argument("--sobol_samples_factor", type=int, default=1024, help="Saltelli sample factor for sensitivity analysis")
     parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all", "inducing_points"], help="Sample deformation inputs from extraction dataset directly or standard modes (with or without interpolation clipping)")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points for GP joint evaluation and distillation")
+    parser.add_argument("--num_func_samples", type=int, default=512, help="Number of functional samples drawn from GP during parameter distillation")
     parser.add_argument("--max_gamma", type=float, default=1.0, help="Max deformation intensity gamma when sample_mode is standard")
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"], help="Target mode: strain energy function (sef), joint SEF + Piola stress (sef_stress), joint SEF + Cauchy stress (sef_cauchy), or separate DEV and VOL energy (sef_split)")
     parser.add_argument("--component", type=str, default="total", choices=["total", "dev", "vol", "aniso"], help="Component to distill (used with sef_split)")
@@ -599,8 +612,16 @@ def main():
     print(f"Using device: {device}")
 
     torch.set_default_dtype(torch.float64)
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    comp_seed_offset = (hash(args.component) % 10000) if args.component else 0
+    effective_seed = (args.seed + comp_seed_offset) & 0x7fffffff
+
+    def set_all_seeds(s: int):
+        torch.manual_seed(s)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(s)
+        np.random.seed(s)
+
+    set_all_seeds(effective_seed)
 
     if args.sample_mode == "dataset_all":
         export_subfolder = "pytorch_export_dataset_all"
@@ -669,6 +690,29 @@ def main():
     is_zero_strain = (f3x3 - identity_matrix).abs().max(dim=1)[0].max(dim=1)[0] < 1e-6
     test_cases[is_zero_strain] = 2 # test_case_identifier_biaxial_tension
 
+    model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
+    parts = model_folder_name.split('_')
+    true_model_name = "isihara"
+    if len(parts) > 1 and parts[1] in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+        true_model_name = parts[1]
+    else:
+        for p in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+            if p in parts or p in model_folder_name.lower():
+                true_model_name = p
+                break
+    try:
+        true_model = get_material(true_model_name, jit_P=False)
+    except Exception:
+        true_model = None
+
+    theta1 = np.pi / 4.0
+    theta2 = -np.pi / 4.0
+    if true_model is not None and getattr(true_model, "a1", None) is not None and getattr(true_model, "a2", None) is not None:
+        theta1 = float(np.arctan2(true_model.a1[1], true_model.a1[0]))
+        theta2 = float(np.arctan2(true_model.a2[1], true_model.a2[0]))
+    elif true_model is not None and getattr(true_model, "a0", None) is not None:
+        theta1 = float(np.arctan2(true_model.a0[1], true_model.a0[0]))
+
     mock_gp = MockGP(mean_psi, cov_psi, device=device)
     include_log = args.material_model not in ["gmr_nolog", "gmr_no_log"]
     if args.material_model in ["gmr_aniso", "aniso_gmr"] or args.component == "aniso":
@@ -677,9 +721,9 @@ def main():
         elif args.component == "vol":
             model = PyTorchGMRVolModel(num_points, device=device, distill_target=args.distill_target)
         elif args.component == "aniso":
-            model = PyTorchGMRAnisoCompModel(num_points, device=device, distill_target=args.distill_target)
+            model = PyTorchGMRAnisoCompModel(num_points, device=device, theta1=theta1, theta2=theta2, distill_target=args.distill_target)
         else:
-            model = PyTorchGMRAnisoModel(num_points, device=device, distill_target=args.distill_target)
+            model = PyTorchGMRAnisoModel(num_points, device=device, theta1=theta1, theta2=theta2, distill_target=args.distill_target)
     else:
         if args.component == "dev":
             model = PyTorchGMRDevModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log)
@@ -709,10 +753,10 @@ def main():
         parts = model_folder_name.split('_')
         
         true_model_name = "isihara"
-        if len(parts) > 1 and parts[1] in ["ortho45", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+        if len(parts) > 1 and parts[1] in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
             true_model_name = parts[1]
         else:
-            for p in ["ortho45", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+            for p in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
                 if p in parts or p in model_folder_name.lower():
                     true_model_name = p
                     break
@@ -720,19 +764,20 @@ def main():
         true_model = get_material(true_model_name, jit_P=False)
         
         true_params = {}
-        if true_model_name == "ortho45":
+        if true_model_name in ["ortho45", "symnonortho60"]:
             true_params = {
                 "$C_{10}$": 0.5, "$C_{01}$": 0.0, "$C_{20}$": 0.0, "$C_{11}$": 0.0, "$C_{02}$": 0.0,
                 "$C_{30}$": 0.0, "$C_{21}$": 0.0, "$C_{12}$": 0.0, "$C_{03}$": 0.0,
                 "$D_{1}$": 1.0, "$D_{2}$": 0.0, "$D_{3}$": 0.0,
-                "$C_{41}$": 0.0, "$C_{42}$": 0.7, "$C_{61}$": 0.0, "$C_{62}$": 0.9
+                "$C_{42}$": 0.7, "$C_{44}$": 0.0, "$k_{1}$": 0.0, "$k_{2}$": 0.0,
+                "$C_{62}$": 0.9, "$C_{64}$": 0.0, "$k_{3}$": 0.0, "$k_{4}$": 0.0
             }
         elif true_model_name == "aniso30":
             true_params = {
                 "$C_{10}$": 0.5, "$C_{01}$": 0.0, "$C_{20}$": 0.0, "$C_{11}$": 0.0, "$C_{02}$": 0.0,
                 "$C_{30}$": 0.0, "$C_{21}$": 0.0, "$C_{12}$": 0.0, "$C_{03}$": 0.0,
                 "$D_{1}$": 1.0, "$D_{2}$": 0.0, "$D_{3}$": 0.0,
-                "$C_{41}$": 0.0, "$C_{42}$": 0.7
+                "$C_{42}$": 0.7, "$C_{44}$": 0.0, "$k_{1}$": 0.0, "$k_{2}$": 0.0
             }
         elif true_model_name == "isihara":
             true_params = {"$C_{10}$": true_model.c10, "$C_{01}$": true_model.c01, "$C_{20}$": true_model.c20, "$D_{1}$": true_model.d1}
@@ -806,6 +851,7 @@ def main():
         print(f"=== Stage 1: Initial Parameter Distillation {model_type_str} ===")
         print("========================================================================\n")
         t0_stage1 = time.time()
+        set_all_seeds(effective_seed)
 
         distribution = distill_parameter_distribution_from_gp(
             gp=mock_gp,
@@ -814,7 +860,7 @@ def main():
             distribution_type="normalizing flow",
             inputs=f3x3,
             test_cases=test_cases,
-            num_func_samples=512,
+            num_func_samples=args.num_func_samples,
             lipschitz_penalty_coefficient=10.0,
             num_iters_wasserstein=args.n_iterations,
             num_layers_lipschitz_nn=3,
@@ -1067,6 +1113,7 @@ def main():
             model.reduce_to_activated_parameters()
             print(f"Reduced model active parameters ({model.num_parameters}): {model.parameter_names}")
             t0_stage3 = time.time()
+            set_all_seeds(effective_seed)
             
             distribution = distill_parameter_distribution_from_gp(
                 gp=mock_gp,
@@ -1075,7 +1122,7 @@ def main():
                 distribution_type="normalizing flow",
                 inputs=f3x3,
                 test_cases=test_cases,
-                num_func_samples=512,
+                num_func_samples=args.num_func_samples,
                 lipschitz_penalty_coefficient=10.0,
                 num_iters_wasserstein=args.n_iterations,
                 num_layers_lipschitz_nn=3,
