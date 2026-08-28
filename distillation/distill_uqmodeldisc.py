@@ -737,15 +737,15 @@ def main():
                 "$C_{10}$": 0.5, "$C_{01}$": 0.0, "$C_{20}$": 0.0, "$C_{11}$": 0.0, "$C_{02}$": 0.0,
                 "$C_{30}$": 0.0, "$C_{21}$": 0.0, "$C_{12}$": 0.0, "$C_{03}$": 0.0,
                 "$D_{1}$": 1.0, "$D_{2}$": 0.0, "$D_{3}$": 0.0,
-                "$C_{42}$": 0.7, "$C_{44}$": 0.0, "$k_{1}$": 0.0, "$k_{2}$": 0.0,
-                "$C_{62}$": 0.9, "$C_{64}$": 0.0, "$k_{3}$": 0.0, "$k_{4}$": 0.0
+                "$C_{42}$": 0.7, "$C_{43}$": 0.0, "$C_{44}$": 0.0,
+                "$C_{62}$": 0.9, "$C_{63}$": 0.0, "$C_{64}$": 0.0
             }
         elif true_model_name == "aniso30":
             true_params = {
                 "$C_{10}$": 0.5, "$C_{01}$": 0.0, "$C_{20}$": 0.0, "$C_{11}$": 0.0, "$C_{02}$": 0.0,
                 "$C_{30}$": 0.0, "$C_{21}$": 0.0, "$C_{12}$": 0.0, "$C_{03}$": 0.0,
                 "$D_{1}$": 1.0, "$D_{2}$": 0.0, "$D_{3}$": 0.0,
-                "$C_{42}$": 0.7, "$C_{44}$": 0.0, "$k_{1}$": 0.0, "$k_{2}$": 0.0
+                "$C_{42}$": 0.7, "$C_{43}$": 0.0, "$C_{44}$": 0.0
             }
         elif true_model_name == "isihara":
             true_params = {"$C_{10}$": true_model.c10, "$C_{01}$": true_model.c01, "$C_{20}$": true_model.c20, "$D_{1}$": true_model.d1}
@@ -758,40 +758,13 @@ def main():
         elif true_model_name in ["c20d10d05", "c20_d10_d05"]:
             true_params = {"$C_{10}$": true_model.dev_params[0], "$D_{1}$": true_model.vol_params[0], "$D_{2}$": true_model.vol_params[1]}
 
-        source_type = "exp" if any(x in model_folder_name.lower() for x in ["exp", "dic", "18617429"]) else "syn"
-        noise_str = f"_{source_type}"
-        if len(parts) >= 4:
-            try:
-                _ = float(parts[2])
-                _ = float(parts[3])
-                noise_str = f"_{source_type}_d{parts[2]}_l{parts[3]}"
-            except ValueError:
-                pass
-        
-        current_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-        mode_str = f"_{args.sample_mode}_g{args.max_gamma}" if args.sample_mode == "standard" else f"_{args.sample_mode}"
-        if args.distill_target in ["sef_stress", "sef_cauchy", "sef_split"]:
-            mode_str += f"_{args.distill_target}"
+        source_type = "exp" if any(x in args.saved_model_dir.lower() for x in ["exp", "dic", "18617429"]) else "syn"
 
         if args.override_out_dir:
             out_dir = os.path.abspath(args.override_out_dir)
-            if not out_dir.endswith("distillation"):
-                out_dir = os.path.join(out_dir, "distillation")
         else:
-            # Check if saved_model_dir is already inside a results structure
-            saved_dir_abs = os.path.abspath(args.saved_model_dir)
-            if "results" in saved_dir_abs.split(os.sep):
-                # Ascend to seed directory (e.g. results/nh2/20260827_.../47/)
-                parts = saved_dir_abs.split(os.sep)
-                res_idx = parts.index("results")
-                # e.g. parts[res_idx + 1] = matmodel, parts[res_idx + 2] = timestamp_config, parts[res_idx + 3] = seed
-                if len(parts) >= res_idx + 4:
-                    seed_dir = os.sep.join(parts[:res_idx + 4])
-                    out_dir = os.path.join(seed_dir, "distillation")
-                else:
-                    out_dir = os.path.join(saved_dir_abs, "distillation")
-            else:
-                out_dir = os.path.abspath(os.path.join("results", true_model_name, f"{current_time}_{true_model_name}{noise_str}_{args.material_model}{mode_str}", str(args.seed), "distillation"))
+            saved_dir_name = os.path.basename(os.path.normpath(args.saved_model_dir))
+            out_dir = os.path.abspath(os.path.join("distillation/distilled_models", saved_dir_name))
         log_mode = "w"
     os.makedirs(out_dir, exist_ok=True)
     

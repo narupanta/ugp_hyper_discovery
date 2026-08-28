@@ -175,14 +175,6 @@ fi
 
 CURRENT_TIME=$(date +"%Y%m%dT%H%M%S")
 
-if [ -n "$EXTRACTION_DIR_OVERRIDE" ]; then
-    PARENT_RUN_DIR="$EXTRACTION_DIR_OVERRIDE"
-else
-    PARENT_RUN_DIR="results/${MODEL}/${CURRENT_TIME}_${MODEL}_d${D_NOISE}_l${L_NOISE}_${GEOMETRY}"
-fi
-
-mkdir -p "$PARENT_RUN_DIR"
-
 if [ "$SKIP_GEN" == "true" ]; then
     echo "⏭️ Skipping Step 1 (Sequential Data Generation) as requested."
 else
@@ -212,9 +204,9 @@ for SEED in $SEEDS_LIST; do
     echo "=== Running Extraction & Distillation Pipeline for SEED = $SEED ==="
     echo "========================================================================"
 
-    SEED_DIR="${PARENT_RUN_DIR}/${SEED}"
-    EXTRACT_SEED_DIR="${SEED_DIR}/extraction"
-    DISTILL_SEED_DIR="${SEED_DIR}/distillation"
+    FOLDER_NAME="${CURRENT_TIME}_${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${N_IP}_${BETA}_${FIXED_NOISE}_fip${FIXED_IP}_${MODEL_MODE}_${GEOMETRY}_${SEED}"
+    EXTRACT_SEED_DIR="extraction/extracted_models/${FOLDER_NAME}"
+    DISTILL_SEED_DIR="distillation/distilled_models/${FOLDER_NAME}"
     mkdir -p "$EXTRACT_SEED_DIR"
     mkdir -p "$DISTILL_SEED_DIR"
 
@@ -254,17 +246,11 @@ for SEED in $SEEDS_LIST; do
 
     # Find extraction directory matching this seed or use override/fallback
     if [ -n "$EXTRACTION_DIR_OVERRIDE" ] && [ -d "$EXTRACTION_DIR_OVERRIDE" ]; then
-        if [ -d "${EXTRACTION_DIR_OVERRIDE}/${SEED}/extraction" ]; then
-            SAVED_DIR="${EXTRACTION_DIR_OVERRIDE}/${SEED}/extraction"
-        elif [ -d "${EXTRACTION_DIR_OVERRIDE}/extraction" ]; then
-            SAVED_DIR="${EXTRACTION_DIR_OVERRIDE}/extraction"
-        else
-            SAVED_DIR="$EXTRACTION_DIR_OVERRIDE"
-        fi
+        SAVED_DIR="$EXTRACTION_DIR_OVERRIDE"
     elif [ -d "$EXTRACT_SEED_DIR" ] && [ -f "${EXTRACT_SEED_DIR}/sparse_gp_final.npz" ]; then
         SAVED_DIR="$EXTRACT_SEED_DIR"
     else
-        SAVED_DIR=$(ls -td results/${MODEL}/*${MODEL}*d${D_NOISE}*l${L_NOISE}*${GEOMETRY}*/${SEED}/extraction extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}* 2>/dev/null | head -1)
+        SAVED_DIR=$(ls -td extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}*_${SEED} extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}* 2>/dev/null | head -1)
     fi
 
     if [ -z "$SAVED_DIR" ] || [ ! -d "$SAVED_DIR" ]; then
@@ -282,7 +268,11 @@ for SEED in $SEEDS_LIST; do
         echo "⏭️ Skipping Step 3 (Distillation) as requested."
     else
         echo "--- Step 3: Distillation ($DIST_MODEL candidate expression, DEV/VOL: $DEV_VOL_DIST_ITERS, ANISO: $ANISO_DIST_ITERS iterations, Seed: $SEED) ---"
-        SHARED_OUT_DIR="$DISTILL_SEED_DIR"
+        if [ -n "$DISTILLED_DIR_OVERRIDE" ]; then
+            SHARED_OUT_DIR="$DISTILLED_DIR_OVERRIDE"
+        else
+            SHARED_OUT_DIR="$DISTILL_SEED_DIR"
+        fi
 
         if [ "$DIST_TARGET" == "sef_split" ]; then
             echo "Distilling DEV component into $SHARED_OUT_DIR ($DEV_VOL_DIST_ITERS iters)..."

@@ -152,18 +152,12 @@ if __name__ == "__main__" :
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     training_config_str = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{n_ip}_{beta}_{is_fixed_reaction_force_noise}_fip{is_fixed_inducing_points}_{model_mode}_{args.geometry}"
     
-    base_save_path = "results"
-    # Subfolder with datetime or batch_dir
+    base_save_path = "extraction/extracted_models"
+    config_folder = f"{timestamp}_{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{n_ip}_{beta}_{is_fixed_reaction_force_noise}_fip{is_fixed_inducing_points}_{model_mode}_{args.geometry}_{args.seed}"
     if args.batch_dir:
-        if args.batch_dir.endswith("extraction"):
-            save_path = os.path.abspath(args.batch_dir)
-        elif os.path.basename(args.batch_dir) == str(args.seed):
-            save_path = os.path.abspath(os.path.join(args.batch_dir, "extraction"))
-        else:
-            save_path = os.path.abspath(os.path.join(args.batch_dir, str(args.seed), "extraction"))
+        save_path = os.path.abspath(args.batch_dir)
     else:
-        config_folder = f"{timestamp}_{material_model_name}_d{disp_noise}_l{load_noise}_{args.geometry}"
-        save_path = os.path.abspath(os.path.join(base_save_path, material_model_name, config_folder, str(args.seed), "extraction"))
+        save_path = os.path.abspath(os.path.join(base_save_path, config_folder))
         
     os.makedirs(save_path, exist_ok=True)
 
@@ -191,8 +185,13 @@ if __name__ == "__main__" :
     piola_true_func = lambda f: true_mat_model.P(f)
 
     if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
-        a0 = jnp.asarray(getattr(true_mat_model, "a1", getattr(true_mat_model, "a0", prep_data.get("a0", [1.0, 0.0, 0.0]))))
-        a1 = jnp.asarray(true_mat_model.a2) if hasattr(true_mat_model, "a2") else None
+        a0_val = getattr(true_mat_model, "a0", None)
+        if a0_val is None:
+            a0_val = getattr(true_mat_model, "a1", prep_data.get("a0", [1.0, 0.0, 0.0]))
+        a0 = jnp.asarray(a0_val)
+        
+        a1_cand = getattr(true_mat_model, "a1", None) if getattr(true_mat_model, "a0", None) is not None else getattr(true_mat_model, "a2", None)
+        a1 = jnp.asarray(a1_cand) if a1_cand is not None else None
         extractor = AnisotropicFeatureExtractor(a0, a1=a1, cap_compression=args.cap_compression == 1)
         dev, vol, aniso = jax.vmap(jax.vmap(extractor.extract))(f3x3)
         I_all = jnp.concatenate([dev, vol, aniso], axis=-1)

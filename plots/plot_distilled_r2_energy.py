@@ -184,8 +184,15 @@ def main():
                 mat_dev = get_material("gmr", dev_params=dev_theta[:9], vol_params=dev_theta[9:12], jit_P=False)
                 mat_vol = get_material("gmr", dev_params=vol_theta[:9], vol_params=vol_theta[9:12], jit_P=False)
                 
-                a1 = jnp.array(getattr(true_model, "a1", getattr(true_model, "a0", [1.0, 0.0, 0.0])))
-                a2 = jnp.array(getattr(true_model, "a2", [0.0, 1.0, 0.0]))
+                a1_val = getattr(true_model, "a0", None)
+                if a1_val is None:
+                    a1_val = getattr(true_model, "a1", [1.0, 0.0, 0.0])
+                a1 = jnp.array(a1_val)
+                
+                a2_val = getattr(true_model, "a1", None) if getattr(true_model, "a0", None) is not None else getattr(true_model, "a2", None)
+                if a2_val is None:
+                    a2_val = [0.0, 1.0, 0.0]
+                a2 = jnp.array(a2_val)
                 
                 def psi_aniso_single(theta_a, F_mat):
                     J = jnp.linalg.det(F_mat)
