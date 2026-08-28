@@ -6,6 +6,7 @@ import datetime
 from pathlib import Path
 import time
 from core.material_models import get_material
+from core.utils import infer_material_model_name
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'UQInModelDiscovery')))
@@ -425,8 +426,8 @@ class PyTorchGMRAnisoCompModel(BasePyTorchMaterialModel):
         self.distill_target = distill_target
         self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
         
-        self._num_parameters = 8
-        self._parameter_names = ("$C_{42}$", "$C_{44}$", "$k_{1}$", "$k_{2}$", "$C_{62}$", "$C_{64}$", "$k_{3}$", "$k_{4}$")
+        self._num_parameters = 6
+        self._parameter_names = ("$C_{42}$", "$C_{43}$", "$C_{44}$", "$C_{62}$", "$C_{63}$", "$C_{64}$")
         
         self._parameter_scales = torch.ones(self._num_parameters, device=device)
         self._device = device
@@ -463,15 +464,10 @@ class PyTorchGMRAnisoCompModel(BasePyTorchMaterialModel):
         I4_m1 = I4_bar_1 - 1.0
         I6_m1 = I4_bar_2 - 1.0
 
-        C42, C44, k1, k2, C62, C64, k3, k4 = full_parameters
+        C42, C43, C44, C62, C63, C64 = full_parameters
 
-        exp_arg1 = torch.clamp(k2 * I4_m1**2, min=-30.0, max=30.0)
-        exp_arg2 = torch.clamp(k4 * I6_m1**2, min=-30.0, max=30.0)
-        exp_term1 = torch.exp(exp_arg1)
-        exp_term2 = torch.exp(exp_arg2)
-
-        W_aniso = (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (exp_term1 - 1.0) +
-                   C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (exp_term2 - 1.0))
+        W_aniso = (C42 * I4_m1**2 + C43 * I4_m1**3 + C44 * I4_m1**4 +
+                   C62 * I6_m1**2 + C63 * I6_m1**3 + C64 * I6_m1**4)
         energy = W_aniso
 
         if self.distill_target in ["sef_stress", "sef_cauchy"]:
@@ -479,8 +475,8 @@ class PyTorchGMRAnisoCompModel(BasePyTorchMaterialModel):
             dI4_1_dF = 2.0 * (J.view(-1, 1, 1)**(-2/3)) * torch.einsum('i,...j->...ij', self.a1, torch.matmul(inputs, self.a1)) - (2.0/3.0) * I4_bar_1.view(-1, 1, 1) * F_inv_T
             dI4_2_dF = 2.0 * (J.view(-1, 1, 1)**(-2/3)) * torch.einsum('i,...j->...ij', self.a2, torch.matmul(inputs, self.a2)) - (2.0/3.0) * I4_bar_2.view(-1, 1, 1) * F_inv_T
             
-            dW_dI4_1 = 2.0 * C42 * I4_m1 + 4.0 * C44 * I4_m1**3 + 2.0 * k1 * k2 * I4_m1 * exp_term1
-            dW_dI4_2 = 2.0 * C62 * I6_m1 + 4.0 * C64 * I6_m1**3 + 2.0 * k3 * k4 * I6_m1 * exp_term2
+            dW_dI4_1 = 2.0 * C42 * I4_m1 + 3.0 * C43 * I4_m1**2 + 4.0 * C44 * I4_m1**3
+            dW_dI4_2 = 2.0 * C62 * I6_m1 + 3.0 * C63 * I6_m1**2 + 4.0 * C64 * I6_m1**3
             
             P = dW_dI4_1.view(-1, 1, 1) * dI4_1_dF + dW_dI4_2.view(-1, 1, 1) * dI4_2_dF
             if self.distill_target == "sef_cauchy":
@@ -497,11 +493,11 @@ class PyTorchGMRAnisoModel(BasePyTorchMaterialModel):
         self.distill_target = distill_target
         self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
         
-        self._num_parameters = 20
+        self._num_parameters = 18
         self._parameter_names = (
             "$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$",
             "$D_{1}$", "$D_{2}$", "$D_{3}$",
-            "$C_{42}$", "$C_{44}$", "$k_{1}$", "$k_{2}$", "$C_{62}$", "$C_{64}$", "$k_{3}$", "$k_{4}$"
+            "$C_{42}$", "$C_{43}$", "$C_{44}$", "$C_{62}$", "$C_{63}$", "$C_{64}$"
         )
         
         self._parameter_scales = torch.ones(self._num_parameters, device=device)
@@ -542,18 +538,13 @@ class PyTorchGMRAnisoModel(BasePyTorchMaterialModel):
         I4_m1 = I4_bar_1 - 1.0
         I6_m1 = I4_bar_2 - 1.0
 
-        C10, C01, C20, C11, C02, C30, C21, C12, C03, D1, D2, D3, C42, C44, k1, k2, C62, C64, k3, k4 = full_parameters
-
-        exp_arg1 = torch.clamp(k2 * I4_m1**2, min=-30.0, max=30.0)
-        exp_arg2 = torch.clamp(k4 * I6_m1**2, min=-30.0, max=30.0)
-        exp_term1 = torch.exp(exp_arg1)
-        exp_term2 = torch.exp(exp_arg2)
+        C10, C01, C20, C11, C02, C30, C21, C12, C03, D1, D2, D3, C42, C43, C44, C62, C63, C64 = full_parameters
 
         W_dev = (C10 * I1_m3 + C01 * I2_m3 + C20 * I1_m3**2 + C11 * I1_m3 * I2_m3 + C02 * I2_m3**2 +
                  C30 * I1_m3**3 + C21 * (I1_m3**2) * I2_m3 + C12 * I1_m3 * (I2_m3**2) + C03 * I2_m3**3)
         W_vol = D1 * J_m1**2 + D2 * J_m1**4 + D3 * J_m1**6
-        W_aniso = (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (exp_term1 - 1.0) +
-                   C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (exp_term2 - 1.0))
+        W_aniso = (C42 * I4_m1**2 + C43 * I4_m1**3 + C44 * I4_m1**4 +
+                   C62 * I6_m1**2 + C63 * I6_m1**3 + C64 * I6_m1**4)
 
         energy = W_dev + W_vol + W_aniso
 
@@ -570,8 +561,8 @@ class PyTorchGMRAnisoModel(BasePyTorchMaterialModel):
             dW_dI1 = C10 + 2.0 * C20 * I1_m3 + C11 * I2_m3 + 3.0 * C30 * (I1_m3**2) + 2.0 * C21 * I1_m3 * I2_m3 + C12 * (I2_m3**2)
             dW_dI2 = C01 + C11 * I1_m3 + 2.0 * C02 * I2_m3 + C21 * (I1_m3**2) + 2.0 * C12 * I1_m3 * I2_m3 + 3.0 * C03 * (I2_m3**2)
             dW_dJ = 2.0 * D1 * J_m1 + 4.0 * D2 * J_m1**3 + 6.0 * D3 * J_m1**5
-            dW_dI4_1 = 2.0 * C42 * I4_m1 + 4.0 * C44 * I4_m1**3 + 2.0 * k1 * k2 * I4_m1 * exp_term1
-            dW_dI4_2 = 2.0 * C62 * I6_m1 + 4.0 * C64 * I6_m1**3 + 2.0 * k3 * k4 * I6_m1 * exp_term2
+            dW_dI4_1 = 2.0 * C42 * I4_m1 + 3.0 * C43 * I4_m1**2 + 4.0 * C44 * I4_m1**3
+            dW_dI4_2 = 2.0 * C62 * I6_m1 + 3.0 * C63 * I6_m1**2 + 4.0 * C64 * I6_m1**3
 
             P = dW_dI1.view(-1, 1, 1) * dI1bar_dF + dW_dI2.view(-1, 1, 1) * dI2bar_dF + dW_dJ.view(-1, 1, 1) * dJ_dF + dW_dI4_1.view(-1, 1, 1) * dI4_1_dF + dW_dI4_2.view(-1, 1, 1) * dI4_2_dF
             
@@ -690,20 +681,8 @@ def main():
     is_zero_strain = (f3x3 - identity_matrix).abs().max(dim=1)[0].max(dim=1)[0] < 1e-6
     test_cases[is_zero_strain] = 2 # test_case_identifier_biaxial_tension
 
-    model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
-    parts = model_folder_name.split('_')
-    true_model_name = "isihara"
-    if len(parts) > 1 and parts[1] in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
-        true_model_name = parts[1]
-    else:
-        for p in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
-            if p in parts or p in model_folder_name.lower():
-                true_model_name = p
-                break
-    try:
-        true_model = get_material(true_model_name, jit_P=False)
-    except Exception:
-        true_model = None
+    true_model_name = infer_material_model_name(args.saved_model_dir)
+    true_model = get_material(true_model_name, jit_P=False)
 
     theta1 = np.pi / 4.0
     theta2 = -np.pi / 4.0
@@ -749,18 +728,7 @@ def main():
         out_dir = os.path.abspath(args.load_distilled_dir)
         log_mode = "a"
     else:
-        model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
-        parts = model_folder_name.split('_')
-        
-        true_model_name = "isihara"
-        if len(parts) > 1 and parts[1] in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
-            true_model_name = parts[1]
-        else:
-            for p in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
-                if p in parts or p in model_folder_name.lower():
-                    true_model_name = p
-                    break
-                
+        true_model_name = infer_material_model_name(args.saved_model_dir)
         true_model = get_material(true_model_name, jit_P=False)
         
         true_params = {}
@@ -1326,63 +1294,6 @@ def main():
     except Exception as e:
         print(f"Error generating parameter correlation pairplot: {e}")
 
-    # Generate parameter violin plot
-    try:
-        print("Generating parameter violin plot...")
-        plt.figure(figsize=(max(8, len(full_param_names_master) * 0.8), 6))
-        
-        violin_data = []
-        violin_positions = []
-        labels = []
-        
-        for i, col in enumerate(full_param_names_master):
-            if col in model.parameter_names:
-                violin_data.append(df[col].values)
-                violin_positions.append(i)
-            labels.append(col)
-            
-        ax = plt.gca()
-        if violin_data:
-            parts = ax.violinplot(violin_data, positions=violin_positions, showmeans=False, showextrema=False)
-            for pc in parts['bodies']:
-                pc.set_facecolor('#2980b9')
-                pc.set_edgecolor('black')
-                pc.set_alpha(0.7)
-            
-            for pos, data in zip(violin_positions, violin_data):
-                mean_val = np.mean(data)
-                ci_lower = np.percentile(data, 2.5)
-                ci_upper = np.percentile(data, 97.5)
-                
-                ax.plot([pos - 0.2, pos + 0.2], [mean_val, mean_val], color='black', lw=2)
-                ax.plot([pos, pos], [ci_lower, ci_upper], color='black', lw=2)
-                
-        ax.set_xticks(range(len(full_param_names_master)))
-        ax.set_xticklabels(labels, fontsize=12)
-        
-        for i, col in enumerate(full_param_names_master):
-            true_val = true_params.get(col, 0.0)
-            ax.scatter([i], [true_val], color='red', marker='X', s=100, zorder=10, lw=2, label="Ground Truth" if i==0 else "")
-            
-        ax.set_ylim([0, 2.5])
-        ax.set_ylabel("Material Parameter Value", fontsize=12)
-        ax.set_title(f"Parameter Posterior Distribution ({args.material_model})", fontsize=14, fontweight='bold')
-        
-        handles, lbls = ax.get_legend_handles_labels()
-        by_label = dict(zip(lbls, handles))
-        if by_label:
-            ax.legend(by_label.values(), by_label.keys(), loc='upper right')
-            
-        ax.grid(axis='y', alpha=0.3)
-        plt.tight_layout()
-        
-        violin_path = os.path.join(out_dir, pfx(f"parameter_violin_{args.material_model}.pdf"))
-        plt.savefig(violin_path, dpi=200, bbox_inches='tight')
-        plt.close()
-        print(f"Saved parameter violin plot to {violin_path}")
-    except Exception as e:
-        print(f"Error generating parameter violin plot: {e}")
-
     # Run validation plot scripts (only if not sef_split, otherwise we wait for both to finish in bash script)
     if args.distill_target != "sef_split":
         try:
@@ -1393,17 +1304,6 @@ def main():
                             "--distill_target", args.distill_target], check=True)
         except Exception as e:
             print(f"Error running validation plots: {e}")
-
-    # Run deformation sensitivity plot script
-    try:
-        active_params_str = ",".join(model.parameter_names)
-        import subprocess
-        cmd = ["python3", "plots/plot_deformation_sensitivity.py", "--distilled_dir", out_dir, "--active_params", active_params_str]
-        if args.distill_target == "sef_split":
-            cmd.extend(["--component", args.component, "--distill_target", args.distill_target])
-        subprocess.run(cmd, check=True)
-    except Exception as e:
-        print(f"Error running deformation sensitivity plots: {e}")
 
     # Run invariant sensitivity plot scripts
     try:

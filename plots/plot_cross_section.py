@@ -12,6 +12,7 @@ from scipy.stats import norm
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material
+from core.utils import infer_material_model_name
 
 def generate_single_mode(gamma_val=0.5):
     gamma = jnp.array([gamma_val])
@@ -34,16 +35,14 @@ def generate_single_mode(gamma_val=0.5):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--saved_model_dir", type=str, default="extraction/extracted_models/20260714T093804_isihara_0.0001_0.01_8.0_0.95_5_80.0_1")
+    parser.add_argument("--saved_model_dir", type=str, required=True)
     parser.add_argument("--distilled_dir", type=str, required=True)
-    parser.add_argument("--material_model", type=str, default="isihara", choices=["ogden", "gmr", "isihara"])
+    parser.add_argument("--material_model", type=str, required=True, choices=["ogden", "gmr", "isihara"])
     parser.add_argument("--gamma", type=float, default=0.5)
     args = parser.parse_args()
     
-    # 1. Load True Model dynamically from saved_model_dir folder name
-    model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
-    parts = model_folder_name.split('_')
-    true_model_name = parts[1] if len(parts) > 1 else "isihara"
+    # 1. Load True Model dynamically from saved_model_dir
+    true_model_name = infer_material_model_name(args.saved_model_dir)
     true_model = get_material(true_model_name, jit_P=False)
     
     # 2. Load GP Model

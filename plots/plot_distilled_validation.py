@@ -17,6 +17,7 @@ from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material
 from core.features import IsotropicFeatureExtractor
+from core.utils import infer_material_model_name
 
 def generate_standard_modes(num_points=100, max_gamma=2.0):
     gamma = jnp.linspace(0.0, max_gamma, num_points)
@@ -42,7 +43,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, default=None)
     parser.add_argument("--distilled_dir", type=str, required=True)
-    parser.add_argument("--material_model", type=str, default="isihara", choices=["ogden", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
+    parser.add_argument("--material_model", type=str, required=True, choices=["ogden", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
     args = parser.parse_args()
     
@@ -61,12 +62,7 @@ def main():
         else:
             raise ValueError(f"saved_model_dir must be provided if {source_file} does not exist.")
     
-    model_folder_name = os.path.basename(os.path.normpath(saved_model_dir))
-    parent_folder_name = os.path.basename(os.path.dirname(os.path.normpath(saved_model_dir)))
-    if len(model_folder_name.split('_')) < 2 or model_folder_name.isdigit():
-        model_folder_name = parent_folder_name
-    parts = model_folder_name.split('_')
-    true_model_name = parts[1] if len(parts) > 1 else "isihara"
+    true_model_name = infer_material_model_name(saved_model_dir)
     true_model = get_material(true_model_name, jit_P=False)
     
     # 2. Load GP Model
@@ -234,12 +230,17 @@ def main():
             I4_bar_2 = jnp.einsum('i,ij,j->', a2, C_bar, a2)
             I4_m1 = I4_bar_1 - 1.0
             I6_m1 = I4_bar_2 - 1.0
-            ta = list(theta_aniso) + [0.0] * (8 - len(theta_aniso))
-            C42, C44, k1, k2, C62, C64, k3, k4 = ta[:8]
-            exp_arg1 = jnp.clip(k2 * I4_m1**2, -30.0, 30.0)
-            exp_arg2 = jnp.clip(k4 * I6_m1**2, -30.0, 30.0)
-            return (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (jnp.exp(exp_arg1) - 1.0) +
-                    C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
+            if len(theta_aniso) == 6:
+                C42, C43, C44, C62, C63, C64 = theta_aniso[:6]
+                return (C42 * I4_m1**2 + C43 * I4_m1**3 + C44 * I4_m1**4 +
+                        C62 * I6_m1**2 + C63 * I6_m1**3 + C64 * I6_m1**4)
+            else:
+                ta = list(theta_aniso) + [0.0] * (8 - len(theta_aniso))
+                C42, C44, k1, k2, C62, C64, k3, k4 = ta[:8]
+                exp_arg1 = jnp.clip(k2 * I4_m1**2, -30.0, 30.0)
+                exp_arg2 = jnp.clip(k4 * I6_m1**2, -30.0, 30.0)
+                return (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (jnp.exp(exp_arg1) - 1.0) +
+                        C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
 
         def get_distilled_energy_stress_split(theta_dev, theta_vol, F_chunk):
             dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
@@ -452,10 +453,6 @@ def main():
             generate_energy_plot(dist_psi_aniso_samples, psi_true_aniso, "ANISO Energy", f"distilled_validation_energy_aniso_{args.material_model}.pdf", aniso_psi_dist_mean, aniso_psi_dist_var, ylabel=r"Anisotropic SEF ($\Psi_{\mathrm{aniso}}$)", dist_color="#CC79A7")
         generate_energy_plot(dist_psi_samples, psi_true, "TOTAL Energy", f"distilled_validation_energy_total_{args.material_model}.pdf", psi_dist_mean, psi_dist_var, dist_color="#009E73")
         
-        # Save split_energy plot
-        import shutil
-        shutil.copy(os.path.join(distilled_dir, f"distilled_validation_energy_total_{args.material_model}.pdf"), os.path.join(distilled_dir, "split_energy.pdf"))
-        
         # Save split_parameters plot
         try:
             import pandas as pd
@@ -480,10 +477,13 @@ def main():
             
             if has_aniso:
                 aniso_df_samples = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
-                aniso_names = ["$C_{41}$", "$C_{42}$", "$C_{61}$", "$C_{62}$"]
-                if aniso_df_samples.shape[1] == 2:
-                    aniso_names = ["$C_{41}$", "$C_{42}$"]
-                elif aniso_df_samples.shape[1] != len(aniso_names):
+                if aniso_df_samples.shape[1] == 6:
+                    aniso_names = ["$C_{42}$", "$C_{43}$", "$C_{44}$", "$C_{62}$", "$C_{63}$", "$C_{64}$"]
+                elif aniso_df_samples.shape[1] == 2:
+                    aniso_names = ["$C_{42}$", "$C_{62}$"]
+                elif aniso_df_samples.shape[1] == 8:
+                    aniso_names = ["$C_{42}$", "$C_{44}$", "$k_{1}$", "$k_{2}$", "$C_{62}$", "$C_{64}$", "$k_{3}$", "$k_{4}$"]
+                else:
                     aniso_names = [f"$C_{{aniso_{i+1}}}$" for i in range(aniso_df_samples.shape[1])]
                 all_samples_list.append(aniso_df_samples)
                 all_names_list.extend(aniso_names)
@@ -516,11 +516,10 @@ def main():
                 axes_p_dist[j].set_visible(False)
                 
             plt.tight_layout()
-            split_param_path = os.path.join(distilled_dir, "split_parameters.pdf")
+            split_param_path = os.path.join(distilled_dir, f"distilled_split_parameters_{args.material_model}.pdf")
             fig_p_dist.savefig(split_param_path, dpi=200)
-            fig_p_dist.savefig(os.path.join(distilled_dir, f"distilled_split_parameters_{args.material_model}.pdf"), dpi=200)
             plt.close(fig_p_dist)
-            print(f"Saved split parameters plot to {split_param_path}")
+            print(f"Saved distilled split parameters plot to {split_param_path}")
         except Exception as e:
             print(f"Error generating split parameters plot: {e}")
 

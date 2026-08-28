@@ -111,14 +111,9 @@ def main():
     import sys
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     from core.material_models import get_material
+    from core.utils import infer_material_model_name
     
-    true_model_name = "isihara" # We can just hardcode or infer it
-    parts = os.path.basename(os.path.normpath(args.distilled_dir)).split('_')
-    for p in ["isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
-        if p in parts:
-            true_model_name = p
-            break
-            
+    true_model_name = infer_material_model_name(args.distilled_dir)
     true_model = get_material(true_model_name, jit_P=False)
     true_params = {}
     if true_model_name == "isihara":
