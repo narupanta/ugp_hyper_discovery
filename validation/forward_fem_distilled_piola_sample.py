@@ -429,16 +429,13 @@ if __name__ == "__main__" :
 
         u_pred_samples = []
         main_key = jr.PRNGKey(128 + num_existing)
-
         for i in range(n_sample):
             success = False
             tries = 0
             max_tries = 5
-            
+            sample_idx = i
             while not success and tries < max_tries:
-                main_key, subkey = jr.split(main_key)
-                
-                params = selected_samples[i]
+                params = selected_samples[sample_idx]
                 if args.material_model == "isihara":
                     c10, c01, c20, d1 = params[:4]
                     mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, d1=d1)
@@ -472,9 +469,13 @@ if __name__ == "__main__" :
                     success = True 
                 except Exception as e:
                     tries += 1
-                    print(f"Simulation failed on sample {i}, try {tries}: {e}")
-                    if tries >= max_tries:
-                        raise e 
+                    print(f"Simulation failed on sample attempt {tries}: {e}")
+                    if tries < max_tries:
+                        # Resample a new parameter vector from flow samples
+                        sample_idx = np.random.randint(0, len(dev_samples) if 'dev_samples' in locals() else len(flow_samples))
+                        print(f"Resampling parameter vector from flow samples (new index: {sample_idx})...")
+                    else:
+                        raise e
 
             if success:
                 u_pred_samples.append(u_pred)

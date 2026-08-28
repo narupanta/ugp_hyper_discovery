@@ -18,6 +18,7 @@ SKIP_EXT=false
 SKIP_DISTILL=false
 SKIP_VAL=false
 EXTRACTION_DIR_OVERRIDE=""
+DISTILLED_DIR_OVERRIDE=""
 BATCH_DIR=""
 SEED_OVERRIDE=""
 
@@ -39,8 +40,12 @@ while [[ $# -gt 0 ]]; do
             SKIP_VAL=true
             shift
             ;;
-        --extraction-dir)
+        --extraction-dir|--extracted-dir)
             EXTRACTION_DIR_OVERRIDE="$2"
+            shift 2
+            ;;
+        --distilled-dir)
+            DISTILLED_DIR_OVERRIDE="$2"
             shift 2
             ;;
         --seed)
@@ -372,9 +377,19 @@ for SEED in $SEEDS_LIST; do
         continue
     fi
 
-    DISTILLED_DIR="$SHARED_OUT_DIR"
-    if [ ! -d "$DISTILLED_DIR" ] || [ ! -f "${DISTILLED_DIR}/dev_flow_samples.npy" ]; then
-        DISTILLED_DIR=$(ls -td results/${MODEL}/*${MODEL}*d${D_NOISE}*l${L_NOISE}*${GEOMETRY}*/${SEED}/distillation distillation/distilled_models/*_${MODEL}* 2>/dev/null | head -n 1 || echo "")
+    if [ -n "$DISTILLED_DIR_OVERRIDE" ] && [ -d "$DISTILLED_DIR_OVERRIDE" ]; then
+        if [ -d "${DISTILLED_DIR_OVERRIDE}/${SEED}/distillation" ]; then
+            DISTILLED_DIR="${DISTILLED_DIR_OVERRIDE}/${SEED}/distillation"
+        elif [ -d "${DISTILLED_DIR_OVERRIDE}/distillation" ]; then
+            DISTILLED_DIR="${DISTILLED_DIR_OVERRIDE}/distillation"
+        else
+            DISTILLED_DIR="$DISTILLED_DIR_OVERRIDE"
+        fi
+    else
+        DISTILLED_DIR="$DISTILL_SEED_DIR"
+        if [ ! -d "$DISTILLED_DIR" ] || [ ! -f "${DISTILLED_DIR}/dev_flow_samples.npy" ]; then
+            DISTILLED_DIR=$(ls -td results/${MODEL}/*${MODEL}*d${D_NOISE}*l${L_NOISE}*${GEOMETRY}*/${SEED}/distillation distillation/distilled_models/*_${MODEL}* 2>/dev/null | head -n 1 || echo "")
+        fi
     fi
     echo "ℹ️ Using distilled model at: $DISTILLED_DIR"
 
