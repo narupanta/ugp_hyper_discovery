@@ -3,7 +3,6 @@ import argparse
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from shapely.geometry import MultiPoint
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 import jax
 from jax import config
@@ -14,9 +13,8 @@ from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material
 from core.features import IsotropicFeatureExtractor
+from core.utils import infer_material_model_name
 from scipy.spatial import ConvexHull
-from core.material_models import get_material
-from core.features import IsotropicFeatureExtractor
 
 def to_latex(name):
     if name.startswith("C") and len(name) == 3 and name[1:].isdigit():
@@ -106,7 +104,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, default=None)
     parser.add_argument("--distilled_dir", type=str, required=True)
-    parser.add_argument("--material_model", type=str, default="isihara")
+    parser.add_argument("--material_model", type=str, required=True)
     parser.add_argument("--distill_target", type=str, default="sef_split")
     parser.add_argument("--sobol_threshold", type=float, default=0.0001)
     args = parser.parse_args()
@@ -124,23 +122,7 @@ def main():
         if saved_model_dir is None:
             raise ValueError("saved_model_dir not found.")
 
-    true_model_name = args.material_model if args.material_model else "nh2"
-    known_models = ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]
-    all_path_tokens = os.path.abspath(saved_model_dir).split(os.sep) + os.path.abspath(distilled_dir).split(os.sep)
-    found_model = False
-    for token in reversed(all_path_tokens):
-        parts = token.split('_')
-        if len(parts) > 1 and parts[1] in known_models:
-            true_model_name = parts[1]
-            found_model = True
-            break
-        for p in known_models:
-            if p in parts or p == token:
-                true_model_name = p
-                found_model = True
-                break
-        if found_model:
-            break
+    true_model_name = infer_material_model_name(saved_model_dir)
     true_model = get_material(true_model_name, jit_P=False)
     
     best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
@@ -260,12 +242,17 @@ def main():
             I4_bar_2 = jnp.einsum('i,ij,j->', a2, C_bar, a2)
             I4_m1 = I4_bar_1 - 1.0
             I6_m1 = I4_bar_2 - 1.0
-            ta = list(theta_aniso) + [0.0] * (8 - len(theta_aniso))
-            C42, C44, k1, k2, C62, C64, k3, k4 = ta[:8]
-            exp_arg1 = jnp.clip(k2 * I4_m1**2, -30.0, 30.0)
-            exp_arg2 = jnp.clip(k4 * I6_m1**2, -30.0, 30.0)
-            return (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (jnp.exp(exp_arg1) - 1.0) +
-                    C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
+            if len(theta_aniso) == 6:
+                C42, C43, C44, C62, C63, C64 = theta_aniso[:6]
+                return (C42 * I4_m1**2 + C43 * I4_m1**3 + C44 * I4_m1**4 +
+                        C62 * I6_m1**2 + C63 * I6_m1**3 + C64 * I6_m1**4)
+            else:
+                ta = list(theta_aniso) + [0.0] * (8 - len(theta_aniso))
+                C42, C44, k1, k2, C62, C64, k3, k4 = ta[:8]
+                exp_arg1 = jnp.clip(k2 * I4_m1**2, -30.0, 30.0)
+                exp_arg2 = jnp.clip(k4 * I6_m1**2, -30.0, 30.0)
+                return (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (jnp.exp(exp_arg1) - 1.0) +
+                        C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
 
         def get_distilled_energy_stress_split(theta_dev, theta_vol, F_chunk):
             dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
@@ -326,7 +313,10 @@ def main():
         if has_aniso:
             aniso = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
             all_samples.append(aniso)
-            all_aniso_names = ["C42", "C44", "k1", "k2", "C62", "C64", "k3", "k4"]
+            if aniso.shape[1] == 6:
+                all_aniso_names = ["C42", "C43", "C44", "C62", "C63", "C64"]
+            else:
+                all_aniso_names = ["C42", "C44", "k1", "k2", "C62", "C64", "k3", "k4"]
             full_param_names += all_aniso_names[:aniso.shape[1]]
             
         min_len = min(s.shape[0] for s in all_samples)
@@ -342,7 +332,7 @@ def main():
             # Construct mean parameters
             theta_dev = np.zeros(9)
             theta_vol = np.zeros(3)
-            theta_aniso = np.zeros(8)
+            theta_aniso = np.zeros(6 if has_aniso and aniso.shape[1] == 6 else 8)
             
             for p in active_params_k:
                 clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")

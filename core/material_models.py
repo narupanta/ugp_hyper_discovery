@@ -226,27 +226,37 @@ class HyperelasticModel(BaseMaterialModel):
         return vol_terms
 
     def psi_aniso(self, F: jnp.ndarray) -> jnp.ndarray:
-        if self.a0 is None:
+        if self.a0 is None or self.aniso_params is None or len(self.aniso_params) == 0:
             return jnp.zeros(())
         _, C_bar, _, _, _ = self._eval_invariants(F)
 
         I4_bar_1 = jnp.einsum('i,...ij,j->...', self.a0, C_bar, self.a0)
         I4_m1 = I4_bar_1 - 1.0
 
-        C42, C44, k1, k2 = self.aniso_params[0], self.aniso_params[1], self.aniso_params[2], self.aniso_params[3]
-        exp_arg1 = jnp.clip(k2 * I4_m1**2, -30.0, 30.0)
+        if len(self.aniso_params) == 6:
+            C42, C43, C44, C62, C63, C64 = self.aniso_params
+            aniso1 = C42 * I4_m1**2 + C43 * I4_m1**3 + C44 * I4_m1**4
+            aniso2 = 0.0
+            if self.a1 is not None:
+                I4_bar_2 = jnp.einsum('i,...ij,j->...', self.a1, C_bar, self.a1)
+                I6_m1 = I4_bar_2 - 1.0
+                aniso2 = C62 * I6_m1**2 + C63 * I6_m1**3 + C64 * I6_m1**4
+            return aniso1 + aniso2
+        else:
+            ta = list(self.aniso_params) + [0.0] * (8 - len(self.aniso_params))
+            C42, C44, k1, k2 = ta[0], ta[1], ta[2], ta[3]
+            exp_arg1 = jnp.clip(k2 * I4_m1**2, -30.0, 30.0)
+            aniso1 = (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (jnp.exp(exp_arg1) - 1.0))
 
-        aniso1 = (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (jnp.exp(exp_arg1) - 1.0))
+            aniso2 = 0.0
+            if self.a1 is not None:
+                I4_bar_2 = jnp.einsum('i,...ij,j->...', self.a1, C_bar, self.a1)
+                I6_m1 = I4_bar_2 - 1.0
+                C62, C64, k3, k4 = ta[4], ta[5], ta[6], ta[7]
+                exp_arg2 = jnp.clip(k4 * I6_m1**2, -30.0, 30.0)
+                aniso2 = (C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
 
-        aniso2 = 0.0
-        if self.a1 is not None:
-            I4_bar_2 = jnp.einsum('i,...ij,j->...', self.a1, C_bar, self.a1)
-            I6_m1 = I4_bar_2 - 1.0
-            C62, C64, k3, k4 = self.aniso_params[4], self.aniso_params[5], self.aniso_params[6], self.aniso_params[7]
-            exp_arg2 = jnp.clip(k4 * I6_m1**2, -30.0, 30.0)
-            aniso2 = (C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
-
-        return aniso1 + aniso2
+            return aniso1 + aniso2
 
     def psi(self, F: jnp.ndarray) -> jnp.ndarray:
         return self.psi_dev(F) + self.psi_vol(F) + self.psi_aniso(F)
@@ -278,10 +288,6 @@ class NeoHookean(HyperelasticModel):
 class Isihara(HyperelasticModel):
     def __init__(self, c10=0.5, c01=1.0, c20=1.0, d1=1.5, **kwargs):
         super().__init__(dev_params=[c10, c01, c20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], vol_params=[d1, 0.0, 0.0], **kwargs)
-        self.c10 = c10
-        self.c01 = c01
-        self.c20 = c20
-        self.d1 = d1
 
 
 @register_material("gmr")
@@ -334,7 +340,7 @@ class Aniso30(HyperelasticModel):
         super().__init__(
             dev_params=[c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             vol_params=[d1, 0.0, 0.0],
-            aniso_params=[c42, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            aniso_params=[c42, 0.0, 0.0, 0.0, 0.0, 0.0],
             angles=angles,
             **kwargs
         )
@@ -349,7 +355,7 @@ class Ortho45(HyperelasticModel):
         super().__init__(
             dev_params=[c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             vol_params=[d1, 0.0, 0.0],
-            aniso_params=[c42, 0.0, 0.0, 0.0, c62, 0.0, 0.0, 0.0],
+            aniso_params=[c42, 0.0, 0.0, c62, 0.0, 0.0],
             angles=angles,
             **kwargs
         )
@@ -364,7 +370,7 @@ class SymNonOrtho60(HyperelasticModel):
         super().__init__(
             dev_params=[c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             vol_params=[d1, 0.0, 0.0],
-            aniso_params=[c42, 0.0, 0.0, 0.0, c62, 0.0, 0.0, 0.0],
+            aniso_params=[c42, 0.0, 0.0, c62, 0.0, 0.0],
             angles=angles,
             **kwargs
         )

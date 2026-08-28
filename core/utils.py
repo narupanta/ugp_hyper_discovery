@@ -1,3 +1,4 @@
+import os
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -246,3 +247,37 @@ def farthest_point_sampling_with_fixed_point(pts, num_samples, fixed_point):
     
     # Return the coordinates of the sampled points
     return pts_augmented[sampled_indices]
+
+def infer_material_model_name(path: str) -> str:
+    """
+    Infers the material model name from the saved_model_dir path or its metadata.
+    Raises ValueError if the model name cannot be determined.
+    """
+    if not path:
+        raise ValueError("Cannot infer material model name: path is empty or None.")
+    known_models = [
+        "symnonortho60", "neohookean4", "neohookean2", "c20_d10_d05", "c20d10d05",
+        "gentthomas", "ortho45", "aniso30", "isihara", "nh4", "nh2", "nh"
+    ]
+    abs_path = os.path.abspath(path)
+    # Check optimization_log.txt first if it exists in the directory, parent, or extraction subfolder
+    for check_dir in [abs_path, os.path.dirname(abs_path), os.path.join(abs_path, "extraction")]:
+        log_file = os.path.join(check_dir, "optimization_log.txt")
+        if os.path.exists(log_file):
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    first_line = f.readline()
+                    log_tokens = [t.strip().strip(",[]") for t in first_line.split()]
+                    for model_cand in known_models:
+                        if model_cand in log_tokens or model_cand == first_line.split(",")[-1].strip():
+                            return model_cand
+            except Exception:
+                pass
+    # Traverse path components from leaf to root
+    for p in reversed(abs_path.split(os.sep)):
+        subparts = p.split('_')
+        for model_cand in known_models:
+            if model_cand in subparts or model_cand == p:
+                return model_cand
+                
+    raise ValueError(f"Could not infer material model name from path '{path}'. Please ensure the path contains a valid model name or optimization_log.txt.")

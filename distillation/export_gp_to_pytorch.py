@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
-from core.utils import fto3x3, farthest_point_sampling
+from core.utils import fto3x3, farthest_point_sampling, infer_material_model_name
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 
 def generate_standard_modes(num_points=32, max_gamma=1.0):
@@ -150,21 +150,9 @@ def main():
     min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
     max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
 
-    model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
-    parts = model_folder_name.split('_')
-    true_model_name = "isihara"
-    if len(parts) > 1 and parts[1] in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
-        true_model_name = parts[1]
-    else:
-        for p in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
-            if p in parts or p in model_folder_name.lower():
-                true_model_name = p
-                break
     from core.material_models import get_material
-    try:
-        true_model = get_material(true_model_name, jit_P=False)
-    except Exception:
-        true_model = None
+    true_model_name = infer_material_model_name(args.saved_model_dir)
+    true_model = get_material(true_model_name, jit_P=False)
 
     feature_extractor = None
     if aniso_z is not None:
@@ -411,7 +399,7 @@ def main():
         import subprocess
         print(f"Automatically generating GP sample visualizations for {out_dir}...")
         try:
-            model_name = os.path.basename(os.path.normpath(args.saved_model_dir)).split("_")[1]
+            model_name = true_model_name
             subprocess.run(["python3", "plots/plot_gp_samples.py", "--export_dir", out_dir, "--model_name", model_name], check=True)
         except Exception as e:
             print(f"Failed to automatically plot GP samples: {e}")

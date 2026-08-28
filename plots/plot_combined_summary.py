@@ -13,6 +13,7 @@ from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material
 from core.features import IsotropicFeatureExtractor
+from core.utils import infer_material_model_name
 
 def to_latex(name):
     if name.startswith("C") and len(name) == 3 and name[1:].isdigit():
@@ -116,23 +117,7 @@ def main():
         if saved_model_dir is None:
             raise ValueError("saved_model_dir not found.")
 
-    true_model_name = args.material_model if hasattr(args, 'material_model') and args.material_model else "nh2"
-    known_models = ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]
-    all_path_tokens = os.path.abspath(saved_model_dir).split(os.sep) + os.path.abspath(distilled_dir).split(os.sep)
-    found_model = False
-    for token in reversed(all_path_tokens):
-        parts = token.split('_')
-        if len(parts) > 1 and parts[1] in known_models:
-            true_model_name = parts[1]
-            found_model = True
-            break
-        for p in known_models:
-            if p in parts or p == token:
-                true_model_name = p
-                found_model = True
-                break
-        if found_model:
-            break
+    true_model_name = infer_material_model_name(saved_model_dir)
     true_model = get_material(true_model_name, jit_P=False)
     
     best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()

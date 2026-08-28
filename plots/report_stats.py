@@ -5,6 +5,7 @@ import argparse
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from core.material_models import get_material
+from core.utils import infer_material_model_name
 
 def main():
     parser = argparse.ArgumentParser()
@@ -39,9 +40,7 @@ def main():
         
     df_active = df[active_parameter_names]
     
-    model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
-    parts = model_folder_name.split('_')
-    true_model_name = parts[1] if len(parts) > 1 else "isihara"
+    true_model_name = infer_material_model_name(args.saved_model_dir)
     true_model = get_material(true_model_name, jit_P=False)
     
     true_params = {}

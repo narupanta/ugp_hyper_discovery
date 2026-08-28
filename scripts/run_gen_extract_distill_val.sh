@@ -352,6 +352,12 @@ for SEED in $SEEDS_LIST; do
                 --saved_model_dir "$SAVED_DIR" \
                 --material_model "$DIST_MODEL" \
                 --distill_target "$DIST_TARGET"
+                
+            python3 plots/plot_distilled_r2_energy.py \
+                --distilled_dir "$SHARED_OUT_DIR" \
+                --saved_model_dir "$SAVED_DIR" \
+                --material_model "$DIST_MODEL" \
+                --distill_target "$DIST_TARGET"
         else
             python3 distillation/distill_uqmodeldisc.py \
                 --saved_model_dir "$SAVED_DIR" \
