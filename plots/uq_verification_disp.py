@@ -187,13 +187,17 @@ def plot_node_distributions(u_true, u_pred_samples, u_pred_piola_traction_sample
             
             # Data extraction
             samples = u_pred_samples[:, node_idx, row_idx]
-            pt_samples = u_pred_piola_traction_samples[:, node_idx, row_idx]
             u_true_node = u_true[node_idx, row_idx]
             
             p_mean = np.mean(samples)
             p_low, p_high = np.quantile(samples, [0.025, 0.975])
-            pt_mean = np.mean(pt_samples)
-            pt_low, pt_high = np.quantile(pt_samples, [0.025, 0.975])
+
+            if u_pred_piola_traction_samples is not None:
+                pt_samples = u_pred_piola_traction_samples[:, node_idx, row_idx]
+                pt_mean = np.mean(pt_samples)
+                pt_low, pt_high = np.quantile(pt_samples, [0.025, 0.975])
+            else:
+                pt_samples = None
 
             # Internal Annotation
             ax.text(0.05, 0.92, f'Node: {node_idx}', transform=ax.transAxes,
@@ -203,15 +207,15 @@ def plot_node_distributions(u_true, u_pred_samples, u_pred_piola_traction_sample
             # Plots
             ax.hist(samples, bins=40, density=True, alpha=0.3, 
                     color=d_info['color1'], label=f'Piola {label_suffix}')
-            ax.hist(pt_samples, bins=40, density=True, alpha=0.3, 
-                    color=d_info['color2'], label=f'PT {label_suffix}')
-
             ax.axvline(u_true_node, color='red', linestyle='-', linewidth=2, label=f'True {label_suffix}')
             ax.axvline(p_mean, color=d_info['color1'], linestyle='--', linewidth=1.5, label=f'Piola Mean {label_suffix}')
-            ax.axvline(pt_mean, color=d_info['color2'], linestyle='--', linewidth=1.5, label=f'PT Mean {label_suffix}')
-
             ax.axvspan(p_low, p_high, color=d_info['color1'], alpha=0.1, label=f'Piola 95% CI {label_suffix}')
-            ax.axvspan(pt_low, pt_high, color=d_info['color2'], alpha=0.1, label=f'PT 95% CI {label_suffix}')
+
+            if pt_samples is not None:
+                ax.hist(pt_samples, bins=40, density=True, alpha=0.3, 
+                        color=d_info['color2'], label=f'PT {label_suffix}')
+                ax.axvline(pt_mean, color=d_info['color2'], linestyle='--', linewidth=1.5, label=f'PT Mean {label_suffix}')
+                ax.axvspan(pt_low, pt_high, color=d_info['color2'], alpha=0.1, label=f'PT 95% CI {label_suffix}')
 
             # Formatting
             if node_col == 0:
@@ -622,30 +626,58 @@ if __name__ == "__main__" :
     case_name = args.model_path
     # precomputed_vfm_name = f"{case_name.split('_')[1]}_{case_name.split('_')[2]}_{case_name.split('_')[3]}_{case_name.split('_')[4]}_{case_name.split('_')[5]}"
 
-    save_path = analysis_dir / case_name
+    if os.path.exists(Path(args.model_path)):
+        pred_dir_name = Path(args.model_path)
+    else:
+        pred_dir_name = analysis_dir / case_name
+
+    if (pred_dir_name / "fem_validation" / "fem_distilled_samples.npz").exists():
+        pred_dir_name = pred_dir_name / "fem_validation"
+    elif not (pred_dir_name / "fem_distilled_samples.npz").exists() and (pred_dir_name.parent / "fem_validation" / "fem_distilled_samples.npz").exists():
+        pred_dir_name = pred_dir_name.parent / "fem_validation"
+
+    save_path = pred_dir_name
     save_path.mkdir(parents=True, exist_ok=True)
 
     step = validation_load_step_indices[-1]
-    pred_dir_name = analysis_dir / case_name
-    # gt_samples_dir_name = analysis_dir / f"{material_model_name}_gt_{load_noise}"
-    files = os.listdir(pred_dir_name / "piola_samples")
-    pt_files = os.listdir(pred_dir_name / "piola_traction_samples")
-    # true_data = np.load(true_data_dir / f"{precomputed_vfm_name}.npz")
-    true_data = np.load(pred_dir_name / "gt" / "u_gt.npz")
+    consolidated_file = pred_dir_name / "fem_distilled_samples.npz"
 
-    u_true = true_data["u"][step]
+    if os.path.exists(consolidated_file):
+        consolidated_data = np.load(consolidated_file, allow_pickle=True)
+        u_pred_piola_samples = consolidated_data["u_pred"][:, step]
+        mesh_node_coords = consolidated_data["node_coords"]
+        mesh_cells = consolidated_data["cells"]
+        true_data = consolidated_data
+        if "u_exp" in consolidated_data:
+            u_true = consolidated_data["u_exp"][step]
+            print(f"Using experimental displacement (u_exp) as ground truth reference for plots.")
+        elif "u_true" in consolidated_data:
+            u_true = consolidated_data["u_true"][step]
+        else:
+            gt_data = np.load(pred_dir_name.parent / "gt" / "u_gt.npz")
+            u_true = gt_data["u"][step]
+        print(f"Loaded {u_pred_piola_samples.shape[0]} consolidated samples from {consolidated_file}")
+    else:
+        true_data = np.load(pred_dir_name / "gt" / "u_gt.npz")
+        u_true = true_data["u"][step]
+        files = os.listdir(pred_dir_name / "piola_samples") if os.path.exists(pred_dir_name / "piola_samples") else []
+        u_pred_piola_samples = [] 
+        for f in files:
+            data = np.load(pred_dir_name / "piola_samples" / f)
+            u_pred_piola_samples.append(data["u_pred"][step])
+        u_pred_piola_samples = jnp.array(u_pred_piola_samples)
+        mesh_node_coords = true_data["node_coords"]
+        mesh_cells = true_data["cells"]
 
-    u_pred_piola_samples = [] 
-    for f in files :
-        data = np.load(pred_dir_name/ "piola_samples" / f)
-        u_pred_piola_samples.append(data["u_pred"][step])
-    u_pred_piola_samples = jnp.array(u_pred_piola_samples)
-
+    pt_files = os.listdir(pred_dir_name / "piola_traction_samples") if os.path.exists(pred_dir_name / "piola_traction_samples") else []
     u_pred_piola_traction_samples = []
-    for f in pt_files :
-        data = np.load(pred_dir_name/ "piola_traction_samples" / f)
+    for f in pt_files:
+        data = np.load(pred_dir_name / "piola_traction_samples" / f)
         u_pred_piola_traction_samples.append(data["u_pred"][step])
-    u_pred_piola_traction_samples = jnp.array(u_pred_piola_traction_samples)
+    if len(u_pred_piola_traction_samples) > 0:
+        u_pred_piola_traction_samples = jnp.array(u_pred_piola_traction_samples)
+    else:
+        u_pred_piola_traction_samples = None
 
     # err = u_samples - u_true[None, :, :]
     import numpy as np
@@ -666,50 +698,48 @@ if __name__ == "__main__" :
     # Find the indices of the closest nodes in your mesh
     node_indices = []
     for target in targets:
-        dist = np.linalg.norm(data["node_coords"] - target, axis=1)
+        dist = np.linalg.norm(mesh_node_coords - target, axis=1)
         node_indices.append(np.argmin(dist).item())
 
     print(f"Closest node indices: {node_indices}")
-    # plot_disp_field(data["node_coords"], data["cells"], u_true, u_pred_piola_samples.mean(axis=0), u_pred_piola_samples.std(axis=0), node_indices, save_path)
-    # plot_disp_field(data["node_coords"], data["cells"], u_true, u_pred_piola_samples.mean(axis=0), u_pred_piola_samples.std(axis=0), node_indices, save_path)
-    # plot disp field
-    # node_index = 100
-    # u_pred_samples = u_pred_piola_samples
-    # u_pt_lower_bound = np.quantile(u_pred_piola_samples, 0.025, axis=0)
-    # u_pt_upper_bound = np.quantile(u_pred_piola_samples, 0.975, axis=0)
     node_type = true_data["node_type"]
-    plot_disp_field(data["node_coords"], data["cells"], u_true, u_pred_piola_samples.mean(axis=0), u_pred_piola_samples.std(axis=0), node_indices, save_path)
+    plot_disp_field(mesh_node_coords, mesh_cells, u_true, u_pred_piola_samples.mean(axis=0), u_pred_piola_samples.std(axis=0), node_indices, save_path)
 
     plot_node_distributions(u_true, u_pred_piola_samples, u_pred_piola_traction_samples, node_indices, save_path)
     # plot_disp_r2_coverage(u_true, u_pred_samples.mean(axis=0), u_pred_samples.std(axis=0), save_path)
 
     # true_data = np.load(true_data_dir / f"{precomputed_vfm_name}.npz")
-    # true_data = np.load(pred_dir_name / "gt" / "u_gt.npz")
-    u_true_val = true_data["u"][validation_load_step_indices]
+    u_true_val = (true_data["u_exp"] if "u_exp" in true_data else (true_data["u_true"] if "u_true" in true_data else true_data["u"]))[validation_load_step_indices]
 
-    u_pred_piola_samples_val = [] 
-    for f in files :
-        data = np.load(pred_dir_name/ "piola_samples" / f)
-        u_pred_piola_samples_val.append(data["u_pred"][validation_load_step_indices])
-    u_pred_piola_samples_val = jnp.array(u_pred_piola_samples_val)
+    if os.path.exists(consolidated_file):
+        u_pred_piola_samples_val = consolidated_data["u_pred"][:, validation_load_step_indices]
+    else:
+        files = os.listdir(pred_dir_name / "piola_samples") if os.path.exists(pred_dir_name / "piola_samples") else []
+        u_pred_piola_samples_val = [] 
+        for f in files:
+            data = np.load(pred_dir_name / "piola_samples" / f)
+            u_pred_piola_samples_val.append(data["u_pred"][validation_load_step_indices])
+        u_pred_piola_samples_val = jnp.array(u_pred_piola_samples_val)
     p_val_shape = u_pred_piola_samples_val.shape
     u_pred_piola_samples_val_flat = u_pred_piola_samples_val.reshape(p_val_shape[0], -1, 2)
-    u_pred_piola_traction_samples_val = []
-    for f in pt_files :
-        data = np.load(pred_dir_name/ "piola_traction_samples" / f)
-        u_pred_piola_traction_samples_val.append(data["u_pred"][validation_load_step_indices])
-    u_pred_piola_traction_samples_val = jnp.array(u_pred_piola_traction_samples_val)
-    pt_val_shape = u_pred_piola_traction_samples_val.shape
+    if len(pt_files) > 0:
+        u_pred_piola_traction_samples_val = []
+        for f in pt_files:
+            data = np.load(pred_dir_name / "piola_traction_samples" / f)
+            u_pred_piola_traction_samples_val.append(data["u_pred"][validation_load_step_indices])
+        u_pred_piola_traction_samples_val = jnp.array(u_pred_piola_traction_samples_val)
+        pt_val_shape = u_pred_piola_traction_samples_val.shape
 
-    u_pred_piola_traction_samples_val_flat = u_pred_piola_traction_samples_val.reshape(pt_val_shape[0], -1, 2)
-    u_true_val_flat = u_true_val.reshape(-1, 2)
-    
+        u_pred_piola_traction_samples_val_flat = u_pred_piola_traction_samples_val.reshape(pt_val_shape[0], -1, 2)
+        u_true_val_flat = u_true_val.reshape(-1, 2)
 
-    u_pt_lower_bound = np.quantile(u_pred_piola_traction_samples_val_flat, 0.025, axis=0)
-    u_pt_upper_bound = np.quantile(u_pred_piola_traction_samples_val_flat, 0.975, axis=0)
-    u_pt_mean = np.mean(u_pred_piola_traction_samples_val_flat, axis=0)
+        u_pt_lower_bound = np.quantile(u_pred_piola_traction_samples_val_flat, 0.025, axis=0)
+        u_pt_upper_bound = np.quantile(u_pred_piola_traction_samples_val_flat, 0.975, axis=0)
+        u_pt_mean = np.mean(u_pred_piola_traction_samples_val_flat, axis=0)
 
-    plot_disp_r2_coverage(u_true_val_flat, u_pt_mean, u_pt_lower_bound, u_pt_upper_bound, save_path, suffix ="_piola_traction")
+        plot_disp_r2_coverage(u_true_val_flat, u_pt_mean, u_pt_lower_bound, u_pt_upper_bound, save_path, suffix ="_piola_traction")
+    else:
+        u_true_val_flat = u_true_val.reshape(-1, 2)
 
 
     u_p_lower_bound = np.quantile(u_pred_piola_samples_val_flat, 0.025, axis=0)

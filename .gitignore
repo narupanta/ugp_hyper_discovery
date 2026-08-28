@@ -30,6 +30,7 @@ raw_dataset/
 /extraction/extracted_models/
 /distillation/distilled_models/
 /distillation/distillation_models/
+/results/
 __pycache__/
 .gradio/
 extrapolation_transitions.npy

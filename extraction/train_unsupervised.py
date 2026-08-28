@@ -152,11 +152,18 @@ if __name__ == "__main__" :
     timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     training_config_str = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{n_ip}_{beta}_{is_fixed_reaction_force_noise}_fip{is_fixed_inducing_points}_{model_mode}_{args.geometry}"
     
+    base_save_path = "results"
     # Subfolder with datetime or batch_dir
     if args.batch_dir:
-        save_path = os.path.join(args.batch_dir, str(args.seed))
+        if args.batch_dir.endswith("extraction"):
+            save_path = os.path.abspath(args.batch_dir)
+        elif os.path.basename(args.batch_dir) == str(args.seed):
+            save_path = os.path.abspath(os.path.join(args.batch_dir, "extraction"))
+        else:
+            save_path = os.path.abspath(os.path.join(args.batch_dir, str(args.seed), "extraction"))
     else:
-        save_path = os.path.join(base_save_path, f"{timestamp}_{training_config_str}")
+        config_folder = f"{timestamp}_{material_model_name}_d{disp_noise}_l{load_noise}_{args.geometry}"
+        save_path = os.path.abspath(os.path.join(base_save_path, material_model_name, config_folder, str(args.seed), "extraction"))
         
     os.makedirs(save_path, exist_ok=True)
 

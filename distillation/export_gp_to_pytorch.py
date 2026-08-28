@@ -209,50 +209,62 @@ def main():
     # Try to load the dataset for background plotting and dataset_* modes
     dataset_F_flat_2x2 = None
     try:
-        model_folder_name = os.path.basename(os.path.normpath(args.saved_model_dir))
-        parent_folder_name = os.path.basename(os.path.dirname(os.path.normpath(args.saved_model_dir)))
-        
-        parts = model_folder_name.split('_')
-        if len(parts) < 6 and '_' in parent_folder_name:
-            parts = parent_folder_name.split('_')
+        saved_dir_abs = os.path.abspath(args.saved_model_dir)
+        all_parts = saved_dir_abs.split(os.sep)
 
-        if len(parts) >= 4:
-            ugp_model_name = parts[1]
-            disp_noise = parts[2]
-            load_noise = parts[3]
-            
-            prep_dataset_path = None
-            for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
-                if os.path.exists(search_dir):
-                    for fname in os.listdir(search_dir):
-                        if fname.startswith(f"{ugp_model_name}_{disp_noise}_{load_noise}") and fname.endswith(".npz"):
-                            prep_dataset_path = os.path.join(search_dir, fname)
-                            break
-                if prep_dataset_path is not None:
+        ugp_model_name = None
+        disp_noise = "0.0001"
+        load_noise = "0.01"
+        
+        for p in reversed(all_parts):
+            subparts = p.split('_')
+            for model_candidate in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+                if model_candidate in subparts:
+                    ugp_model_name = model_candidate
                     break
+            for sp in subparts:
+                if sp.startswith("d") and sp[1:].replace('.', '', 1).isdigit():
+                    disp_noise = sp[1:]
+                elif sp.startswith("l") and sp[1:].replace('.', '', 1).isdigit():
+                    load_noise = sp[1:]
+                elif sp.replace('.', '', 1).isdigit() and sp in subparts:
+                    if disp_noise == "0.0001" and float(sp) < 0.005:
+                        disp_noise = sp
+            if ugp_model_name is not None:
+                break
                 
-            if prep_dataset_path is not None:
-                prep_data = np.load(prep_dataset_path, allow_pickle=True)
-                F_all_steps_2x2 = prep_data["F"]
+        if ugp_model_name is None:
+            ugp_model_name = "nh2"
+            
+        prep_dataset_path = None
+        for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
+            if os.path.exists(search_dir):
+                for fname in os.listdir(search_dir):
+                    if (fname.startswith(f"{ugp_model_name}_{disp_noise}_{load_noise}") or fname.startswith(f"{ugp_model_name}_")) and fname.endswith(".npz"):
+                        prep_dataset_path = os.path.join(search_dir, fname)
+                        break
+        if prep_dataset_path is not None:
+            prep_data = np.load(prep_dataset_path, allow_pickle=True)
+            F_all_steps_2x2 = prep_data["F"]
+            
+            log_file = os.path.join(args.saved_model_dir, "optimization_log.txt")
+            load_steps = None
+            if os.path.exists(log_file):
+                with open(log_file, "r", encoding="utf-8") as lf:
+                    first_line = lf.readline()
+                    if "[" in first_line and "]" in first_line:
+                        steps_str = first_line.split("]")[0].split("[")[1].strip()
+                        if steps_str:
+                            load_steps = [int(x.strip()) for x in steps_str.split(",") if x.strip().isdigit()]
+            
+            if load_steps and len(load_steps) > 0 and max(load_steps) < F_all_steps_2x2.shape[0]:
+                F_train_full_2x2 = F_all_steps_2x2[load_steps]
+            else:
+                default_steps = [2, 10, 20]
+                valid_steps = [s for s in default_steps if s < F_all_steps_2x2.shape[0]]
+                F_train_full_2x2 = F_all_steps_2x2[valid_steps] if len(valid_steps) > 0 else F_all_steps_2x2
                 
-                log_file = os.path.join(args.saved_model_dir, "optimization_log.txt")
-                load_steps = None
-                if os.path.exists(log_file):
-                    with open(log_file, "r", encoding="utf-8") as lf:
-                        first_line = lf.readline()
-                        if "[" in first_line and "]" in first_line:
-                            steps_str = first_line.split("]")[0].split("[")[1].strip()
-                            if steps_str:
-                                load_steps = [int(x.strip()) for x in steps_str.split(",") if x.strip().isdigit()]
-                
-                if load_steps and len(load_steps) > 0 and max(load_steps) < F_all_steps_2x2.shape[0]:
-                    F_train_full_2x2 = F_all_steps_2x2[load_steps]
-                else:
-                    default_steps = [2, 10, 20]
-                    valid_steps = [s for s in default_steps if s < F_all_steps_2x2.shape[0]]
-                    F_train_full_2x2 = F_all_steps_2x2[valid_steps] if len(valid_steps) > 0 else F_all_steps_2x2
-                    
-                dataset_F_flat_2x2 = F_train_full_2x2.reshape(-1, 2, 2)
+            dataset_F_flat_2x2 = F_train_full_2x2.reshape(-1, 2, 2)
     except Exception as e:
         print(f"Could not load background dataset for plotting: {e}")
 

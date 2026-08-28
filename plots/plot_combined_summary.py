@@ -116,12 +116,23 @@ def main():
         if saved_model_dir is None:
             raise ValueError("saved_model_dir not found.")
 
-    model_folder_name = os.path.basename(os.path.normpath(saved_model_dir))
-    parent_folder_name = os.path.basename(os.path.dirname(os.path.normpath(saved_model_dir)))
-    if len(model_folder_name.split('_')) < 2 or model_folder_name.isdigit():
-        model_folder_name = parent_folder_name
-    parts = model_folder_name.split('_')
-    true_model_name = parts[1] if len(parts) > 1 else "isihara"
+    true_model_name = args.material_model if hasattr(args, 'material_model') and args.material_model else "nh2"
+    known_models = ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]
+    all_path_tokens = os.path.abspath(saved_model_dir).split(os.sep) + os.path.abspath(distilled_dir).split(os.sep)
+    found_model = False
+    for token in reversed(all_path_tokens):
+        parts = token.split('_')
+        if len(parts) > 1 and parts[1] in known_models:
+            true_model_name = parts[1]
+            found_model = True
+            break
+        for p in known_models:
+            if p in parts or p == token:
+                true_model_name = p
+                found_model = True
+                break
+        if found_model:
+            break
     true_model = get_material(true_model_name, jit_P=False)
     
     best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
@@ -192,21 +203,50 @@ def main():
     df = pd.DataFrame(samples_np, columns=full_param_names)
 
     # True params dirty extract
+    # Try reading ground truth parameters directly from recipe config YAML
+    recipe_file = f"configs/recipes/{true_model_name}.yaml"
+    recipe_data = {}
+    if os.path.exists(recipe_file):
+        try:
+            import yaml
+            with open(recipe_file, 'r') as rf:
+                recipe_data = yaml.safe_load(rf).get('material_params', {})
+        except Exception:
+            recipe_data = {}
+
     true_val_dict = {}
     if true_model_name in ["c20d10d05", "c20_d10_d05"]:
         true_params_set = {"C10", "D1", "D2"}
-        true_val_dict = {"C10": 2.0, "D1": 1.0, "D2": 0.5}
-    elif true_model_name in ["nh2", "neohookean"]:
+        c10 = recipe_data.get('dev_params', [2.0])[0]
+        vol_p = recipe_data.get('vol_params', [1.0, 0.5])
+        d1 = vol_p[0] if len(vol_p) > 0 else 1.0
+        d2 = vol_p[1] if len(vol_p) > 1 else 0.5
+        true_val_dict = {"C10": c10, "D1": d1, "D2": d2}
+    elif true_model_name in ["nh2", "neohookean2", "nh"]:
         true_params_set = {"C10", "D1"}
-        true_val_dict = {"C10": 0.5, "D1": 1.5}
+        c10 = recipe_data.get('dev_params', [0.5])[0]
+        d1 = recipe_data.get('vol_params', [1.5])[0]
+        true_val_dict = {"C10": c10, "D1": d1}
     elif true_model_name == "isihara":
         true_params_set = {"C10", "C01", "C20", "D1"}
-        true_val_dict = {"C10": 0.5, "C01": 1.0, "C20": 1.0, "D1": 1.5}
+        dev_p = recipe_data.get('dev_params', [0.5, 1.0, 1.0])
+        c10 = dev_p[0] if len(dev_p) > 0 else 0.5
+        c01 = dev_p[1] if len(dev_p) > 1 else 1.0
+        c20 = dev_p[2] if len(dev_p) > 2 else 1.0
+        d1 = recipe_data.get('vol_params', [1.5])[0]
+        true_val_dict = {"C10": c10, "C01": c01, "C20": c20, "D1": d1}
     elif true_model_name == "gentthomas":
         true_params_set = {"C10", "E", "D1"}
-        true_val_dict = {"C10": 0.5, "E": 1.0, "D1": 1.5}
+        dev_p = recipe_data.get('dev_params', [0.5, 1.0])
+        c10 = dev_p[0] if len(dev_p) > 0 else 0.5
+        e_param = dev_p[1] if len(dev_p) > 1 else 1.0
+        d1 = recipe_data.get('vol_params', [1.5])[0]
+        true_val_dict = {"C10": c10, "E": e_param, "D1": d1}
     else:
         true_params_set = {"C10", "D1"}
+        c10 = recipe_data.get('dev_params', [0.5])[0]
+        d1 = recipe_data.get('vol_params', [1.5])[0]
+        true_val_dict = {"C10": c10, "D1": d1}
 
     # PLOTTING
     fig = plt.figure(figsize=(8.27, 8.18)) # A4 width, 70% A4 height
@@ -281,7 +321,7 @@ def main():
             gt_label_added = True
             
         color = "#0072B2" if param_types[p] == "dev" else "#D55E00"
-        label = "Mean Total-Order (Dev)" if param_types[p] == "dev" else "Mean Total-Order (Vol)"
+        label = r"$\bar{S}_{\mathrm{T,d}}$" if param_types[p] == "dev" else r"$\bar{S}_{\mathrm{T,v}}$"
         handles, labels = ax_sens.get_legend_handles_labels()
         if label not in labels:
             ax_sens.bar(x_pos[i], sorted_tot_means[i], width=0.5, color=color, alpha=0.9, zorder=3, label=label)
@@ -309,7 +349,8 @@ def main():
     
     lines_1, labels_1 = ax_sens.get_legend_handles_labels()
     lines_2, labels_2 = ax2.get_legend_handles_labels()
-    ax_sens.legend(lines_1 + lines_2, labels_1 + labels_2, fontsize=6, loc='center right', bbox_to_anchor=(1.0, 0.6))
+    by_label_sens = dict(zip(labels_1 + labels_2, lines_1 + lines_2))
+    ax_sens.legend(by_label_sens.values(), by_label_sens.keys(), fontsize=6.5, loc='upper center', bbox_to_anchor=(0.5, -0.08), ncol=5, frameon=False)
     
     # 3. Violin Plot (Row 3)
     ax_viol = fig.add_subplot(gs[3, 0], sharex=ax_sens)
@@ -344,27 +385,28 @@ def main():
             
             ax_viol.plot([i - 0.35, i + 0.35], [mean_val, mean_val], color=color, lw=2)
             
-            ax_viol.text(i, 2.60, fr"${mean_val:.3f}$", 
-                    ha='center', va='bottom', fontsize=7, color=color,
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor=color, lw=0.5), zorder=10, clip_on=False)
+            ax_viol.text(i, 1.05, fr"${mean_val:.3f}$", transform=ax_viol.get_xaxis_transform(),
+                    ha='center', va='bottom', fontsize=6.5, color=color,
+                    bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor=color, lw=0.5), zorder=10, clip_on=False)
         
         if is_true:
             ax_viol.plot([i - 0.35, i + 0.35], [true_val, true_val], color='black', lw=1.5, linestyle='--')
             
-            ax_viol.text(i, 2.95, fr"${true_val:.3f}$", 
-                    ha='center', va='bottom', fontsize=7, color='black',
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor='black', lw=0.5), zorder=10, clip_on=False)
+            ax_viol.text(i, 1.18, fr"${true_val:.3f}$", transform=ax_viol.get_xaxis_transform(),
+                    ha='center', va='bottom', fontsize=6.5, color='black',
+                    bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor='black', lw=0.5), zorder=10, clip_on=False)
                 
     ax_viol.set_xticks(range(len(sorted_params)))
     ax_viol.set_xticklabels(sorted_params, fontsize=9)
     ax_viol.set_ylabel('Parameter Value', fontsize=8)
-    ax_viol.set_ylim([0, 2.5])
+    ax_viol.set_ylim([0, 2.1])
+    ax_viol.set_yticks([0.0, 0.5, 1.0, 1.5, 2.0])
     ax_viol.tick_params(axis='y', labelsize=7)
     ax_viol.grid(False)
     
-    # Row labels for the text boxes
-    ax_viol.text(-1.2, 2.60, "Mean", ha='left', va='bottom', fontsize=8, color='black', clip_on=False)
-    ax_viol.text(-1.2, 2.95, "True", ha='left', va='bottom', fontsize=8, color='black', clip_on=False)
+    # Row labels for the text boxes placed cleanly outside ax_viol above the top spine
+    ax_viol.text(-0.025, 1.05, "Mean", transform=ax_viol.transAxes, ha='right', va='bottom', fontsize=7.5, fontweight='bold', color='black', clip_on=False)
+    ax_viol.text(-0.025, 1.18, "True", transform=ax_viol.transAxes, ha='right', va='bottom', fontsize=7.5, fontweight='bold', color='black', clip_on=False)
 
     # Legend for the parameter plot
     import matplotlib.patches as mpatches
@@ -376,7 +418,7 @@ def main():
         mpatches.Patch(color='gray', alpha=0.1, label='95% CI'),
         mlines.Line2D([0], [0], color='black', lw=1.5, linestyle='--', label='Ground Truth')
     ]
-    ax_viol.legend(handles=viol_legend, loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=4, fontsize=7, frameon=False)
+    ax_viol.legend(handles=viol_legend, loc='upper center', bbox_to_anchor=(0.5, -0.22), ncol=4, fontsize=7, frameon=False)
     
     plt.tight_layout()
     plt.subplots_adjust(hspace=0.2)

@@ -202,28 +202,40 @@ def parse_args():
     # parser.add_argument('--validation_load_step_indices', type=int, nargs='+', default=[2, 4, 6, 8])
     parser.add_argument('--distilled_dir', type=str, required=True)
     parser.add_argument('--material_model', type=str, required=True)
-    parser.add_argument('--n_sample', type=int, default=128)
+    parser.add_argument('--n_sample', type=int, default=512)
+    parser.add_argument('--subfolder', type=str, default="fem_validation")
 
 
     return parser.parse_args()
 if __name__ == "__main__" :
     args = parse_args()
-    # validation_load_step_indices = args.validation_load_step_indices
-    n_sample = args.n_sample
-    # load result 
+    target_total_samples = args.n_sample
     analysis_dir = Path("validation/coverage_test") 
-    extraction_result_dir = Path("extraction/extracted_models") 
-    # case_name = f"20260410T172507_isihara_0.0_0.01_8_0.975_5_40_0_0"
     case_name = args.model_path
-    dataset_params = case_name.split("_")
-    asym_factor = float(dataset_params[5])
-    target_load = float(dataset_params[4])
-    load_noise = float(dataset_params[3])
-    disp_noise = float(dataset_params[2])
-    material_model_name = dataset_params[1]
-    print(case_name)
+    folder_name = os.path.basename(os.path.normpath(case_name))
+    parent_folder_name = os.path.basename(os.path.dirname(os.path.normpath(case_name)))
+    
+    if folder_name.isdigit() or len(folder_name.split("_")) < 4:
+        folder_name = parent_folder_name
 
-    save_path = analysis_dir / Path(args.distilled_dir).name
+    dataset_params = folder_name.split("_")
+    
+    if len(dataset_params) >= 6 and dataset_params[4].replace('.', '', 1).isdigit() and dataset_params[5].replace('.', '', 1).isdigit():
+        material_model_name = dataset_params[1]
+        disp_noise = float(dataset_params[2])
+        load_noise = float(dataset_params[3])
+        target_load = float(dataset_params[4])
+        asym_factor = float(dataset_params[5])
+    else:
+        material_model_name = dataset_params[1] if len(dataset_params) > 1 else "nh2"
+        disp_noise = float(dataset_params[2]) if len(dataset_params) > 2 and dataset_params[2].replace('.', '', 1).isdigit() else 0.0001
+        load_noise = float(dataset_params[3]) if len(dataset_params) > 3 and dataset_params[3].replace('.', '', 1).isdigit() else 0.01
+        target_load = 1.5
+        asym_factor = 0.95
+
+    print(f"Loaded model configuration: model={material_model_name}, disp_noise={disp_noise}, load_noise={load_noise}, target_load={target_load}, asym={asym_factor}")
+
+    save_path = Path(args.distilled_dir) / args.subfolder
     save_path.mkdir(parents=True, exist_ok=True)
     # get I_obs_all.npy
 
@@ -291,193 +303,204 @@ if __name__ == "__main__" :
     node_type[jax.vmap(right)(node_coords)] = 3
     node_type[jax.vmap(top)(node_coords)] = 4
 
-    flow_samples_path = os.path.join(args.distilled_dir, "flow_samples.npy")
-    dev_samples_path = os.path.join(args.distilled_dir, "dev_flow_samples.npy")
-    vol_samples_path = os.path.join(args.distilled_dir, "vol_flow_samples.npy")
-    
-    np.random.seed(42)
-    if os.path.exists(dev_samples_path) and os.path.exists(vol_samples_path):
-        dev_samples = np.load(dev_samples_path)
-        vol_samples = np.load(vol_samples_path)
-        dev_indices = np.random.choice(len(dev_samples), n_sample, replace=False)
-        vol_indices = np.random.choice(len(vol_samples), n_sample, replace=False)
-        selected_samples = np.concatenate([dev_samples[dev_indices], vol_samples[vol_indices]], axis=1)
+    u_exp = None
+    prep_dataset_path = None
+    for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
+        if os.path.exists(search_dir):
+            for fname in os.listdir(search_dir):
+                if fname.startswith(f"{material_model_name}_{disp_noise}_{load_noise}") and fname.endswith(".npz"):
+                    prep_dataset_path = os.path.join(search_dir, fname)
+                    break
+        if prep_dataset_path is not None:
+            break
+
+    if prep_dataset_path is not None:
+        try:
+            prep_data = np.load(prep_dataset_path, allow_pickle=True)
+            if "u" in prep_data:
+                u_exp = prep_data["u"]
+                print(f"Loaded experimental training displacement (u_exp) from {prep_dataset_path}")
+        except Exception as e:
+            print(f"Could not load preprocessed dataset: {e}")
+
+    consolidated_file = os.path.join(save_path, "fem_distilled_samples.npz")
+    existing_u_pred = None
+    existing_selected_samples = None
+    num_existing = 0
+
+    if os.path.exists(consolidated_file):
+        try:
+            existing_data = np.load(consolidated_file, allow_pickle=True)
+            existing_u_pred = existing_data["u_pred"]
+            existing_selected_samples = existing_data["selected_samples"]
+            num_existing = existing_u_pred.shape[0]
+            print(f"Found existing {num_existing} FEM sample realizations in {consolidated_file}.")
+        except Exception as e:
+            print(f"Could not load existing consolidated file: {e}. Starting fresh.")
+
+    n_needed = target_total_samples - num_existing
+    if n_needed <= 0:
+        print(f"Target sample count ({target_total_samples}) already reached (current count: {num_existing}). Exiting.")
+        n_sample = 0
     else:
-        flow_samples = np.load(flow_samples_path)
-        sample_indices = np.random.choice(len(flow_samples), n_sample, replace=False)
-        selected_samples = flow_samples[sample_indices]
-    
-    
-    true_mat_model = get_material(material_model_name)
-    psi_true_func = lambda f: true_mat_model.psi(f)
-    piola_true_func = lambda f: true_mat_model.P(f)
+        n_sample = n_needed
+        print(f"Generating {n_sample} new samples to reach target {target_total_samples} total samples...")
 
-
-    # # Create an instance of the problem.
-    problem_true = HyperElasticity(mesh = mesh,
-                            vec=2,
-                            dim=2,
-                            ele_type=ele_type,
-                            dirichlet_bc_info=dirichlet_bc_info,
-                            location_fns = [right,top],
-                            material_model_piola_stress=true_piola_stress_func)
-
-    petsc_options = {
-        "snes_type": "newtonls",
-        "snes_linesearch_type": "bt",
-        "snes_monitor": None,
-        "snes_atol": 1e-10,
-        "snes_rtol": 1e-10,
-        "snes_stol": 1e-10,
-        "snes_max_it": 50,
-        "ksp_type": "preonly",
-        "pc_type": "lu",
-        "pc_factor_mat_solver_type": "mumps",
-    }
-    key = jax.random.PRNGKey(42)
-    # asym_factor = 0.95
-    # num_load_samples = 32
-    num_steps = 10
-    # loads_top = jnp.linspace(0.0, 10, 10)
-    # target_load = 10.0
-    noise_std = load_noise * target_load
-    target_load_noisy = target_load + noise_std * jax.random.normal(key)
-
-    # noisy_target_loads = 
-    noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1,1)
-    noisy_load_right_base = noisy_load_top_base * asym_factor
-    # Baseline loads shape: (10, 2)
-    loads_noisy = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
-    if material_model_name == "neohookean" or material_model_name == "gentthomas":
-        pass # loads_noisy = loads_noisy[:-2]
-    # 2. Calculate Noise Scale (1% of average load)
-    # We take the mean of all non-zero load magnitudes to define the noise floor
-
-    # avg_load = jnp.mean(jnp.abs(loads_base)) 
-    # noise_std = load_noise * avg_load
-    # loads_noisy = loads_base + noise_std * jax.random.normal(key, shape=(num_steps, 2))
-
-    # We want a final shape of (128, 10, 2)
-    # We broadcast the (10, 2) base across 128 samples and add noise
-    # noise = jax.random.normal(key, shape=(num_load_samples, num_steps, 2)) * noise_std
-    # loads_noisy = jnp.expand_dims(loads_base, axis=0) + noise
-    
-    # loads_right = loads_top * asym_factor
-    # loads = jnp.stack([loads_right, loads_top], axis=1)
-    # Solve the defined problem.
-
-    # u_true = jnp.zeros_like(node_coords)
-
-    def solve_fem(problem, petsc_options, loads) :
-        u_list = []
-        u = jnp.zeros_like(problem.mesh[0].points)
-        for i, load in enumerate(loads):
-            print("load step ", i, "= ", load)
-            shape_right = (len(problem.boundary_inds_list[0]), problem.fes[0].num_face_quads, 1)
-            shape_top = (len(problem.boundary_inds_list[1]), problem.fes[0].num_face_quads, 1)
-
-            problem.internal_vars_surfaces = [
-                [
-                    jnp.full(fill_value=load[0], shape=shape_right),
-                ],
-                [
-                    jnp.full(fill_value=load[1], shape=shape_top)
-                ]
-            ]
-            u_= solver(problem, solver_options={'petsc_solver': petsc_options,
-                                                    'initial_guess': u})
-            u = u_[0]
-            u_list.append(u)
-        u_array = jnp.stack(u_list, axis=0)  
-        return u_array
-
-    u_true = solve_fem(problem_true, petsc_options, loads_noisy)
-
-    if not os.path.exists(os.path.join(save_path, "gt")):
-        os.makedirs(os.path.join(save_path, "gt"))
-    np.savez_compressed(os.path.join(save_path, f"gt/u_gt.npz"), u=u_true, cells=cells, node_coords=node_coords, node_type=node_type)
-
-    u_pred_samples = []
-
-
-
-    # pred_piola_stress_funcs = []
-    main_key = jr.PRNGKey(128)
-    # piola_keys = jr.split(main_key, n_piola_sample)
-    # for key in piola_keys :
-    #     pred_piola_stress_func = lambda f: model.piola(fto3x3(f), key)[:2, :2]
-    #     pred_piola_stress_funcs.append(pred_piola_stress_func)
-
-    import os
-    import numpy as np
-    import jax.random as jr
-
-    # ... inside your main script ...
-
-    for i in range(n_sample):
-        success = False
-        tries = 0
-        max_tries = 5
+    if n_sample > 0:
+        flow_samples_path = os.path.join(args.distilled_dir, "flow_samples.npy")
+        dev_samples_path = os.path.join(args.distilled_dir, "dev_flow_samples.npy")
+        vol_samples_path = os.path.join(args.distilled_dir, "vol_flow_samples.npy")
         
-        while not success and tries < max_tries:
-            main_key, subkey = jr.split(main_key)
-            
-            # 1. Setup the problem with the new subkey
-            params = selected_samples[i]
-            if args.material_model == "isihara":
-                c10, c01, c20, d1 = params[:4]
-                mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, d1=d1)
-            elif args.material_model in ["gmr", "gmr_log", "gmr_nolog"]:
-                if len(params) == 13: # 9 dev + 1 log + 3 vol
-                    dev = params[:10]
-                    vol = params[10:13]
-                elif len(params) >= 14:
-                    dev = params[:11]
-                    vol = params[11:14]
-                else: # 9 dev + 3 vol (no log term)
-                    dev = params[:9]
-                    vol = params[9:12]
-                mat = get_material(args.material_model, dev_params=dev, vol_params=vol)
-            else:
-                mat = get_material(args.material_model)
-                
-            problem_pred = HyperElasticity(
-                mesh=mesh,
-                vec=2,
-                dim=2,
-                ele_type=ele_type,
-                dirichlet_bc_info=dirichlet_bc_info,
-                location_fns=[right, top],
-                material_model_piola_stress=lambda f: mat.P(fto3x3(f))[:2, :2]
-            )
-            
-            try:
-                # 2. Attempt the solve
-                print(f"Sample {i}: Attempt {tries + 1}/{max_tries}...")
-                u_pred = solve_fem(problem_pred, petsc_options, loads_noisy)
-                
-                # If we reach here, solve_fem succeeded
-                success = True 
-                
-            except Exception as e:
-                # 3. Handle failure
-                tries += 1
-                print(f"Simulation failed on sample {i}, try {tries}: {e}")
-                if tries >= max_tries:
-                    print(f"Max tries reached for sample {i}. Skipping or raising error.")
-                    # Option A: raise e (stops everything)
-                    # Option B: break (moves to next 'i' in n_sample)
-                    raise e 
+        np.random.seed(42 + num_existing)
+        if os.path.exists(dev_samples_path) and os.path.exists(vol_samples_path):
+            dev_samples = np.load(dev_samples_path)
+            vol_samples = np.load(vol_samples_path)
+            dev_indices = np.random.choice(len(dev_samples), n_sample, replace=False)
+            vol_indices = np.random.choice(len(vol_samples), n_sample, replace=False)
+            selected_samples = np.concatenate([dev_samples[dev_indices], vol_samples[vol_indices]], axis=1)
+        else:
+            flow_samples = np.load(flow_samples_path)
+            sample_indices = np.random.choice(len(flow_samples), n_sample, replace=False)
+            selected_samples = flow_samples[sample_indices]
+        
+        true_mat_model = get_material(material_model_name)
+        psi_true_func = lambda f: true_mat_model.psi(f)
+        piola_true_func = lambda f: true_mat_model.P(f)
 
-        # 4. Save and append only if successful
-        if success:
-            u_pred_samples.append(u_pred)
+        problem_true = HyperElasticity(mesh=mesh,
+                                vec=2,
+                                dim=2,
+                                ele_type=ele_type,
+                                dirichlet_bc_info=dirichlet_bc_info,
+                                location_fns=[right, top],
+                                material_model_piola_stress=true_piola_stress_func)
+
+        petsc_options = {
+            "snes_type": "newtonls",
+            "snes_linesearch_type": "bt",
+            "snes_monitor": None,
+            "snes_atol": 1e-10,
+            "snes_rtol": 1e-10,
+            "snes_stol": 1e-10,
+            "snes_max_it": 50,
+            "ksp_type": "preonly",
+            "pc_type": "lu",
+            "pc_factor_mat_solver_type": "mumps",
+        }
+        key = jax.random.PRNGKey(42 + num_existing)
+        num_steps = 10
+        noise_std = load_noise * target_load
+        target_load_noisy = target_load + noise_std * jax.random.normal(key)
+
+        noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1, 1)
+        noisy_load_right_base = noisy_load_top_base * asym_factor
+        loads_noisy = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
+
+        def solve_fem(problem, petsc_options, loads):
+            u_list = []
+            u = jnp.zeros_like(problem.mesh[0].points)
+            for i, load in enumerate(loads):
+                shape_right = (len(problem.boundary_inds_list[0]), problem.fes[0].num_face_quads, 1)
+                shape_top = (len(problem.boundary_inds_list[1]), problem.fes[0].num_face_quads, 1)
+
+                problem.internal_vars_surfaces = [
+                    [
+                        jnp.full(fill_value=load[0], shape=shape_right),
+                    ],
+                    [
+                        jnp.full(fill_value=load[1], shape=shape_top)
+                    ]
+                ]
+                u_ = solver(problem, solver_options={'petsc_solver': petsc_options,
+                                                        'initial_guess': u})
+                u = u_[0]
+                u_list.append(u)
+            u_array = jnp.stack(u_list, axis=0)  
+            return u_array
+
+        gt_dir = os.path.join(save_path, "gt")
+        gt_file = os.path.join(gt_dir, "u_gt.npz")
+        if os.path.exists(gt_file):
+            u_true = np.load(gt_file)["u"]
+        else:
+            os.makedirs(gt_dir, exist_ok=True)
+            u_true = solve_fem(problem_true, petsc_options, loads_noisy)
+            np.savez_compressed(gt_file, u=u_true, cells=cells, node_coords=node_coords, node_type=node_type)
+
+        u_pred_samples = []
+        main_key = jr.PRNGKey(128 + num_existing)
+
+        for i in range(n_sample):
+            success = False
+            tries = 0
+            max_tries = 5
             
-            sample_dir = os.path.join(save_path, "piola_samples")
-            if not os.path.exists(sample_dir):
-                os.makedirs(sample_dir)
+            while not success and tries < max_tries:
+                main_key, subkey = jr.split(main_key)
                 
-            save_file = os.path.join(sample_dir, f"u_pred_ps{i}.npz")
-            np.savez_compressed(save_file, u_pred=u_pred, cells=cells, 
-                                node_coords=node_coords, node_type=node_type)
-            print(f"Sample {i} completed and saved.")
+                params = selected_samples[i]
+                if args.material_model == "isihara":
+                    c10, c01, c20, d1 = params[:4]
+                    mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, d1=d1)
+                elif args.material_model in ["gmr", "gmr_log", "gmr_nolog"]:
+                    if len(params) == 13:
+                        dev = params[:10]
+                        vol = params[10:13]
+                    elif len(params) >= 14:
+                        dev = params[:11]
+                        vol = params[11:14]
+                    else:
+                        dev = params[:9]
+                        vol = params[9:12]
+                    mat = get_material(args.material_model, dev_params=dev, vol_params=vol)
+                else:
+                    mat = get_material(args.material_model)
+                    
+                problem_pred = HyperElasticity(
+                    mesh=mesh,
+                    vec=2,
+                    dim=2,
+                    ele_type=ele_type,
+                    dirichlet_bc_info=dirichlet_bc_info,
+                    location_fns=[right, top],
+                    material_model_piola_stress=lambda f: mat.P(fto3x3(f))[:2, :2]
+                )
+                
+                try:
+                    print(f"Sample {num_existing + i + 1}/{target_total_samples}: Attempt {tries + 1}/{max_tries}...")
+                    u_pred = solve_fem(problem_pred, petsc_options, loads_noisy)
+                    success = True 
+                except Exception as e:
+                    tries += 1
+                    print(f"Simulation failed on sample {i}, try {tries}: {e}")
+                    if tries >= max_tries:
+                        raise e 
+
+            if success:
+                u_pred_samples.append(u_pred)
+                print(f"Sample {num_existing + i + 1} completed successfully.")
+
+        if len(u_pred_samples) > 0:
+            new_u_arr = np.array(u_pred_samples) # Shape: (n_sample, n_steps, n_nodes, 2)
+            if existing_u_pred is not None:
+                combined_u = np.concatenate([existing_u_pred, new_u_arr], axis=0)
+                combined_params = np.concatenate([existing_selected_samples, selected_samples], axis=0)
+            else:
+                combined_u = new_u_arr
+                combined_params = selected_samples
+
+            save_dict = {
+                "u_pred": combined_u,
+                "selected_samples": combined_params,
+                "node_coords": node_coords,
+                "cells": cells,
+                "node_type": node_type,
+                "loads": loads_noisy
+            }
+            if 'u_true' in locals() and u_true is not None:
+                save_dict["u_true"] = u_true
+            if u_exp is not None:
+                save_dict["u_exp"] = u_exp
+
+            np.savez_compressed(consolidated_file, **save_dict)
+            print(f"🎉 Consolidated FEM dataset updated: total {combined_u.shape[0]} samples saved to {consolidated_file}")

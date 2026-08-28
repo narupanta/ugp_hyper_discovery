@@ -804,10 +804,26 @@ def main():
         mode_str = f"_{args.sample_mode}_g{args.max_gamma}" if args.sample_mode == "standard" else f"_{args.sample_mode}"
         if args.distill_target in ["sef_stress", "sef_cauchy", "sef_split"]:
             mode_str += f"_{args.distill_target}"
+
         if args.override_out_dir:
             out_dir = os.path.abspath(args.override_out_dir)
+            if not out_dir.endswith("distillation"):
+                out_dir = os.path.join(out_dir, "distillation")
         else:
-            out_dir = os.path.abspath(os.path.join("distillation", "distilled_models", f"{current_time}_{true_model_name}{noise_str}_{args.material_model}{mode_str}_uqmodeldisc"))
+            # Check if saved_model_dir is already inside a results structure
+            saved_dir_abs = os.path.abspath(args.saved_model_dir)
+            if "results" in saved_dir_abs.split(os.sep):
+                # Ascend to seed directory (e.g. results/nh2/20260827_.../47/)
+                parts = saved_dir_abs.split(os.sep)
+                res_idx = parts.index("results")
+                # e.g. parts[res_idx + 1] = matmodel, parts[res_idx + 2] = timestamp_config, parts[res_idx + 3] = seed
+                if len(parts) >= res_idx + 4:
+                    seed_dir = os.sep.join(parts[:res_idx + 4])
+                    out_dir = os.path.join(seed_dir, "distillation")
+                else:
+                    out_dir = os.path.join(saved_dir_abs, "distillation")
+            else:
+                out_dir = os.path.abspath(os.path.join("results", true_model_name, f"{current_time}_{true_model_name}{noise_str}_{args.material_model}{mode_str}", str(args.seed), "distillation"))
         log_mode = "w"
     os.makedirs(out_dir, exist_ok=True)
     

@@ -168,25 +168,15 @@ if [ "$GEOMETRY" == "" ] || [ "$GEOMETRY" == "null" ]; then
 fi
 
 
-EXISTING_EXTRACT_PARENT=$(ls -td extraction/extracted_models/*_${MODEL}_${D_NOISE}_${L_NOISE}_${GEOMETRY}_uqmodeldisc 2>/dev/null | head -1)
-EXISTING_DISTILL_PARENT=$(ls -td distillation/distilled_models/*_${MODEL}_${DIST_MODEL}_${SAMPLE_MODE}_${DIST_TARGET}_uqmodeldisc 2>/dev/null | head -1)
+CURRENT_TIME=$(date +"%Y%m%dT%H%M%S")
 
-if [ -n "$EXISTING_EXTRACT_PARENT" ] && [ -d "$EXISTING_EXTRACT_PARENT" ]; then
-    PARENT_EXTRACT_DIR="$EXISTING_EXTRACT_PARENT"
+if [ -n "$EXTRACTION_DIR_OVERRIDE" ]; then
+    PARENT_RUN_DIR="$EXTRACTION_DIR_OVERRIDE"
 else
-    CURRENT_TIME=$(date +"%Y%m%dT%H%M%S")
-    PARENT_EXTRACT_DIR="extraction/extracted_models/${CURRENT_TIME}_${MODEL}_${D_NOISE}_${L_NOISE}_${GEOMETRY}_uqmodeldisc"
+    PARENT_RUN_DIR="results/${MODEL}/${CURRENT_TIME}_${MODEL}_d${D_NOISE}_l${L_NOISE}_${GEOMETRY}"
 fi
 
-if [ -n "$EXISTING_DISTILL_PARENT" ] && [ -d "$EXISTING_DISTILL_PARENT" ]; then
-    PARENT_DISTILL_DIR="$EXISTING_DISTILL_PARENT"
-else
-    CURRENT_TIME=$(date +"%Y%m%dT%H%M%S")
-    PARENT_DISTILL_DIR="distillation/distilled_models/${CURRENT_TIME}_${MODEL}_${DIST_MODEL}_${SAMPLE_MODE}_${DIST_TARGET}_uqmodeldisc"
-fi
-
-mkdir -p "$PARENT_DISTILL_DIR"
-mkdir -p "$PARENT_EXTRACT_DIR"
+mkdir -p "$PARENT_RUN_DIR"
 
 if [ "$SKIP_GEN" == "true" ]; then
     echo "⏭️ Skipping Step 1 (Sequential Data Generation) as requested."
@@ -217,7 +207,11 @@ for SEED in $SEEDS_LIST; do
     echo "=== Running Extraction & Distillation Pipeline for SEED = $SEED ==="
     echo "========================================================================"
 
-    EXTRACT_SEED_DIR="${PARENT_EXTRACT_DIR}/${SEED}"
+    SEED_DIR="${PARENT_RUN_DIR}/${SEED}"
+    EXTRACT_SEED_DIR="${SEED_DIR}/extraction"
+    DISTILL_SEED_DIR="${SEED_DIR}/distillation"
+    mkdir -p "$EXTRACT_SEED_DIR"
+    mkdir -p "$DISTILL_SEED_DIR"
 
     if [ "$SKIP_EXT" == "true" ]; then
         echo "⏭️ Skipping Step 2 (UGP Extraction Training) as requested."
@@ -244,7 +238,7 @@ for SEED in $SEEDS_LIST; do
             --model_mode "$MODEL_MODE" \
             --covariance_mode "$COVARIANCE_MODE" \
             --seed "$SEED" \
-            --batch_dir "$PARENT_EXTRACT_DIR"
+            --batch_dir "$EXTRACT_SEED_DIR"
         echo "✅ Step 2 (Extraction for Seed $SEED) completed."
     fi
 
@@ -254,23 +248,28 @@ for SEED in $SEEDS_LIST; do
     fi
 
     # Find extraction directory matching this seed or use override/fallback
-    if [ -n "$EXTRACTION_DIR_OVERRIDE" ]; then
-        SAVED_DIR="$EXTRACTION_DIR_OVERRIDE"
-    elif [ -d "$EXTRACT_SEED_DIR" ]; then
+    if [ -n "$EXTRACTION_DIR_OVERRIDE" ] && [ -d "$EXTRACTION_DIR_OVERRIDE" ]; then
+        if [ -d "${EXTRACTION_DIR_OVERRIDE}/${SEED}/extraction" ]; then
+            SAVED_DIR="${EXTRACTION_DIR_OVERRIDE}/${SEED}/extraction"
+        elif [ -d "${EXTRACTION_DIR_OVERRIDE}/extraction" ]; then
+            SAVED_DIR="${EXTRACTION_DIR_OVERRIDE}/extraction"
+        else
+            SAVED_DIR="$EXTRACTION_DIR_OVERRIDE"
+        fi
+    elif [ -d "$EXTRACT_SEED_DIR" ] && [ -f "${EXTRACT_SEED_DIR}/sparse_gp_final.npz" ]; then
         SAVED_DIR="$EXTRACT_SEED_DIR"
     else
-        SAVED_DIR=$(ls -td extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}* 2>/dev/null | head -1)
+        SAVED_DIR=$(ls -td results/${MODEL}/*${MODEL}*d${D_NOISE}*l${L_NOISE}*${GEOMETRY}*/${SEED}/extraction extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}* 2>/dev/null | head -1)
     fi
 
     if [ -z "$SAVED_DIR" ] || [ ! -d "$SAVED_DIR" ]; then
         if [ "$SKIP_EXT" == "true" ]; then
-            echo "❌ Error: Step 2 was skipped and no extracted model found in extraction/extracted_models/ for $MODEL!"
+            echo "❌ Error: Step 2 was skipped and no extracted model found for $MODEL (Seed $SEED)!"
         else
-            echo "❌ Error: Could not locate extracted model directory in extraction/extracted_models/"
+            echo "❌ Error: Could not locate extracted model directory for $MODEL (Seed $SEED)!"
         fi
         exit 1
     fi
-    MODEL_PATH=$(basename "$SAVED_DIR")
     echo "ℹ️ Using extracted model at: $SAVED_DIR"
 
 
@@ -278,8 +277,7 @@ for SEED in $SEEDS_LIST; do
         echo "⏭️ Skipping Step 3 (Distillation) as requested."
     else
         echo "--- Step 3: Distillation ($DIST_MODEL candidate expression, DEV/VOL: $DEV_VOL_DIST_ITERS, ANISO: $ANISO_DIST_ITERS iterations, Seed: $SEED) ---"
-        SHARED_OUT_DIR="${PARENT_DISTILL_DIR}/${SEED}"
-        mkdir -p "$SHARED_OUT_DIR"
+        SHARED_OUT_DIR="$DISTILL_SEED_DIR"
 
         if [ "$DIST_TARGET" == "sef_split" ]; then
             echo "Distilling DEV component into $SHARED_OUT_DIR ($DEV_VOL_DIST_ITERS iters)..."
@@ -375,8 +373,8 @@ for SEED in $SEEDS_LIST; do
     fi
 
     DISTILLED_DIR="$SHARED_OUT_DIR"
-    if [ ! -d "$DISTILLED_DIR" ]; then
-        DISTILLED_DIR=$(ls -td distillation/distilled_models/*_${MODEL}* 2>/dev/null | head -n 1 || echo "")
+    if [ ! -d "$DISTILLED_DIR" ] || [ ! -f "${DISTILLED_DIR}/dev_flow_samples.npy" ]; then
+        DISTILLED_DIR=$(ls -td results/${MODEL}/*${MODEL}*d${D_NOISE}*l${L_NOISE}*${GEOMETRY}*/${SEED}/distillation distillation/distilled_models/*_${MODEL}* 2>/dev/null | head -n 1 || echo "")
     fi
     echo "ℹ️ Using distilled model at: $DISTILLED_DIR"
 
