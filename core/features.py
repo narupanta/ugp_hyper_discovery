@@ -45,26 +45,17 @@ class AnisotropicFeatureExtractor(FeatureExtractor):
         C_bar = (I3**(-1/3))[..., None, None] * C
         
         I4_bar_1 = I4_func(C_bar, self.a0)
-        I5_bar_1 = I5_func(C_bar, self.a0)
-        
-        I4_val_1 = I4_bar_1 - 1.0
-        I5_val_1 = I5_bar_1 - 1.0
         
         if self.cap_compression:
-            I4_val_1 = jnp.maximum(I4_val_1, 0.0)
-            I5_val_1 = jnp.maximum(I5_val_1, 0.0)
+            I4_bar_1 = jnp.maximum(I4_bar_1, 1.0)
 
         if self.a1 is not None:
             I4_bar_2 = I4_func(C_bar, self.a1)
-            I5_bar_2 = I5_func(C_bar, self.a1)
-            I4_val_2 = I4_bar_2 - 1.0
-            I5_val_2 = I5_bar_2 - 1.0
             if self.cap_compression:
-                I4_val_2 = jnp.maximum(I4_val_2, 0.0)
-                I5_val_2 = jnp.maximum(I5_val_2, 0.0)
-            aniso = jnp.stack([I4_val_1, I5_val_1, I4_val_2, I5_val_2], axis=-1)
+                I4_bar_2 = jnp.maximum(I4_bar_2, 1.0)
+            aniso = jnp.stack([I4_bar_1, I4_bar_2], axis=-1)
         else:
-            aniso = jnp.stack([I4_val_1, I5_val_1], axis=-1)
+            aniso = I4_bar_1[..., None]
         
         return dev, vol, aniso
 

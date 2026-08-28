@@ -152,10 +152,14 @@ def main():
 
     feature_extractor = None
     if aniso_z is not None:
-        if true_model is not None and hasattr(true_model, 'a1') and hasattr(true_model, 'a2'):
-            feature_extractor = AnisotropicFeatureExtractor(np.array(true_model.a1), a1=np.array(true_model.a2))
-        elif true_model is not None and hasattr(true_model, 'a0'):
-            feature_extractor = AnisotropicFeatureExtractor(np.array(true_model.a0))
+        a0_val = getattr(true_model, "a0", None)
+        if a0_val is None:
+            a0_val = getattr(true_model, "a1", None)
+        a1_val = getattr(true_model, "a1", None) if getattr(true_model, "a0", None) is not None else getattr(true_model, "a2", None)
+        if a0_val is not None and a1_val is not None:
+            feature_extractor = AnisotropicFeatureExtractor(np.array(a0_val), a1=np.array(a1_val))
+        elif a0_val is not None:
+            feature_extractor = AnisotropicFeatureExtractor(np.array(a0_val))
 
     learned_gp = SparseHyperelasticityGP(
         gp_params, I_z, min_dev, min_vol, max_dev, max_vol,

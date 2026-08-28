@@ -107,8 +107,7 @@ class SparseHyperelasticityGP:
                 aniso_var = to_f64(jax.nn.softplus(p.raw_aniso_u_var))
             
             aniso_z = to_f64(jax.nn.softplus(p.raw_aniso_z))
-            # anchor point at zero energy
-            aniso_z = aniso_z.at[0].set(to_f64(jnp.array([0.0])))
+            aniso_z = aniso_z.at[0].set(to_f64(jnp.ones(aniso_z.shape[-1])))
             aniso_u_mean = aniso_mu.at[0].set(0.0)
             if "full" in self.covariance_mode:
                 aniso_u_var = aniso_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)

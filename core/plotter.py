@@ -664,35 +664,69 @@ def plot_stress_validation(gp_model, true_model, save_path):
         axes[i].grid(True, alpha=0.3)
         axes[i].legend()
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(os.path.join(save_path, "piola_stress_validation.pdf"))
+    plt.close()
 
-def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path):
+def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path, aniso_z=None, aniso_I=None, feature_extractor=None):
     # Setup Figure 1: Inducing points in Feature Space
-    fig1, axes1 = plt.subplots(1, 2, figsize=(14, 6))
+    has_aniso1 = aniso_z is not None and aniso_I is not None
+    has_aniso2 = has_aniso1 and aniso_z.shape[-1] >= 2
+    
+    n_fig1 = 2
+    if has_aniso2:
+        n_fig1 = 4
+    elif has_aniso1:
+        n_fig1 = 3
+        
+    fig1, axes1 = plt.subplots(1, n_fig1, figsize=(6 * n_fig1, 5), squeeze=False)
+    axes1 = axes1[0]
     
     # Plot 1: I1_dev vs I2_dev (Inducing points for the Deviatoric GP)
-    
-    axes1[0].scatter(dev_I[:, 0], dev_I[:, 1], marker='o', label='Invariants (Dev)')
-    axes1[0].scatter(dev_z[:, 0], dev_z[:, 1], c='red', marker='x', label='Inducing Points (Dev)')
+    axes1[0].scatter(dev_I[:, 0], dev_I[:, 1], marker='o', alpha=0.3, label='Invariants (Dev)')
+    axes1[0].scatter(dev_z[:, 0], dev_z[:, 1], c='red', marker='x', s=50, label='Inducing Points (Dev)')
     axes1[0].set_xlabel(r"$\bar{I}_1$")
     axes1[0].set_ylabel(r"$\bar{I}_2$")
     axes1[0].set_title("Deviatoric Inducing Points")
     axes1[0].legend()
+    axes1[0].grid(True, alpha=0.2)
 
-    # Plot 2: J vs -2*J (Inducing points for the Volumetric GP)
-    axes1[1].scatter(vol_I[:, 0], vol_I[:, 1], marker='o', label='J and -2 * J (Vol)')
-    axes1[1].scatter(vol_z[:, 0], vol_z[:, 1], c='red', marker='x', label='Inducing Points (Vol)')
-    # Reference constraint line
+    # Plot 2: J (Inducing points for the Volumetric GP)
+    axes1[1].scatter(vol_I[:, 0], -2.0 * vol_I[:, 0], marker='o', alpha=0.3, label='J and -2*J (Vol)')
+    axes1[1].scatter(vol_z[:, 0], -2.0 * vol_z[:, 0], c='red', marker='x', s=50, label='Inducing Points (Vol)')
     axes1[1].set_xlabel(r"$J$")
     axes1[1].set_ylabel(r"$-2J$")
     axes1[1].set_title("Volumetric Inducing Points")
     axes1[1].legend()
+    axes1[1].grid(True, alpha=0.2)
     
+    if has_aniso1 and not has_aniso2:
+        axes1[2].scatter(aniso_I[:, 0], jnp.zeros_like(aniso_I[:, 0]), marker='o', alpha=0.3, label=r'Invariants ($\bar{I}_4$)')
+        axes1[2].scatter(aniso_z[:, 0], jnp.zeros_like(aniso_z[:, 0]), c='red', marker='x', s=50, label='Inducing Points')
+        axes1[2].set_xlabel(r"$\bar{I}_4$")
+        axes1[2].set_title("Anisotropic Inducing Points")
+        axes1[2].legend()
+        axes1[2].grid(True, alpha=0.2)
+    elif has_aniso2:
+        axes1[2].scatter(aniso_I[:, 0], aniso_I[:, 1], marker='o', alpha=0.3, label=r'Invariants ($\bar{I}_4$ vs $\bar{I}_6$)')
+        axes1[2].scatter(aniso_z[:, 0], aniso_z[:, 1], c='red', marker='x', s=50, label='Inducing Points')
+        axes1[2].set_xlabel(r"$\bar{I}_4$")
+        axes1[2].set_ylabel(r"$\bar{I}_6$")
+        axes1[2].set_title(r"Anisotropic Inducing Points ($\bar{I}_4$ vs $\bar{I}_6$)")
+        axes1[2].legend()
+        axes1[2].grid(True, alpha=0.2)
+        
+        axes1[3].scatter(aniso_I[:, 0], jnp.zeros_like(aniso_I[:, 0]), marker='o', alpha=0.3, label=r'Invariants ($\bar{I}_4$)')
+        axes1[3].scatter(aniso_z[:, 0], jnp.zeros_like(aniso_z[:, 0]), c='red', marker='x', s=50, label='Inducing Points')
+        axes1[3].set_xlabel(r"$\bar{I}_4$")
+        axes1[3].set_title("Anisotropic Inducing Points")
+        axes1[3].legend()
+        axes1[3].grid(True, alpha=0.2)
+        
+    plt.tight_layout()
     fig1.savefig(os.path.join(save_path, "inducing_points_features.pdf"))
+    plt.close(fig1)
 
     # --- Setup Figure 2: Standard Load Paths ---
-    fig2, axes2 = plt.subplots(1, 3, figsize=(18, 5))
     num_points = 100
     gamma = jnp.linspace(0.0, 1.0, num_points)
     modes = {
@@ -705,32 +739,92 @@ def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path):
     }
 
     # Populate Deformation Gradients (F)
-    modes["Uniaxial Tension"] = modes["Uniaxial Tension"].at[:, 0, 0].set(1 + gamma)
-    modes["Uniaxial Tension"] = modes["Uniaxial Tension"].at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+    modes["Uniaxial Tension"] = modes["Uniaxial Tension"].at[:, 0, 0].set(1 + gamma).at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+    modes["Equibiaxial Tension"] = modes["Equibiaxial Tension"].at[:, 0, 0].set(1 + gamma).at[:, 1, 1].set(1 + gamma).at[:, 2, 2].set(1)
+    modes["Pure Shear"] = modes["Pure Shear"].at[:, 0, 0].set(1 + gamma).at[:, 1, 1].set(1/(1 + gamma)).at[:, 2, 2].set(1)
+    modes["Uniaxial Compression"] = modes["Uniaxial Compression"].at[:, 0, 0].set(1/(1 + gamma)).at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+    modes["Equibiaxial Compression"] = modes["Equibiaxial Compression"].at[:, 0, 0].set(1/(1 + gamma)).at[:, 1, 1].set(1/(1 + gamma)).at[:, 2, 2].set(1)
+    modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 0].set(1).at[:, 1, 1].set(1).at[:, 2, 2].set(1).at[:, 0, 1].set(gamma)
 
-    modes["Equibiaxial Tension"] = modes["Equibiaxial Tension"].at[:, 0, 0].set(1 + gamma)
-    modes["Equibiaxial Tension"] = modes["Equibiaxial Tension"].at[:, 1, 1].set(1 + gamma).at[:, 2, 2].set(1)
+    modes_data = {}
+    for mode_name, F_stack in modes.items():
+        C = jax.vmap(C_func)(F_stack)
+        I3 = jnp.clip(jax.vmap(I3_func)(C), 1.0e-8, 1.0e8)
+        C_bar = (I3**(-1/3))[..., None, None] * C
+        js = jnp.sqrt(I3)
+        i1_bar = jnp.trace(C_bar, axis1=-2, axis2=-1)
+        i2_bar = 0.5 * (i1_bar**2 - jnp.trace(C_bar @ C_bar, axis1=-2, axis2=-1))
+        
+        m_dict = {
+            "dev1": i1_bar - 3.0,
+            "dev2": i2_bar - 3.0,
+            "vol": js - 1.0
+        }
+        if feature_extractor is not None and hasattr(feature_extractor, "a0"):
+            a0 = feature_extractor.a0
+            m_dict["aniso1"] = jnp.einsum('i,...ij,j->...', a0, C_bar, a0) - 1.0
+            if hasattr(feature_extractor, "a1") and feature_extractor.a1 is not None:
+                a1 = feature_extractor.a1
+                m_dict["aniso2"] = jnp.einsum('i,...ij,j->...', a1, C_bar, a1) - 1.0
+        modes_data[mode_name] = m_dict
 
-    modes["Pure Shear"] = modes["Pure Shear"].at[:, 0, 0].set(1 + gamma)
-    modes["Pure Shear"] = modes["Pure Shear"].at[:, 1, 1].set(1/(1 + gamma)).at[:, 2, 2].set(1)
+    # Training data variables
+    data_dict = {
+        "dev1": dev_I[:, 0] - 3.0,
+        "dev2": dev_I[:, 1] - 3.0,
+        "vol": vol_I[:, 0] - 1.0
+    }
+    z_dict = {
+        "dev1": dev_z[:, 0] - 3.0,
+        "dev2": dev_z[:, 1] - 3.0,
+        "vol": vol_z[:, 0] - 1.0
+    }
+    
+    if aniso_I is not None and aniso_z is not None:
+        shift_data_a1 = 1.0 if float(jnp.mean(aniso_I[:, 0])) > 0.5 else 0.0
+        shift_z_a1 = 1.0 if float(jnp.mean(aniso_z[:, 0])) > 0.5 else 0.0
+        data_dict["aniso1"] = aniso_I[:, 0] - shift_data_a1
+        z_dict["aniso1"] = aniso_z[:, 0] - shift_z_a1
+        if aniso_I.shape[-1] >= 2 and aniso_z.shape[-1] >= 2:
+            shift_data_a2 = 1.0 if float(jnp.mean(aniso_I[:, 1])) > 0.5 else 0.0
+            shift_z_a2 = 1.0 if float(jnp.mean(aniso_z[:, 1])) > 0.5 else 0.0
+            data_dict["aniso2"] = aniso_I[:, 1] - shift_data_a2
+            z_dict["aniso2"] = aniso_z[:, 1] - shift_z_a2
 
-    modes["Uniaxial Compression"] = modes["Uniaxial Compression"].at[:, 0, 0].set(1/(1 + gamma))
-    modes["Uniaxial Compression"] = modes["Uniaxial Compression"].at[:, 1, 1].set(1).at[:, 2, 2].set(1)
+    pairs = [
+        (r"$\bar{I}_1-3$ vs $\bar{I}_2-3$", "dev1", "dev2", r"$\bar{I}_1-3$", r"$\bar{I}_2-3$"),
+        (r"$\bar{I}_1-3$ vs $J-1$", "dev1", "vol", r"$\bar{I}_1-3$", r"$J-1$"),
+        (r"$\bar{I}_2-3$ vs $J-1$", "dev2", "vol", r"$\bar{I}_2-3$", r"$J-1$"),
+    ]
+    
+    if "aniso1" in data_dict and "aniso1" in modes_data[list(modes.keys())[0]]:
+        pairs.extend([
+            (r"$\bar{I}_4-1$ vs $\bar{I}_1-3$", "aniso1", "dev1", r"$\bar{I}_4-1$", r"$\bar{I}_1-3$"),
+            (r"$\bar{I}_4-1$ vs $\bar{I}_2-3$", "aniso1", "dev2", r"$\bar{I}_4-1$", r"$\bar{I}_2-3$"),
+            (r"$\bar{I}_4-1$ vs $J-1$", "aniso1", "vol", r"$\bar{I}_4-1$", r"$J-1$"),
+        ])
+    if "aniso2" in data_dict and "aniso2" in modes_data[list(modes.keys())[0]]:
+        pairs.extend([
+            (r"$\bar{I}_6-1$ vs $\bar{I}_1-3$", "aniso2", "dev1", r"$\bar{I}_6-1$", r"$\bar{I}_1-3$"),
+            (r"$\bar{I}_6-1$ vs $\bar{I}_2-3$", "aniso2", "dev2", r"$\bar{I}_6-1$", r"$\bar{I}_2-3$"),
+            (r"$\bar{I}_6-1$ vs $J-1$", "aniso2", "vol", r"$\bar{I}_6-1$", r"$J-1$"),
+            (r"$\bar{I}_4-1$ vs $\bar{I}_6-1$", "aniso1", "aniso2", r"$\bar{I}_4-1$", r"$\bar{I}_6-1$"),
+        ])
 
-    modes["Equibiaxial Compression"] = modes["Equibiaxial Compression"].at[:, 0, 0].set(1/(1 + gamma))
-    modes["Equibiaxial Compression"] = modes["Equibiaxial Compression"].at[:, 1, 1].set(1/(1 + gamma)).at[:, 2, 2].set(1)
+    n_pairs = len(pairs)
+    if n_pairs == 10:
+        nrows, ncols = 2, 5
+        figsize = (25, 9)
+    elif n_pairs == 6:
+        nrows, ncols = 2, 3
+        figsize = (18, 9)
+    else:
+        nrows, ncols = 1, 3
+        figsize = (18, 5)
 
-    modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 0].set(1).at[:, 1, 1].set(1).at[:, 2, 2].set(1)
-    modes["Simple Shear"] = modes["Simple Shear"].at[:, 0, 1].set(gamma) # Standard simple shear gamma
-    # Reuse your 'modes' dictionary logic here (assuming 'modes' is accessible)
-    # For brevity, we compute and plot the lines for each mode:
-    axes2[0].scatter(dev_I[:, 0] - 3, dev_I[:, 1] - 3, marker='o')
-    axes2[1].scatter(dev_I[:, 0] - 3, (vol_I[:, 0] - 1)**2, marker='o')
-    axes2[2].scatter(dev_I[:, 1] - 3, (vol_I[:, 0] - 1)**2, marker='o')
+    fig2, axes2 = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    axes2_flat = axes2.flatten()
 
-    axes2[0].scatter(dev_z[:, 0] - 3, dev_z[:, 1] - 3, color = "red", marker='x')
-    axes2[1].scatter(dev_z[:, 0] - 3, (vol_z[:, 0] - 1)**2, color = "red", marker='x')
-    axes2[2].scatter(dev_z[:, 1] - 3, (vol_z[:, 0] - 1)**2, color = "red", marker='x')
     linestyles = {
         "Uniaxial Tension": "-",
         "Uniaxial Compression": "--",
@@ -739,31 +833,28 @@ def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path):
         "Pure Shear": (0, (3, 1, 1, 1)),
         "Simple Shear": (0, (5, 2))
     }
-    for mode_name, F_stack in modes.items():
-        i, _  = jax.vmap(invariants_and_derivatives)(F_stack)
-        js = jnp.sqrt(i[:, 2])
-        i1_bar = js**(-2/3) * i[:, 0]
-        i2_bar = js**(-4/3) * i[:, 1]
-        # Plot 1: I1_bar - 3 vs I2_bar - 3
-        axes2[0].plot(i1_bar - 3, i2_bar - 3, label=mode_name,linestyle=linestyles[mode_name])
-        
 
-        # Plot 2: I1_bar - 3 vs (J - 1)**2
-        axes2[1].plot(i1_bar - 3, (js - 1)**2, label=mode_name,linestyle=linestyles[mode_name])
+    for idx, (title, x_k, y_k, x_lbl, y_lbl) in enumerate(pairs):
+        ax = axes2_flat[idx]
+        ax.scatter(data_dict[x_k], data_dict[y_k], marker='o', alpha=0.3, label='Training Data' if idx == 0 else "")
+        ax.scatter(z_dict[x_k], z_dict[y_k], color='red', marker='x', s=45, label='Inducing Points' if idx == 0 else "")
         
-        # Plot 3: I2_bar - 3 vs (J - 1)**2
-        axes2[2].plot(i2_bar - 3, (js - 1)**2, label=mode_name,linestyle=linestyles[mode_name])
-    # Labeling Figure 2
-    axes2[0].set_title(r"$\bar{I}_1-3$ vs $\bar{I}_2-3$")
-    axes2[1].set_title(r"$\bar{I}_1-3$ vs $(J-1)^2$")
-    axes2[2].set_title(r"$\bar{I}_2-3$ vs $(J-1)^2$")
-    
-    for ax in axes2:
-        ax.legend(fontsize='small')
+        for mode_name, m_vals in modes_data.items():
+            ax.plot(m_vals[x_k], m_vals[y_k], label=mode_name if idx == 0 else "", linestyle=linestyles[mode_name])
+            
+        ax.set_title(title, fontsize=12)
+        ax.set_xlabel(x_lbl, fontsize=11)
+        ax.set_ylabel(y_lbl, fontsize=11)
         ax.grid(True, alpha=0.2)
-        
+        if idx == 0:
+            ax.legend(fontsize='small', loc='best')
+
+    for idx in range(n_pairs, len(axes2_flat)):
+        axes2_flat[idx].set_visible(False)
+
     plt.tight_layout()
     fig2.savefig(os.path.join(save_path, "standard_loading_paths.pdf"))
+    plt.close(fig2)
 
 
 def plot_stress_validation(gp_model, true_model, save_path):
@@ -979,54 +1070,92 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path):
     print("Generating Training Data R2 Plot...")
     num_steps = F_train_full.shape[0]
     
-    fig, ax = plt.subplots(figsize=(10, 10))
-    ax.set_title("Training Data Energy R2 (GP Mean vs Truth)", fontsize=16)
+    has_aniso = (hasattr(learned_gp, 'is_anisotropic') and learned_gp.is_anisotropic) and hasattr(true_model, 'psi_aniso')
+    
+    if hasattr(true_model, 'psi_dev') and hasattr(true_model, 'psi_vol'):
+        psi_dev_fn = lambda f: jax.vmap(true_model.psi_dev)(f)
+        psi_vol_fn = lambda f: jax.vmap(true_model.psi_vol)(f)
+    elif hasattr(true_model, 'dev_params') and hasattr(true_model, 'vol_params'):
+        from core.material_models import get_material
+        model_name = getattr(true_model, 'name', 'gmr')
+        t_dev = get_material(model_name, dev_params=list(true_model.dev_params), vol_params=[0]*len(true_model.vol_params), jit_P=False)
+        t_vol = get_material(model_name, dev_params=[0]*len(true_model.dev_params), vol_params=list(true_model.vol_params), jit_P=False)
+        psi_dev_fn = lambda f: jax.vmap(t_dev.psi)(f)
+        psi_vol_fn = lambda f: jax.vmap(t_vol.psi)(f)
+    else:
+        psi_dev_fn = None
+        psi_vol_fn = None
+
+    components = []
+    if psi_dev_fn is not None and psi_vol_fn is not None:
+        components.append(("Deviatoric", r"Deviatoric Energy ($\Psi_{\mathrm{dev}}$)", psi_dev_fn, lambda f: learned_gp.dev_psi_dist(f)))
+        components.append(("Volumetric", r"Volumetric Energy ($\Psi_{\mathrm{vol}}$)", psi_vol_fn, lambda f: learned_gp.vol_psi_dist(f)))
+    if has_aniso:
+        components.append(("Anisotropic", r"Anisotropic Energy ($\Psi_{\mathrm{aniso}}$)", lambda f: jax.vmap(true_model.psi_aniso)(f), lambda f: learned_gp.aniso_psi_dist(f)))
+    components.append(("Total Energy", r"Total Energy ($\Psi_{\mathrm{total}}$)", lambda f: jax.vmap(true_model.psi)(f), lambda f: learned_gp.psi_dist(f)))
+
+    n_panels = len(components)
+    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 6), squeeze=False)
+    axes = axes[0]
     
     colors = plt.cm.jet(np.linspace(0, 1, num_steps))
     
-    all_true = []
-    all_mean = []
-    all_std = []
+    tot_r2, tot_rmse, tot_cov = 0.0, 0.0, 0.0
     
-    for step in range(num_steps):
-        F_step = F_train_full[step]
-        true_psi = jax.vmap(true_model.psi)(F_step)
-        dist = learned_gp.psi_dist(F_step)
-        mean_psi = dist.mean
-        std_psi = jnp.sqrt(dist.var)
+    for ax_idx, (comp_name, comp_label, true_fn, gp_dist_fn) in enumerate(components):
+        ax = axes[ax_idx]
+        ax.set_title(f"Training Energy R2: {comp_name}", fontsize=14)
         
-        all_true.append(true_psi)
-        all_mean.append(mean_psi)
-        all_std.append(std_psi)
+        all_true = []
+        all_mean = []
+        all_std = []
         
-        ax.errorbar(true_psi, mean_psi, yerr=1.96*std_psi, fmt='o', color=colors[step], 
-                    alpha=0.2, markersize=3, label=f"Step {step}" if step % 5 == 0 else "")
-                    
-    all_true = jnp.concatenate(all_true)
-    all_mean = jnp.concatenate(all_mean)
-    all_std = jnp.concatenate(all_std)
-    
-    r2 = r2_score(all_true, all_mean)
-    rmse = jnp.sqrt(jnp.mean((all_true - all_mean)**2))
-    lower = all_mean - 1.96 * all_std
-    upper = all_mean + 1.96 * all_std
-    coverage = jnp.mean((all_true >= lower) & (all_true <= upper)) * 100
-    
-    min_val = min(all_true.min(), all_mean.min())
-    max_val = max(all_true.max(), all_mean.max())
-    ax.plot([min_val, max_val], [min_val, max_val], 'k--', lw=2, label="Parity")
-    
-    ax.text(0.05, 0.95, f"R2: {r2:.4f}\nRMSE: {rmse:.4f}\nCoverage: {coverage:.1f}%", 
-            transform=ax.transAxes, verticalalignment='top', 
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), fontsize=14)
+        for step in range(num_steps):
+            F_step = F_train_full[step]
+            true_psi = true_fn(F_step)
+            dist = gp_dist_fn(F_step)
+            mean_psi = dist.mean
+            std_psi = jnp.sqrt(dist.var)
             
-    ax.set_xlabel("True Total Energy")
-    ax.set_ylabel("Predicted Total Energy")
-    ax.legend(loc='lower right')
-    ax.grid(True, alpha=0.3)
-    
+            all_true.append(true_psi)
+            all_mean.append(mean_psi)
+            all_std.append(std_psi)
+            
+            ax.errorbar(true_psi, mean_psi, yerr=1.96*std_psi, fmt='o', color=colors[step], 
+                        alpha=0.2, markersize=3, label=f"Step {step}" if (step % 5 == 0 and ax_idx == n_panels - 1) else "")
+                        
+        all_true = jnp.concatenate(all_true)
+        all_mean = jnp.concatenate(all_mean)
+        all_std = jnp.concatenate(all_std)
+        
+        ss_tot = jnp.sum((all_true - jnp.mean(all_true)) ** 2)
+        r2 = 1.0 - jnp.sum((all_true - all_mean) ** 2) / (ss_tot + 1e-12)
+        rmse = jnp.sqrt(jnp.mean((all_true - all_mean)**2))
+        lower = all_mean - 1.96 * all_std
+        upper = all_mean + 1.96 * all_std
+        coverage = jnp.mean((all_true >= lower) & (all_true <= upper)) * 100
+        
+        if comp_name == "Total Energy":
+            tot_r2, tot_rmse, tot_cov = float(r2), float(rmse), float(coverage)
+        
+        min_val = min(float(all_true.min()), float(all_mean.min()))
+        max_val = max(float(all_true.max()), float(all_mean.max()))
+        margin = max((max_val - min_val) * 0.05, 1e-4)
+        ax.plot([min_val - margin, max_val + margin], [min_val - margin, max_val + margin], 'k--', lw=1.5, label="Parity")
+        
+        ax.text(0.05, 0.95, f"$R^2$: {r2:.4f}\nRMSE: {rmse:.4f}\nCoverage: {coverage:.1f}%", 
+                transform=ax.transAxes, verticalalignment='top', 
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), fontsize=12)
+                
+        ax.set_xlabel(f"True {comp_label}", fontsize=11)
+        ax.set_ylabel(f"Predicted GP Mean {comp_label}", fontsize=11)
+        ax.grid(True, alpha=0.3)
+        ax.set_aspect('equal', adjustable='datalim')
+        if ax_idx == n_panels - 1:
+            ax.legend(loc='lower right', fontsize=9)
+        
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, "training_r2_energy.pdf"), bbox_inches='tight')
     plt.close()
     
-    return float(r2), float(rmse), float(coverage)
+    return tot_r2, tot_rmse, tot_cov

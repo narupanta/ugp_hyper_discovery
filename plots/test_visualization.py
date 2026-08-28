@@ -156,56 +156,96 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path):
     print("Generating Training Data R2 Plot...")
     num_steps = F_train_full.shape[0]
     
-    fig, ax = plt.subplots(figsize=(10, 10))
-    ax.set_title("Training Data Energy R2 (GP Mean vs Truth)", fontsize=16)
+    has_aniso = (hasattr(learned_gp, 'is_anisotropic') and learned_gp.is_anisotropic) and hasattr(true_model, 'psi_aniso')
+    
+    if hasattr(true_model, 'psi_dev') and hasattr(true_model, 'psi_vol'):
+        psi_dev_fn = lambda f: jax.vmap(true_model.psi_dev)(f)
+        psi_vol_fn = lambda f: jax.vmap(true_model.psi_vol)(f)
+    elif hasattr(true_model, 'dev_params') and hasattr(true_model, 'vol_params'):
+        from core.material_models import get_material
+        model_name = getattr(true_model, 'name', 'gmr')
+        t_dev = get_material(model_name, dev_params=list(true_model.dev_params), vol_params=[0]*len(true_model.vol_params), jit_P=False)
+        t_vol = get_material(model_name, dev_params=[0]*len(true_model.dev_params), vol_params=list(true_model.vol_params), jit_P=False)
+        psi_dev_fn = lambda f: jax.vmap(t_dev.psi)(f)
+        psi_vol_fn = lambda f: jax.vmap(t_vol.psi)(f)
+    else:
+        psi_dev_fn = None
+        psi_vol_fn = None
+
+    components = []
+    if psi_dev_fn is not None and psi_vol_fn is not None:
+        components.append(("Deviatoric", r"Deviatoric Energy ($\Psi_{\mathrm{dev}}$)", psi_dev_fn, lambda f: learned_gp.dev_psi_dist(f)))
+        components.append(("Volumetric", r"Volumetric Energy ($\Psi_{\mathrm{vol}}$)", psi_vol_fn, lambda f: learned_gp.vol_psi_dist(f)))
+    if has_aniso:
+        components.append(("Anisotropic", r"Anisotropic Energy ($\Psi_{\mathrm{aniso}}$)", lambda f: jax.vmap(true_model.psi_aniso)(f), lambda f: learned_gp.aniso_psi_dist(f)))
+    components.append(("Total Energy", r"Total Energy ($\Psi_{\mathrm{total}}$)", lambda f: jax.vmap(true_model.psi)(f), lambda f: learned_gp.psi_dist(f)))
+
+    n_panels = len(components)
+    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 6), squeeze=False)
+    axes = axes[0]
     
     colors = plt.cm.jet(np.linspace(0, 1, num_steps))
     
-    all_true = []
-    all_mean = []
-    all_std = []
+    tot_r2, tot_rmse, tot_cov = 0.0, 0.0, 0.0
     
-    for step in range(num_steps):
-        F_step = F_train_full[step]
-        true_psi = jax.vmap(true_model.psi)(F_step)
-        dist = learned_gp.psi_dist(F_step)
-        mean_psi = dist.mean
-        std_psi = jnp.sqrt(dist.var)
+    for ax_idx, (comp_name, comp_label, true_fn, gp_dist_fn) in enumerate(components):
+        ax = axes[ax_idx]
+        ax.set_title(f"Training Energy R2: {comp_name}", fontsize=14)
         
-        all_true.append(true_psi)
-        all_mean.append(mean_psi)
-        all_std.append(std_psi)
+        all_true = []
+        all_mean = []
+        all_std = []
         
-        ax.errorbar(true_psi, mean_psi, yerr=1.96*std_psi, fmt='o', color=colors[step], 
-                    alpha=0.2, markersize=3, label=f"Step {step}" if step % 5 == 0 else "")
-                    
-    all_true = jnp.concatenate(all_true)
-    all_mean = jnp.concatenate(all_mean)
-    all_std = jnp.concatenate(all_std)
-    
-    r2 = r2_score(all_true, all_mean)
-    rmse = jnp.sqrt(jnp.mean((all_true - all_mean)**2))
-    lower = all_mean - 1.96 * all_std
-    upper = all_mean + 1.96 * all_std
-    coverage = jnp.mean((all_true >= lower) & (all_true <= upper)) * 100
-    
-    min_val = min(all_true.min(), all_mean.min())
-    max_val = max(all_true.max(), all_mean.max())
-    ax.plot([min_val, max_val], [min_val, max_val], 'k--', lw=2, label="Parity")
-    
-    ax.text(0.05, 0.95, f"R2: {r2:.4f}\nRMSE: {rmse:.4f}\nCoverage: {coverage:.1f}%", 
-            transform=ax.transAxes, verticalalignment='top', 
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), fontsize=14)
+        for step in range(num_steps):
+            F_step = F_train_full[step]
+            true_psi = true_fn(F_step)
+            dist = gp_dist_fn(F_step)
+            mean_psi = dist.mean
+            std_psi = jnp.sqrt(dist.var)
             
-    ax.set_xlabel("True Total Energy")
-    ax.set_ylabel("Predicted Total Energy")
-    ax.legend(loc='lower right')
-    ax.grid(True, alpha=0.3)
-    
+            all_true.append(true_psi)
+            all_mean.append(mean_psi)
+            all_std.append(std_psi)
+            
+            ax.errorbar(true_psi, mean_psi, yerr=1.96*std_psi, fmt='o', color=colors[step], 
+                        alpha=0.2, markersize=3, label=f"Step {step}" if (step % 5 == 0 and ax_idx == n_panels - 1) else "")
+                        
+        all_true = jnp.concatenate(all_true)
+        all_mean = jnp.concatenate(all_mean)
+        all_std = jnp.concatenate(all_std)
+        
+        ss_tot = jnp.sum((all_true - jnp.mean(all_true)) ** 2)
+        r2 = 1.0 - jnp.sum((all_true - all_mean) ** 2) / (ss_tot + 1e-12)
+        rmse = jnp.sqrt(jnp.mean((all_true - all_mean)**2))
+        lower = all_mean - 1.96 * all_std
+        upper = all_mean + 1.96 * all_std
+        coverage = jnp.mean((all_true >= lower) & (all_true <= upper)) * 100
+        
+        if comp_name == "Total Energy":
+            tot_r2, tot_rmse, tot_cov = float(r2), float(rmse), float(coverage)
+        
+        min_val = min(float(all_true.min()), float(all_mean.min()))
+        max_val = max(float(all_true.max()), float(all_mean.max()))
+        margin = max((max_val - min_val) * 0.05, 1e-4)
+        ax.plot([min_val - margin, max_val + margin], [min_val - margin, max_val + margin], 'k--', lw=1.5, label="Parity")
+        
+        ax.text(0.05, 0.95, f"$R^2$: {r2:.4f}\nRMSE: {rmse:.4f}\nCoverage: {coverage:.1f}%", 
+                transform=ax.transAxes, verticalalignment='top', 
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), fontsize=12)
+                
+        ax.set_xlabel(f"True {comp_label}", fontsize=11)
+        ax.set_ylabel(f"Predicted GP Mean {comp_label}", fontsize=11)
+        ax.grid(True, alpha=0.3)
+        ax.set_aspect('equal', adjustable='datalim')
+        if ax_idx == n_panels - 1:
+            ax.legend(loc='lower right', fontsize=9)
+        
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, "training_r2_energy.png"), bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, "training_r2_energy.pdf"), bbox_inches='tight')
     plt.close()
     print("Done generating Training Data R2 Plot.")
+    return tot_r2, tot_rmse, tot_cov
 
 if __name__ == "__main__":
     plot_energy_decomposition_validation(learned_gp, true_model, latest_model_dir)

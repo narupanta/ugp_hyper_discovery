@@ -118,7 +118,12 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
                 "raw_dev_z": jnp.zeros_like(grads.raw_dev_z),
                 "raw_vol_z": jnp.zeros_like(grads.raw_vol_z)
             }
-            # Anisotropic inducing points deliberately left un-frozen so they track the shifting data manifold.
+            if getattr(grads, "raw_aniso_z", None) is not None:
+                # If fiber angle is known (fixed), freeze aniso inducing points as well.
+                # Only keep aniso inducing points unfrozen if fiber angle is being learned dynamically.
+                is_unknown_fiber = getattr(grads, "raw_aniso_theta_mean", None) is not None
+                if not is_unknown_fiber:
+                    replace_kwargs["raw_aniso_z"] = jnp.zeros_like(grads.raw_aniso_z)
             grads = grads._replace(**replace_kwargs)
         return grads
     return freeze_fn
@@ -225,13 +230,13 @@ if __name__ == "__main__" :
         vol_z = farthest_point_sampling_with_fixed_point(vol_flat, n_ip, jnp.array([1.0]))
         I_z_list = [dev_z, vol_z]
         if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
-            aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, jnp.zeros(aniso_flat.shape[-1]))
+            aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, jnp.ones(aniso_flat.shape[-1]))
             min_aniso = jnp.min(aniso_flat, axis=0)
             max_aniso = jnp.max(aniso_flat, axis=0)
             I_z_list.append(aniso_z)
         I_z = jnp.concat(I_z_list, axis = -1)
         
-    plot_inducing_points(dev_z, vol_z, dev_flat, vol_flat, save_path)
+    plot_inducing_points(dev_z, vol_z, dev_flat, vol_flat, save_path, aniso_z=aniso_z, aniso_I=aniso_flat, feature_extractor=extractor)
 
     # Setup random key
     key = jax.random.PRNGKey(args.seed)
