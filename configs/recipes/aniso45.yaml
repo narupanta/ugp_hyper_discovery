@@ -7,11 +7,11 @@ material_model_name: aniso45
 material_params:
   dev_params: [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   vol_params: [1.0, 0.0, 0.0]
-  aniso_params: [0.7, 0.0, 0.2, 0.0, 0.0, 0.0]
+  aniso_params: [0.7, 0.0, 0.5, 0.0, 0.0, 0.0]
   angles: [45.0]
 disp_noise: 0.0001
 load_noise: 0.01
-target_load_true_top: 2.0
+target_load_true_top: 3.0
 asym_factor: 0.95
 n_loadsteps: 10
 geometry: block
@@ -47,5 +47,5 @@ sobol_samples_factor: 4096
 # 4. Validation Config
 run_validation: 0
 val_load_steps_indices: [9]
-seeds: [42]
+seeds: [1,2,3,4,5]
 val_number_samples: 1024
