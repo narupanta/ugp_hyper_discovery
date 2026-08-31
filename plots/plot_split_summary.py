@@ -379,7 +379,7 @@ def main():
             recipe_data = {}
 
     true_val_dict = {}
-    if true_model_name in ["ortho45", "symnonortho60"]:
+    if true_model_name in ["ortho45", "ortho090", "ortho900", "symnonortho60"]:
         true_params_set = {"C10", "D1", "C42", "C62"}
         c10 = recipe_data.get('dev_params', [0.5])[0]
         d1 = recipe_data.get('vol_params', [1.0])[0]

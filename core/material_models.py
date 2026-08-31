@@ -155,9 +155,10 @@ class HyperelasticModel(BaseMaterialModel):
         if len(self.vol_params) < 3:
             self.vol_params += [0.0] * (3 - len(self.vol_params))
 
-        self.aniso_params = list(aniso_params) if aniso_params is not None else [0.0] * 8
-        if len(self.aniso_params) < 8:
-            self.aniso_params += [0.0] * (8 - len(self.aniso_params))
+        if aniso_params is not None:
+            self.aniso_params = list(aniso_params)
+        else:
+            self.aniso_params = [0.0] * 6
 
         self.cap_compression = cap_compression
 
@@ -334,47 +335,121 @@ class CustomGT(HyperelasticModel):
 
 @register_material("aniso30")
 class Aniso30(HyperelasticModel):
-    def __init__(self, c10=0.5, d1=1.0, c42=0.7, theta=jnp.pi/6.0, angles=None, **kwargs):
+    def __init__(self, c10=0.5, d1=1.0, c42=0.7, theta=jnp.pi/6.0, angles=None, dev_params=None, vol_params=None, aniso_params=None, **kwargs):
         if angles is None:
             angles = [float(jnp.degrees(theta))]
+        if dev_params is None:
+            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if vol_params is None:
+            vol_params = [d1, 0.0, 0.0]
+        if aniso_params is None:
+            aniso_params = [c42, 0.0, 0.0, 0.0, 0.0, 0.0]
         super().__init__(
-            dev_params=[c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            vol_params=[d1, 0.0, 0.0],
-            aniso_params=[c42, 0.0, 0.0, 0.0, 0.0, 0.0],
+            dev_params=dev_params,
+            vol_params=vol_params,
+            aniso_params=aniso_params,
             angles=angles,
             **kwargs
         )
-        self.c10, self.d1, self.c42 = c10, d1, c42
+        self.c10 = self.dev_params[0]
+        self.d1 = self.vol_params[0]
+        self.c42 = self.aniso_params[0]
 
 
 @register_material("ortho45")
 class Ortho45(HyperelasticModel):
-    def __init__(self, c10=0.5, d1=1.0, c42=0.7, c62=0.9, theta1=jnp.pi/4.0, theta2=-jnp.pi/4.0, angles=None, **kwargs):
+    def __init__(self, c10=0.5, d1=1.0, c42=0.7, c62=0.9, theta1=jnp.pi/4.0, theta2=-jnp.pi/4.0, angles=None, dev_params=None, vol_params=None, aniso_params=None, **kwargs):
         if angles is None:
             angles = [float(jnp.degrees(theta1)), float(jnp.degrees(theta2))]
+        if dev_params is None:
+            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if vol_params is None:
+            vol_params = [d1, 0.0, 0.0]
+        if aniso_params is None:
+            aniso_params = [c42, 0.0, 0.0, c62, 0.0, 0.0]
         super().__init__(
-            dev_params=[c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            vol_params=[d1, 0.0, 0.0],
-            aniso_params=[c42, 0.0, 0.0, c62, 0.0, 0.0],
+            dev_params=dev_params,
+            vol_params=vol_params,
+            aniso_params=aniso_params,
             angles=angles,
             **kwargs
         )
-        self.c10, self.d1, self.c42, self.c62 = c10, d1, c42, c62
+        self.c10 = self.dev_params[0]
+        self.d1 = self.vol_params[0]
+        self.c42 = self.aniso_params[0]
+        self.c62 = self.aniso_params[3] if len(self.aniso_params) > 3 else self.aniso_params[-1]
+
+
+@register_material("ortho090")
+class Ortho090(HyperelasticModel):
+    def __init__(self, c10=0.5, d1=1.0, c42=0.7, c62=0.7, angles=None, dev_params=None, vol_params=None, aniso_params=None, **kwargs):
+        if angles is None:
+            angles = [0.0, 90.0]
+        if dev_params is None:
+            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if vol_params is None:
+            vol_params = [d1, 0.0, 0.0]
+        if aniso_params is None:
+            aniso_params = [c42, 0.0, 0.0, c62, 0.0, 0.0]
+        super().__init__(
+            dev_params=dev_params,
+            vol_params=vol_params,
+            aniso_params=aniso_params,
+            angles=angles,
+            **kwargs
+        )
+        self.c10 = self.dev_params[0]
+        self.d1 = self.vol_params[0]
+        self.c42 = self.aniso_params[0]
+        self.c62 = self.aniso_params[3] if len(self.aniso_params) > 3 else self.aniso_params[-1]
+
+
+@register_material("ortho900")
+class Ortho900(HyperelasticModel):
+    def __init__(self, c10=0.5, d1=1.0, c42=0.7, c62=0.7, angles=None, dev_params=None, vol_params=None, aniso_params=None, **kwargs):
+        if angles is None:
+            angles = [90.0, 0.0]
+        if dev_params is None:
+            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if vol_params is None:
+            vol_params = [d1, 0.0, 0.0]
+        if aniso_params is None:
+            aniso_params = [c42, 0.0, 0.0, c62, 0.0, 0.0]
+        super().__init__(
+            dev_params=dev_params,
+            vol_params=vol_params,
+            aniso_params=aniso_params,
+            angles=angles,
+            **kwargs
+        )
+        self.c10 = self.dev_params[0]
+        self.d1 = self.vol_params[0]
+        self.c42 = self.aniso_params[0]
+        self.c62 = self.aniso_params[3] if len(self.aniso_params) > 3 else self.aniso_params[-1]
 
 
 @register_material("symnonortho60")
 class SymNonOrtho60(HyperelasticModel):
-    def __init__(self, c10=0.5, d1=1.0, c42=0.7, c62=0.9, theta1=jnp.pi/3.0, theta2=-jnp.pi/3.0, angles=None, **kwargs):
+    def __init__(self, c10=0.5, d1=1.0, c42=0.7, c62=0.9, theta1=jnp.pi/3.0, theta2=-jnp.pi/3.0, angles=None, dev_params=None, vol_params=None, aniso_params=None, **kwargs):
         if angles is None:
             angles = [float(jnp.degrees(theta1)), float(jnp.degrees(theta2))]
+        if dev_params is None:
+            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if vol_params is None:
+            vol_params = [d1, 0.0, 0.0]
+        if aniso_params is None:
+            aniso_params = [c42, 0.0, 0.0, c62, 0.0, 0.0]
         super().__init__(
-            dev_params=[c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            vol_params=[d1, 0.0, 0.0],
-            aniso_params=[c42, 0.0, 0.0, c62, 0.0, 0.0],
+            dev_params=dev_params,
+            vol_params=vol_params,
+            aniso_params=aniso_params,
             angles=angles,
             **kwargs
         )
-        self.c10, self.d1, self.c42, self.c62 = c10, d1, c42, c62
+        self.c10 = self.dev_params[0]
+        self.d1 = self.vol_params[0]
+        self.c42 = self.aniso_params[0]
+        self.c62 = self.aniso_params[3] if len(self.aniso_params) > 3 else self.aniso_params[-1]
 
 
 @register_material("ogden")

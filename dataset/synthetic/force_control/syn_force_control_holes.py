@@ -321,6 +321,10 @@ if __name__ == "__main__" :
     parser.add_argument('--raw_data_dir', type=str, default="dataset/synthetic/force_control")
     parser.add_argument('--precomputed_dir', type=str, default="dataset/preprocessed/syn_f")
     parser.add_argument('--mesh_size', type=float, default=0.05)
+    parser.add_argument('--angles', type=float, nargs='+', default=None)
+    parser.add_argument('--dev_params', type=float, nargs='+', default=None)
+    parser.add_argument('--vol_params', type=float, nargs='+', default=None)
+    parser.add_argument('--aniso_params', type=float, nargs='+', default=None)
     args = parser.parse_args()
 
     material_model_name = args.model
@@ -409,7 +413,12 @@ if __name__ == "__main__" :
     save_path.mkdir(parents=True, exist_ok=True)
     # get I_obs_all.npy
 
-    true_material_model = get_material_from_config(config)
+    mat_kwargs = {}
+    if args.angles is not None: mat_kwargs["angles"] = args.angles
+    if args.dev_params is not None: mat_kwargs["dev_params"] = args.dev_params
+    if args.vol_params is not None: mat_kwargs["vol_params"] = args.vol_params
+    if args.aniso_params is not None: mat_kwargs["aniso_params"] = args.aniso_params
+    true_material_model = get_material(material_model_name, **mat_kwargs)
     true_piola_stress_func = lambda f : true_material_model.P(fto3x3(f))[:2, :2]
 
     # Define constitutive relationship.
@@ -497,7 +506,7 @@ if __name__ == "__main__" :
     # node_type[jax.vmap(right)(node_coords)] = 3
     # node_type[jax.vmap(top)(node_coords)] = 4
     
-    true_mat_model = get_material(material_model_name)
+    true_mat_model = true_material_model
     psi_true_func = lambda f: true_mat_model.psi(f)
     piola_true_func = lambda f: true_mat_model.P(f)
 

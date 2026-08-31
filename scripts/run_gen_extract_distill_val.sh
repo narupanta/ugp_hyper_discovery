@@ -172,6 +172,25 @@ if [ "$GEOMETRY" == "" ] || [ "$GEOMETRY" == "null" ]; then
     GEOMETRY="block"
 fi
 
+# Material Parameter Overrides
+ANGLES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); a=d.get('material_params', {}).get('angles', d.get('angles', None)); print(*(a if isinstance(a, list) else [a])) if a is not None else None" 2>/dev/null || true)
+DEV_PARAMS=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); a=d.get('material_params', {}).get('dev_params', None); print(*(a if isinstance(a, list) else [a])) if a is not None else None" 2>/dev/null || true)
+VOL_PARAMS=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); a=d.get('material_params', {}).get('vol_params', None); print(*(a if isinstance(a, list) else [a])) if a is not None else None" 2>/dev/null || true)
+ANISO_PARAMS=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); a=d.get('material_params', {}).get('aniso_params', None); print(*(a if isinstance(a, list) else [a])) if a is not None else None" 2>/dev/null || true)
+
+MAT_EXTRA_ARGS=""
+if [ -n "$ANGLES" ]; then
+    MAT_EXTRA_ARGS="$MAT_EXTRA_ARGS --angles $ANGLES"
+fi
+if [ -n "$DEV_PARAMS" ]; then
+    MAT_EXTRA_ARGS="$MAT_EXTRA_ARGS --dev_params $DEV_PARAMS"
+fi
+if [ -n "$VOL_PARAMS" ]; then
+    MAT_EXTRA_ARGS="$MAT_EXTRA_ARGS --vol_params $VOL_PARAMS"
+fi
+if [ -n "$ANISO_PARAMS" ]; then
+    MAT_EXTRA_ARGS="$MAT_EXTRA_ARGS --aniso_params $ANISO_PARAMS"
+fi
 
 CURRENT_TIME=$(date +"%Y%m%dT%H%M%S")
 
@@ -194,7 +213,8 @@ else
         --asym "$ASYM" \
         --n_steps "$STEPS" \
         --geometry "$GEOMETRY" \
-        --mesh_size "$MESH_SIZE"
+        --mesh_size "$MESH_SIZE" \
+        $MAT_EXTRA_ARGS
     echo "✅ Step 1 (Data Generation) completed."
 fi
 
@@ -209,6 +229,8 @@ for SEED in $SEEDS_LIST; do
     DISTILL_SEED_DIR="distillation/distilled_models/${FOLDER_NAME}"
     mkdir -p "$EXTRACT_SEED_DIR"
     mkdir -p "$DISTILL_SEED_DIR"
+    cp "$YAML_FILE" "$EXTRACT_SEED_DIR/recipe_config.yaml" 2>/dev/null || true
+    cp "$YAML_FILE" "$DISTILL_SEED_DIR/recipe_config.yaml" 2>/dev/null || true
 
     if [ "$SKIP_EXT" == "true" ]; then
         echo "⏭️ Skipping Step 2 (UGP Extraction Training) as requested."
@@ -235,7 +257,8 @@ for SEED in $SEEDS_LIST; do
             --model_mode "$MODEL_MODE" \
             --covariance_mode "$COVARIANCE_MODE" \
             --seed "$SEED" \
-            --batch_dir "$EXTRACT_SEED_DIR"
+            --batch_dir "$EXTRACT_SEED_DIR" \
+            $MAT_EXTRA_ARGS
         echo "✅ Step 2 (Extraction for Seed $SEED) completed."
     fi
 
@@ -247,7 +270,7 @@ for SEED in $SEEDS_LIST; do
     # Find extraction directory matching this seed or use override/fallback
     if [ -n "$EXTRACTION_DIR_OVERRIDE" ] && [ -d "$EXTRACTION_DIR_OVERRIDE" ]; then
         SAVED_DIR="$EXTRACTION_DIR_OVERRIDE"
-    elif [ -d "$EXTRACT_SEED_DIR" ] && [ -f "${EXTRACT_SEED_DIR}/sparse_gp_final.npz" ]; then
+    elif [ -d "$EXTRACT_SEED_DIR" ] && [ -f "${EXTRACT_SEED_DIR}/best_params.npy" ]; then
         SAVED_DIR="$EXTRACT_SEED_DIR"
     else
         SAVED_DIR=$(ls -td extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}*_${SEED} extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}* 2>/dev/null | head -1)
@@ -273,8 +296,32 @@ for SEED in $SEEDS_LIST; do
         else
             SHARED_OUT_DIR="$DISTILL_SEED_DIR"
         fi
+        mkdir -p "$SHARED_OUT_DIR"
+        cp "$YAML_FILE" "$SHARED_OUT_DIR/recipe_config.yaml" 2>/dev/null || true
 
         if [ "$DIST_TARGET" == "sef_split" ]; then
+            if [ "$SAMPLE_MODE" == "dataset_all" ]; then
+                EXPORT_SUB="pytorch_export_dataset_all"
+            elif [ "$SAMPLE_MODE" == "dataset_f" ]; then
+                EXPORT_SUB="pytorch_export_dataset_f_n${NUM_POINTS}"
+            elif [ "$SAMPLE_MODE" == "standard_interp" ]; then
+                EXPORT_SUB="pytorch_export_standard_interp"
+            elif [ "$SAMPLE_MODE" == "inducing_points" ]; then
+                EXPORT_SUB="pytorch_export_inducing_points"
+            else
+                EXPORT_SUB="pytorch_export_standard_g${MAX_GAMMA}"
+            fi
+            if [ ! -f "${SAVED_DIR}/${EXPORT_SUB}/mean_dev.npy" ]; then
+                echo "Exporting GP to PyTorch format before parallel distillation..."
+                python3 distillation/export_gp_to_pytorch.py \
+                    --saved_model_dir "$SAVED_DIR" \
+                    --sample_mode "$SAMPLE_MODE" \
+                    --num_points "$NUM_POINTS" \
+                    --max_gamma "$MAX_GAMMA" \
+                    --distill_target "$DIST_TARGET" \
+                    --export_subfolder "$EXPORT_SUB"
+            fi
+
             echo "Distilling DEV component into $SHARED_OUT_DIR ($DEV_VOL_DIST_ITERS iters)..."
             python3 distillation/distill_uqmodeldisc.py \
                 --saved_model_dir "$SAVED_DIR" \

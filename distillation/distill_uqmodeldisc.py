@@ -1,5 +1,6 @@
 import sys
 import os
+import subprocess
 import argparse
 import numpy as np
 import datetime
@@ -732,7 +733,7 @@ def main():
         true_model = get_material(true_model_name, jit_P=False)
         
         true_params = {}
-        if true_model_name in ["ortho45", "symnonortho60"]:
+        if true_model_name in ["ortho45", "ortho090", "ortho900", "symnonortho60"]:
             true_params = {
                 "$C_{10}$": 0.5, "$C_{01}$": 0.0, "$C_{20}$": 0.0, "$C_{11}$": 0.0, "$C_{02}$": 0.0,
                 "$C_{30}$": 0.0, "$C_{21}$": 0.0, "$C_{12}$": 0.0, "$C_{03}$": 0.0,
@@ -767,6 +768,20 @@ def main():
             out_dir = os.path.abspath(os.path.join("distillation/distilled_models", saved_dir_name))
         log_mode = "w"
     os.makedirs(out_dir, exist_ok=True)
+
+    # Save distillation configuration
+    import json
+    import yaml
+    config_dict = vars(args)
+    with open(os.path.join(out_dir, "config.json"), "w") as f:
+        json.dump(config_dict, f, indent=4)
+    with open(os.path.join(out_dir, "config.yaml"), "w") as f:
+        yaml.dump(config_dict, f, default_flow_style=False)
+    if args.distill_target == "sef_split":
+        with open(os.path.join(out_dir, pfx("config.json")), "w") as f:
+            json.dump(config_dict, f, indent=4)
+        with open(os.path.join(out_dir, pfx("config.yaml")), "w") as f:
+            yaml.dump(config_dict, f, default_flow_style=False)
     
     with open(os.path.join(out_dir, pfx("source_extraction_dir.txt")), "w") as f:
         f.write(args.saved_model_dir)
@@ -1282,12 +1297,12 @@ def main():
     try:
         active_params_str = ",".join(model.parameter_names)
         
-        base_cmd = ["python3", "--distilled_dir", out_dir, "--active_params", active_params_str]
+        args_tail = ["--distilled_dir", out_dir, "--active_params", active_params_str]
         if args.distill_target == "sef_split":
-            base_cmd.extend(["--component", args.component, "--distill_target", args.distill_target])
+            args_tail.extend(["--component", args.component, "--distill_target", args.distill_target])
             
-        subprocess.run([base_cmd[0], "plots/plot_invariant_sensitivity.py"] + base_cmd[1:], check=True)
-        subprocess.run([base_cmd[0], "plots/plot_invariant_sensitivity_3d_pairs.py"] + base_cmd[1:], check=True)
+        subprocess.run(["python3", "plots/plot_invariant_sensitivity.py"] + args_tail, check=True)
+        subprocess.run(["python3", "plots/plot_invariant_sensitivity_3d_pairs.py"] + args_tail, check=True)
 
     except Exception as e:
         print(f"Error running invariant sensitivity plots: {e}")

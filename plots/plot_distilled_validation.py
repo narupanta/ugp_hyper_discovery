@@ -189,7 +189,7 @@ def main():
     has_aniso = os.path.exists(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
     
     true_params = {}
-    if true_model_name in ["ortho45", "symnonortho60"]:
+    if true_model_name in ["ortho45", "ortho090", "ortho900", "symnonortho60"]:
         true_params = {
             "$C_{10}$": 0.5, "$C_{01}$": 0.0, "$C_{20}$": 0.0, "$C_{11}$": 0.0, "$C_{02}$": 0.0,
             "$C_{30}$": 0.0, "$C_{21}$": 0.0, "$C_{12}$": 0.0, "$C_{03}$": 0.0,

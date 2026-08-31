@@ -206,7 +206,7 @@ def main():
         
         for p in reversed(all_parts):
             subparts = p.split('_')
-            for model_candidate in ["ortho45", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
+            for model_candidate in ["ortho45", "ortho090", "ortho900", "symnonortho60", "aniso30", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
                 if model_candidate in subparts:
                     ugp_model_name = model_candidate
                     break

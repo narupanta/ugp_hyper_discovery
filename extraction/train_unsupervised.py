@@ -64,6 +64,10 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42, help="Random seed for PRNGKey")
     parser.add_argument('--batch_dir', type=str, default="", help="If provided, models are saved into batch_dir/seed")
     parser.add_argument("--covariance_mode", type=str, default="diag", choices=["diag", "full", "whitened_diag", "whitened_full"], help="Covariance matrix parameterization for inducing points.")
+    parser.add_argument('--angles', type=float, nargs='+', default=None)
+    parser.add_argument('--dev_params', type=float, nargs='+', default=None)
+    parser.add_argument('--vol_params', type=float, nargs='+', default=None)
+    parser.add_argument('--aniso_params', type=float, nargs='+', default=None)
 
     return parser.parse_args()
 
@@ -166,6 +170,15 @@ if __name__ == "__main__" :
         
     os.makedirs(save_path, exist_ok=True)
 
+    # Save training configuration
+    import json
+    import yaml
+    config_dict = vars(args)
+    with open(os.path.join(save_path, "config.json"), "w") as f:
+        json.dump(config_dict, f, indent=4)
+    with open(os.path.join(save_path, "config.yaml"), "w") as f:
+        yaml.dump(config_dict, f, default_flow_style=False)
+
     # load precomputed dataset
     from core.datasetclass import DatasetFactory
     data_dir = "dataset/preprocessed/syn_f" if os.path.exists("dataset/preprocessed/syn_f") else "dataset/precomputed_vfm" 
@@ -185,7 +198,12 @@ if __name__ == "__main__" :
     load_noise_std = prep_data["load_noise_std"]
     load_noise_std_steps = prep_data["load_noise_std_steps"][train_load_steps_indices] 
 
-    true_mat_model = get_material(material_model_name)
+    mat_kwargs = {}
+    if args.angles is not None: mat_kwargs["angles"] = args.angles
+    if args.dev_params is not None: mat_kwargs["dev_params"] = args.dev_params
+    if args.vol_params is not None: mat_kwargs["vol_params"] = args.vol_params
+    if args.aniso_params is not None: mat_kwargs["aniso_params"] = args.aniso_params
+    true_mat_model = get_material(material_model_name, **mat_kwargs)
     psi_true_func = lambda f: true_mat_model.psi(f)
     piola_true_func = lambda f: true_mat_model.P(f)
 
