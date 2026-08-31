@@ -221,7 +221,7 @@ class HyperelasticModel(BaseMaterialModel):
         i1_dev = I3_safe ** (-1 / 3) * I1
         i2_dev = I3_safe ** (-2 / 3) * I2
         J = jnp.sqrt(I3_safe)
-        C_bar = (I3_safe ** (-1 / 3))[..., None, None] * C
+        C_bar = (I3_safe ** (-1 / 3)) * C
         return F_3d, C_bar, i1_dev, i2_dev, J
 
     def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
@@ -418,6 +418,14 @@ class Aniso30(HyperelasticModel):
     def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, **kwargs):
         if dev_params is None or vol_params is None or aniso_params is None or angles is None:
             raise ValueError("Aniso30 requires 'dev_params', 'vol_params', 'aniso_params', and 'angles' from configuration.")
+        super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
+
+
+@register_material("aniso45")
+class Aniso45(HyperelasticModel):
+    def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, **kwargs):
+        if dev_params is None or vol_params is None or aniso_params is None or angles is None:
+            raise ValueError("Aniso45 requires 'dev_params', 'vol_params', 'aniso_params', and 'angles' from configuration.")
         super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
 
 

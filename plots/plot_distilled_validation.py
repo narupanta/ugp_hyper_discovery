@@ -43,11 +43,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, default=None)
     parser.add_argument("--distilled_dir", type=str, required=True)
-    parser.add_argument("--material_model", type=str, required=True, choices=["ogden", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
-    parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
+    parser.add_argument("--material_model", type=str, default=None, choices=["ogden", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
+    parser.add_argument("--distill_target", type=str, default="sef_split", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
     args = parser.parse_args()
     
-    distilled_dir = args.distilled_dir
+    distilled_dir = os.path.abspath(args.distilled_dir)
+    if args.material_model is None:
+        if os.path.exists(os.path.join(distilled_dir, "aniso_flow_samples.npy")):
+            args.material_model = "gmr_aniso"
+        else:
+            args.material_model = "gmr"
     saved_model_dir = args.saved_model_dir
     
     if saved_model_dir is None:
@@ -63,7 +68,10 @@ def main():
             raise ValueError(f"saved_model_dir must be provided if {source_file} does not exist.")
     
     from core.material_models import get_material_from_dir
-    true_model = get_material_from_dir(saved_model_dir, jit_P=False)
+    try:
+        true_model = get_material_from_dir(saved_model_dir, jit_P=False)
+    except FileNotFoundError:
+        true_model = get_material_from_dir(distilled_dir, jit_P=False)
     true_model_name = infer_material_model_name(saved_model_dir)
     
     # 2. Load GP Model
@@ -247,17 +255,17 @@ def main():
                         C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
 
         def get_distilled_energy_stress_split(theta_dev, theta_vol, F_chunk):
-            dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
-            vol_theta = [0.0]*9 + list(theta_vol)
-            mat_dev = get_material("gmr", dev_params=dev_theta[:9], vol_params=dev_theta[9:12], jit_P=False)
-            mat_vol = get_material("gmr", dev_params=vol_theta[:9], vol_params=vol_theta[9:12], jit_P=False)
+            dev_theta = list(theta_dev) + [0.0] * max(0, 10 - len(theta_dev))
+            vol_theta = list(theta_vol) + [0.0] * max(0, 3 - len(theta_vol))
+            mat_dev = get_material("gmr", dev_params=dev_theta[:10], vol_params=[0.0, 0.0, 0.0], jit_P=False)
+            mat_vol = get_material("gmr", dev_params=[0.0]*10, vol_params=vol_theta[:3], jit_P=False)
             return jax.vmap(mat_dev.psi)(F_chunk), jax.vmap(mat_vol.psi)(F_chunk), jax.vmap(mat_dev.P)(F_chunk) + jax.vmap(mat_vol.P)(F_chunk)
 
         def get_distilled_energy_stress_split_3(theta_dev, theta_vol, theta_aniso, F_chunk):
-            dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
-            vol_theta = [0.0]*9 + list(theta_vol)
-            mat_dev = get_material("gmr", dev_params=dev_theta[:9], vol_params=dev_theta[9:12], jit_P=False)
-            mat_vol = get_material("gmr", dev_params=vol_theta[:9], vol_params=vol_theta[9:12], jit_P=False)
+            dev_theta = list(theta_dev) + [0.0] * max(0, 10 - len(theta_dev))
+            vol_theta = list(theta_vol) + [0.0] * max(0, 3 - len(theta_vol))
+            mat_dev = get_material("gmr", dev_params=dev_theta[:10], vol_params=[0.0, 0.0, 0.0], jit_P=False)
+            mat_vol = get_material("gmr", dev_params=[0.0]*10, vol_params=vol_theta[:3], jit_P=False)
             
             p_aniso_single = jax.grad(lambda f: psi_aniso_single(theta_aniso, f))
             s_psi_aniso = jax.vmap(lambda f: psi_aniso_single(theta_aniso, f))(F_chunk)

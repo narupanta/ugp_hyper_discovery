@@ -104,12 +104,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, default=None)
     parser.add_argument("--distilled_dir", type=str, required=True)
-    parser.add_argument("--material_model", type=str, required=True)
+    parser.add_argument("--material_model", type=str, default=None)
     parser.add_argument("--distill_target", type=str, default="sef_split")
     parser.add_argument("--sobol_threshold", type=float, default=0.0001)
     args = parser.parse_args()
     
-    distilled_dir = args.distilled_dir
+    distilled_dir = os.path.abspath(args.distilled_dir)
+    if args.material_model is None:
+        args.material_model = infer_material_model_name(distilled_dir)
+    true_model_name = args.material_model
     saved_model_dir = args.saved_model_dir
     
     if saved_model_dir is None:
@@ -123,7 +126,10 @@ def main():
             raise ValueError("saved_model_dir not found.")
 
     from core.material_models import get_material_from_dir
-    true_model = get_material_from_dir(saved_model_dir, jit_P=False)
+    try:
+        true_model = get_material_from_dir(saved_model_dir, jit_P=False)
+    except FileNotFoundError:
+        true_model = get_material_from_dir(distilled_dir, jit_P=False)
     true_model_name = infer_material_model_name(saved_model_dir)
     
     best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
@@ -215,10 +221,27 @@ def main():
     num_samples = 32
     has_aniso = os.path.exists(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
     
+    all_dev_names = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E"]
+    all_vol_names = ["D1", "D2", "D3"]
+    all_aniso_names = ["C42", "C43", "C44", "C62", "C63", "C64"]
+    
     if args.distill_target == "sef_split":
-        dev_samples = np.load(os.path.join(distilled_dir, "dev_flow_samples.npy"))[:num_samples]
-        vol_samples = np.load(os.path.join(distilled_dir, "vol_flow_samples.npy"))[:num_samples]
-        aniso_samples = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy"))[:num_samples] if has_aniso else None
+        dev_raw = np.load(os.path.join(distilled_dir, "dev_flow_samples.npy"))
+        vol_raw = np.load(os.path.join(distilled_dir, "vol_flow_samples.npy"))
+        aniso_raw = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy")) if has_aniso else None
+        
+        # Pad filtered-out parameters with 0.0
+        dev_samples = np.zeros((min(num_samples, dev_raw.shape[0]), 10))
+        dev_samples[:, :dev_raw.shape[1]] = dev_raw[:num_samples, :10]
+        
+        vol_samples = np.zeros((min(num_samples, vol_raw.shape[0]), 3))
+        vol_samples[:, :vol_raw.shape[1]] = vol_raw[:num_samples, :3]
+        
+        if has_aniso and aniso_raw is not None:
+            aniso_samples = np.zeros((min(num_samples, aniso_raw.shape[0]), 6))
+            aniso_samples[:, :aniso_raw.shape[1]] = aniso_raw[:num_samples, :6]
+        else:
+            aniso_samples = None
         
         def psi_aniso_single(theta_aniso, F_single):
             if F_single.shape == (2, 2):
@@ -241,30 +264,23 @@ def main():
             I4_bar_2 = jnp.einsum('i,ij,j->', a2, C_bar, a2)
             I4_m1 = I4_bar_1 - 1.0
             I6_m1 = I4_bar_2 - 1.0
-            if len(theta_aniso) == 6:
-                C42, C43, C44, C62, C63, C64 = theta_aniso[:6]
-                return (C42 * I4_m1**2 + C43 * I4_m1**3 + C44 * I4_m1**4 +
-                        C62 * I6_m1**2 + C63 * I6_m1**3 + C64 * I6_m1**4)
-            else:
-                ta = list(theta_aniso) + [0.0] * (8 - len(theta_aniso))
-                C42, C44, k1, k2, C62, C64, k3, k4 = ta[:8]
-                exp_arg1 = jnp.clip(k2 * I4_m1**2, -30.0, 30.0)
-                exp_arg2 = jnp.clip(k4 * I6_m1**2, -30.0, 30.0)
-                return (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (jnp.exp(exp_arg1) - 1.0) +
-                        C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
+            ta = list(theta_aniso) + [0.0] * max(0, 6 - len(theta_aniso))
+            C42, C43, C44, C62, C63, C64 = ta[:6]
+            return (C42 * I4_m1**2 + C43 * I4_m1**3 + C44 * I4_m1**4 +
+                    C62 * I6_m1**2 + C63 * I6_m1**3 + C64 * I6_m1**4)
 
         def get_distilled_energy_stress_split(theta_dev, theta_vol, F_chunk):
-            dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
-            vol_theta = [0.0]*9 + list(theta_vol)
-            mat_dev = get_material("gmr", dev_params=dev_theta[:9], vol_params=dev_theta[9:12], jit_P=False)
-            mat_vol = get_material("gmr", dev_params=vol_theta[:9], vol_params=vol_theta[9:12], jit_P=False)
+            dev_theta = list(theta_dev) + [0.0] * max(0, 10 - len(theta_dev))
+            vol_theta = list(theta_vol) + [0.0] * max(0, 3 - len(theta_vol))
+            mat_dev = get_material("gmr", dev_params=dev_theta[:10], vol_params=[0.0, 0.0, 0.0], jit_P=False)
+            mat_vol = get_material("gmr", dev_params=[0.0]*10, vol_params=vol_theta[:3], jit_P=False)
             return jax.vmap(mat_dev.psi)(F_chunk) + jax.vmap(mat_vol.psi)(F_chunk)
 
         def get_distilled_energy_stress_split_3(theta_dev, theta_vol, theta_aniso, F_chunk):
-            dev_theta = list(theta_dev) + [0.0, 0.0, 0.0]
-            vol_theta = [0.0]*9 + list(theta_vol)
-            mat_dev = get_material("gmr", dev_params=dev_theta[:9], vol_params=dev_theta[9:12], jit_P=False)
-            mat_vol = get_material("gmr", dev_params=vol_theta[:9], vol_params=vol_theta[9:12], jit_P=False)
+            dev_theta = list(theta_dev) + [0.0] * max(0, 10 - len(theta_dev))
+            vol_theta = list(theta_vol) + [0.0] * max(0, 3 - len(theta_vol))
+            mat_dev = get_material("gmr", dev_params=dev_theta[:10], vol_params=[0.0, 0.0, 0.0], jit_P=False)
+            mat_vol = get_material("gmr", dev_params=[0.0]*10, vol_params=vol_theta[:3], jit_P=False)
             s_psi_aniso = jax.vmap(lambda f: psi_aniso_single(theta_aniso, f))(F_chunk)
             return jax.vmap(mat_dev.psi)(F_chunk) + jax.vmap(mat_vol.psi)(F_chunk) + s_psi_aniso
             
@@ -304,23 +320,30 @@ def main():
     if is_split:
         dev = np.load(os.path.join(distilled_dir, "dev_flow_samples.npy"))
         vol = np.load(os.path.join(distilled_dir, "vol_flow_samples.npy"))
-        all_samples = [dev, vol]
-        all_dev_names = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E"]
-        all_vol_names = ["D1", "D2", "D3"]
-        full_param_names = all_dev_names[:dev.shape[1]] + all_vol_names[:vol.shape[1]]
+        aniso = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy")) if has_aniso else None
         
-        if has_aniso:
-            aniso = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
-            all_samples.append(aniso)
-            if aniso.shape[1] == 6:
-                all_aniso_names = ["C42", "C43", "C44", "C62", "C63", "C64"]
-            else:
-                all_aniso_names = ["C42", "C44", "k1", "k2", "C62", "C64", "k3", "k4"]
-            full_param_names += all_aniso_names[:aniso.shape[1]]
+        min_len = min(dev.shape[0], vol.shape[0])
+        if has_aniso and aniso is not None:
+            min_len = min(min_len, aniso.shape[0])
             
-        min_len = min(s.shape[0] for s in all_samples)
-        samples_np = np.hstack([s[:min_len] for s in all_samples])
-        df = pd.DataFrame(samples_np, columns=full_param_names)
+        data_dict = {}
+        for idx, name in enumerate(all_dev_names):
+            if idx < dev.shape[1]:
+                data_dict[name] = dev[:min_len, idx]
+            else:
+                data_dict[name] = np.zeros(min_len)
+        for idx, name in enumerate(all_vol_names):
+            if idx < vol.shape[1]:
+                data_dict[name] = vol[:min_len, idx]
+            else:
+                data_dict[name] = np.zeros(min_len)
+        if has_aniso and aniso is not None:
+            for idx, name in enumerate(all_aniso_names):
+                if idx < aniso.shape[1]:
+                    data_dict[name] = aniso[:min_len, idx]
+                else:
+                    data_dict[name] = np.zeros(min_len)
+        df = pd.DataFrame(data_dict)
 
     # Calculate cumulative RMSE
     rmse_history = []
@@ -329,18 +352,18 @@ def main():
             active_params_k = sorted_params[:k]
             
             # Construct mean parameters
-            theta_dev = np.zeros(9)
+            theta_dev = np.zeros(10)
             theta_vol = np.zeros(3)
-            theta_aniso = np.zeros(6 if has_aniso and aniso.shape[1] == 6 else 8)
+            theta_aniso = np.zeros(6)
             
             for p in active_params_k:
                 clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
                 if clean_p in df.columns:
-                    mean_val = df[clean_p].values.mean()
+                    mean_val = float(df[clean_p].values.mean())
                     if param_types.get(p) == "dev":
                         if clean_p in all_dev_names:
                             idx = all_dev_names.index(clean_p)
-                            if idx < 9:
+                            if idx < 10:
                                 theta_dev[idx] = mean_val
                     elif param_types.get(p) == "vol":
                         if clean_p in all_vol_names:
@@ -350,7 +373,7 @@ def main():
                     elif param_types.get(p) == "aniso" and has_aniso:
                         if clean_p in all_aniso_names:
                             idx = all_aniso_names.index(clean_p)
-                            if idx < 8:
+                            if idx < 6:
                                 theta_aniso[idx] = mean_val
                     
             # Compute RMSE across all modes
@@ -368,65 +391,24 @@ def main():
     else:
         rmse_history = [0.0] * len(sorted_params)
 
-    # Try reading ground truth parameters directly from recipe config YAML
-    recipe_file = f"configs/recipes/{true_model_name}.yaml"
-    recipe_data = {}
-    if os.path.exists(recipe_file):
-        try:
-            import yaml
-            with open(recipe_file, 'r') as rf:
-                recipe_data = yaml.safe_load(rf).get('material_params', {})
-        except Exception:
-            recipe_data = {}
-
+    # Dynamic ground truth parameters from true_model
     true_val_dict = {}
-    if true_model_name in ["ortho45", "ortho090", "ortho900", "symnonortho60"]:
-        true_params_set = {"C10", "D1", "C42", "C62"}
-        c10 = recipe_data.get('dev_params', [0.5])[0]
-        d1 = recipe_data.get('vol_params', [1.0])[0]
-        aniso_p = recipe_data.get('aniso_params', [0.7, 0.0, 0.9])
-        c42 = aniso_p[0] if len(aniso_p) > 0 else 0.7
-        c62 = aniso_p[2] if len(aniso_p) > 2 else 0.9
-        true_val_dict = {"C10": c10, "D1": d1, "C42": c42, "C62": c62}
-    elif true_model_name == "aniso30":
-        true_params_set = {"C10", "D1", "C42"}
-        c10 = recipe_data.get('dev_params', [0.5])[0]
-        d1 = recipe_data.get('vol_params', [1.0])[0]
-        aniso_p = recipe_data.get('aniso_params', [0.7])
-        c42 = aniso_p[0] if len(aniso_p) > 0 else 0.7
-        true_val_dict = {"C10": c10, "D1": d1, "C42": c42}
-    elif true_model_name in ["c20d10d05", "c20_d10_d05"]:
-        true_params_set = {"C10", "D1", "D2"}
-        c10 = recipe_data.get('dev_params', [2.0])[0]
-        vol_p = recipe_data.get('vol_params', [1.0, 0.5])
-        d1 = vol_p[0] if len(vol_p) > 0 else 1.0
-        d2 = vol_p[1] if len(vol_p) > 1 else 0.5
-        true_val_dict = {"C10": c10, "D1": d1, "D2": d2}
-    elif true_model_name in ["nh2", "neohookean2", "nh"]:
-        true_params_set = {"C10", "D1"}
-        c10 = recipe_data.get('dev_params', [0.5])[0]
-        d1 = recipe_data.get('vol_params', [1.5])[0]
-        true_val_dict = {"C10": c10, "D1": d1}
-    elif true_model_name == "isihara":
-        true_params_set = {"C10", "C01", "C20", "D1"}
-        dev_p = recipe_data.get('dev_params', [0.5, 1.0, 1.0])
-        c10 = dev_p[0] if len(dev_p) > 0 else 0.5
-        c01 = dev_p[1] if len(dev_p) > 1 else 1.0
-        c20 = dev_p[2] if len(dev_p) > 2 else 1.0
-        d1 = recipe_data.get('vol_params', [1.5])[0]
-        true_val_dict = {"C10": c10, "C01": c01, "C20": c20, "D1": d1}
-    elif true_model_name == "gentthomas":
-        true_params_set = {"C10", "E", "D1"}
-        dev_p = recipe_data.get('dev_params', [0.5, 1.0])
-        c10 = dev_p[0] if len(dev_p) > 0 else 0.5
-        e_param = dev_p[1] if len(dev_p) > 1 else 1.0
-        d1 = recipe_data.get('vol_params', [1.5])[0]
-        true_val_dict = {"C10": c10, "E": e_param, "D1": d1}
-    else:
-        true_params_set = {"C10", "D1"}
-        c10 = recipe_data.get('dev_params', [0.5])[0]
-        d1 = recipe_data.get('vol_params', [1.5])[0]
-        true_val_dict = {"C10": c10, "D1": d1}
+    true_params_set = set()
+    if hasattr(true_model, "dev_params") and true_model.dev_params is not None:
+        for name, val in zip(all_dev_names, true_model.dev_params):
+            if abs(val) > 1e-12:
+                true_params_set.add(name)
+                true_val_dict[name] = float(val)
+    if hasattr(true_model, "vol_params") and true_model.vol_params is not None:
+        for name, val in zip(all_vol_names, true_model.vol_params):
+            if abs(val) > 1e-12:
+                true_params_set.add(name)
+                true_val_dict[name] = float(val)
+    if hasattr(true_model, "aniso_params") and true_model.aniso_params is not None:
+        for name, val in zip(all_aniso_names, true_model.aniso_params):
+            if abs(val) > 1e-12:
+                true_params_set.add(name)
+                true_val_dict[name] = float(val)
 
 
     # Figure dimensions
