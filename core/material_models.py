@@ -221,7 +221,7 @@ class HyperelasticModel(BaseMaterialModel):
         i1_dev = I3_safe ** (-1 / 3) * I1
         i2_dev = I3_safe ** (-2 / 3) * I2
         J = jnp.sqrt(I3_safe)
-        C_bar = (I3_safe ** (-1 / 3)) * C
+        C_bar = (I3_safe ** (-1 / 3))[..., None, None] * C
         return F_3d, C_bar, i1_dev, i2_dev, J
 
     def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
