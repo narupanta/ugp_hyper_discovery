@@ -117,8 +117,9 @@ def main():
         if saved_model_dir is None:
             raise ValueError("saved_model_dir not found.")
 
+    from core.material_models import get_material_from_dir
+    true_model = get_material_from_dir(saved_model_dir, jit_P=False)
     true_model_name = infer_material_model_name(saved_model_dir)
-    true_model = get_material(true_model_name, jit_P=False)
     
     best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
     gp_params = GPRawParams(**best_params_dict)

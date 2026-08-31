@@ -239,7 +239,8 @@ if __name__ == "__main__" :
     save_path.mkdir(parents=True, exist_ok=True)
     # get I_obs_all.npy
 
-    true_material_model = get_material(material_model_name)
+    from core.material_models import get_material_from_dir
+    true_material_model = get_material_from_dir(args.distilled_dir)
     true_piola_stress_func = lambda f : true_material_model.P(fto3x3(f))[:2, :2]
 
     # Define constitutive relationship.
@@ -439,6 +440,14 @@ if __name__ == "__main__" :
                 if args.material_model == "isihara":
                     c10, c01, c20, d1 = params[:4]
                     mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, d1=d1)
+                elif args.material_model in ["gmr_aniso", "aniso_gmr"]:
+                    dev = params[:10]
+                    vol = params[10:13]
+                    aniso = params[13:]
+                    angles = getattr(true_material_model, "angles", None)
+                    a0 = getattr(true_material_model, "a0", None)
+                    a1 = getattr(true_material_model, "a1", None)
+                    mat = get_material("gmr_aniso", dev_params=dev, vol_params=vol, aniso_params=aniso, angles=angles, a0=a0, a1=a1)
                 elif args.material_model in ["gmr", "gmr_log", "gmr_nolog"]:
                     if len(params) == 13:
                         dev = params[:10]
@@ -451,7 +460,9 @@ if __name__ == "__main__" :
                         vol = params[9:12]
                     mat = get_material(args.material_model, dev_params=dev, vol_params=vol)
                 else:
-                    mat = get_material(args.material_model)
+                    dev = params[:min(10, len(params))]
+                    vol = params[min(10, len(params)):min(13, len(params))]
+                    mat = get_material(args.material_model, dev_params=dev, vol_params=vol)
                     
                 problem_pred = HyperElasticity(
                     mesh=mesh,

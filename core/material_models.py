@@ -1,10 +1,11 @@
 # material_models.py
+import os
 from abc import ABC, abstractmethod
 from typing import Dict, Type, Any, Optional, List, Tuple
 import jax
 import jax.numpy as jnp
 
-from .utils import C_func, B_func, I1_func, I2_func, I3_func, J_func
+from .utils import C_func, B_func, I1_func, I2_func, I3_func, J_func, load_model_config
 
 # Registry
 _material_registry: Dict[str, Type["BaseMaterialModel"]] = {}
@@ -26,10 +27,14 @@ def get_material(name: str, **kwargs) -> "BaseMaterialModel":
 
 def get_material_from_config(config: Dict[str, Any], **kwargs) -> "BaseMaterialModel":
     """
-    Instantiate a material model directly from a config dictionary (e.g., loaded from a YAML recipe).
-    Supports either pre-registered model names or custom HyperelasticModel parameter blocks.
+    Instantiate a material model directly from a config dictionary (e.g., loaded from a YAML recipe or config.json).
+    Strictly reads material parameters and raises ValueError if required parameters are missing.
     """
-    model_name = config.get("material_model_name", "neohookean").lower()
+    model_name = config.get("material_model_name", None)
+    if model_name is None:
+        raise ValueError("Config dictionary must contain 'material_model_name'.")
+    model_name = str(model_name).lower()
+    
     mat_params = config.get("material_params", {})
     if not isinstance(mat_params, dict):
         mat_params = {}
@@ -39,21 +44,26 @@ def get_material_from_config(config: Dict[str, Any], **kwargs) -> "BaseMaterialM
     aniso_params = mat_params.get("aniso_params", config.get("aniso_params", None))
     angles = mat_params.get("angles", config.get("angles", None))
     
-    if model_name in ["hyperelastic", "custom_hyperelastic"]:
-        return HyperelasticModel(
-            dev_params=dev_params,
-            vol_params=vol_params,
-            aniso_params=aniso_params,
-            angles=angles,
-            **kwargs
-        )
-    else:
-        extra_kwargs = {**kwargs}
-        if dev_params is not None: extra_kwargs["dev_params"] = dev_params
-        if vol_params is not None: extra_kwargs["vol_params"] = vol_params
-        if aniso_params is not None: extra_kwargs["aniso_params"] = aniso_params
-        if angles is not None: extra_kwargs["angles"] = angles
-        return get_material(model_name, **extra_kwargs)
+    mu_params = mat_params.get("mu_params", config.get("mu_params", None))
+    alpha_params = mat_params.get("alpha_params", config.get("alpha_params", None))
+
+    extra_kwargs = {**kwargs}
+    if dev_params is not None: extra_kwargs["dev_params"] = dev_params
+    if vol_params is not None: extra_kwargs["vol_params"] = vol_params
+    if aniso_params is not None: extra_kwargs["aniso_params"] = aniso_params
+    if angles is not None: extra_kwargs["angles"] = angles
+    if mu_params is not None: extra_kwargs["mu_params"] = mu_params
+    if alpha_params is not None: extra_kwargs["alpha_params"] = alpha_params
+
+    return get_material(model_name, **extra_kwargs)
+
+
+def get_material_from_dir(dir_path: str, **kwargs) -> "BaseMaterialModel":
+    """
+    Instantiate a material model by loading the configuration from a saved model directory.
+    """
+    cfg = load_model_config(dir_path)
+    return get_material_from_config(cfg, **kwargs)
 
 
 class BaseMaterialModel(ABC):
@@ -146,19 +156,37 @@ class HyperelasticModel(BaseMaterialModel):
     ):
         super().__init__(jit_P=jit_P)
         
-        # If parameters are None, default to 0s as specified
-        self.dev_params = list(dev_params) if dev_params is not None else [0.0] * 10
-        if len(self.dev_params) < 10:
-            self.dev_params += [0.0] * (10 - len(self.dev_params))
+        if dev_params is None:
+            raise ValueError(
+                "HyperelasticModel requires 'dev_params' to be explicitly provided (e.g. from recipe configuration). "
+                "Default parameter fallbacks have been removed to prevent silent bugs."
+            )
+        if len(dev_params) != 10:
+            raise ValueError(f"dev_params must have length exactly 10, but got length {len(dev_params)}: {dev_params}")
+        self.dev_params = list(dev_params)
 
-        self.vol_params = list(vol_params) if vol_params is not None else [0.0] * 3
-        if len(self.vol_params) < 3:
-            self.vol_params += [0.0] * (3 - len(self.vol_params))
+        if vol_params is None:
+            raise ValueError(
+                "HyperelasticModel requires 'vol_params' to be explicitly provided (e.g. from recipe configuration). "
+                "Default parameter fallbacks have been removed to prevent silent bugs."
+            )
+        if len(vol_params) != 3:
+            raise ValueError(f"vol_params must have length exactly 3, but got length {len(vol_params)}: {vol_params}")
+        self.vol_params = list(vol_params)
 
         if aniso_params is not None:
+            if len(aniso_params) != 6:
+                raise ValueError(f"aniso_params must have length exactly 6, but got length {len(aniso_params)}: {aniso_params}")
             self.aniso_params = list(aniso_params)
         else:
             self.aniso_params = [0.0] * 6
+
+        # If anisotropic parameters are active, enforce explicit fiber angles or vector definition
+        has_aniso_active = any(abs(p) > 1e-12 for p in self.aniso_params)
+        if has_aniso_active and (angles is None and a0 is None):
+            raise ValueError(
+                "Anisotropic parameters are active but no fiber 'angles' or 'a0' vectors were provided in configuration."
+            )
 
         self.cap_compression = cap_compression
 
@@ -198,65 +226,76 @@ class HyperelasticModel(BaseMaterialModel):
 
     def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
         _, _, i1_dev, i2_dev, _ = self._eval_invariants(F)
-        X = i1_dev - 3.0
-        Y = i2_dev - 3.0
-        log2 = jnp.log(jnp.clip(i2_dev / 3.0, 1.0e-8, 1.0e8))
+        i1_dev_minus_3 = i1_dev - 3.0
+        i2_dev_minus_3 = i2_dev - 3.0
 
-        dev_terms = (
-            self.dev_params[0] * X +
-            self.dev_params[1] * Y +
-            self.dev_params[2] * X**2 +
-            self.dev_params[3] * X * Y +
-            self.dev_params[4] * Y**2 +
-            self.dev_params[5] * X**3 +
-            self.dev_params[6] * (X**2) * Y +
-            self.dev_params[7] * X * (Y**2) +
-            self.dev_params[8] * Y**3 +
-            self.dev_params[9] * log2
+        p = self.dev_params
+        return (
+            p[0] * i1_dev_minus_3 +
+            p[1] * i2_dev_minus_3 +
+            p[2] * i1_dev_minus_3**2 +
+            p[3] * i1_dev_minus_3 * i2_dev_minus_3 +
+            p[4] * i2_dev_minus_3**2 +
+            p[5] * i1_dev_minus_3**3 +
+            p[6] * (i1_dev_minus_3**2) * i2_dev_minus_3 +
+            p[7] * i1_dev_minus_3 * (i2_dev_minus_3**2) +
+            p[8] * i2_dev_minus_3**3 +
+            p[9] * jnp.log(jnp.maximum(i2_dev / 3.0, 1e-8))
         )
-        return dev_terms
 
     def psi_vol(self, F: jnp.ndarray) -> jnp.ndarray:
         _, _, _, _, J = self._eval_invariants(F)
         J_minus_1 = J - 1.0
-        vol_terms = (
-            self.vol_params[0] * J_minus_1**2 +
-            self.vol_params[1] * J_minus_1**4 +
-            self.vol_params[2] * J_minus_1**6
+        p = self.vol_params
+        return (
+            p[0] * J_minus_1**2 +
+            p[1] * J_minus_1**4 +
+            p[2] * J_minus_1**6
         )
-        return vol_terms
 
     def psi_aniso(self, F: jnp.ndarray) -> jnp.ndarray:
-        if self.a0 is None or self.aniso_params is None or len(self.aniso_params) == 0:
+        if self.a0 is None:
             return jnp.zeros(())
+            
         _, C_bar, _, _, _ = self._eval_invariants(F)
+        I4_bar = jnp.einsum('i,...ij,j->...', self.a0, C_bar, self.a0)
+        I4_minus_1 = I4_bar - 1.0
+        if self.cap_compression:
+            I4_minus_1 = jnp.maximum(I4_minus_1, 0.0)
 
-        I4_bar_1 = jnp.einsum('i,...ij,j->...', self.a0, C_bar, self.a0)
-        I4_m1 = I4_bar_1 - 1.0
+        I6_minus_1 = 0.0
+        if self.a1 is not None:
+            I6_bar = jnp.einsum('i,...ij,j->...', self.a1, C_bar, self.a1)
+            I6_minus_1 = I6_bar - 1.0
+            if self.cap_compression:
+                I6_minus_1 = jnp.maximum(I6_minus_1, 0.0)
 
-        if len(self.aniso_params) == 6:
-            C42, C43, C44, C62, C63, C64 = self.aniso_params
-            aniso1 = C42 * I4_m1**2 + C43 * I4_m1**3 + C44 * I4_m1**4
-            aniso2 = 0.0
-            if self.a1 is not None:
-                I4_bar_2 = jnp.einsum('i,...ij,j->...', self.a1, C_bar, self.a1)
-                I6_m1 = I4_bar_2 - 1.0
-                aniso2 = C62 * I6_m1**2 + C63 * I6_m1**3 + C64 * I6_m1**4
+        p = self.aniso_params
+        if len(p) == 6:
+            # Polynomial anisotropic model
+            aniso1 = p[0] * I4_minus_1**2 + p[1] * I4_minus_1**3 + p[2] * I4_minus_1**4
+            aniso2 = p[3] * I6_minus_1**2 + p[4] * I6_minus_1**3 + p[5] * I6_minus_1**4 if self.a1 is not None else 0.0
             return aniso1 + aniso2
         else:
-            ta = list(self.aniso_params) + [0.0] * (8 - len(self.aniso_params))
-            C42, C44, k1, k2 = ta[0], ta[1], ta[2], ta[3]
-            exp_arg1 = jnp.clip(k2 * I4_m1**2, -30.0, 30.0)
-            aniso1 = (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (jnp.exp(exp_arg1) - 1.0))
+            # Extended / Exponential Holzapfel-type model
+            c42 = p[0] if len(p) > 0 else 0.0
+            c44 = p[1] if len(p) > 1 else 0.0
+            k1  = p[2] if len(p) > 2 else 0.0
+            k2  = p[3] if len(p) > 3 else 0.0
+            c62 = p[4] if len(p) > 4 else 0.0
+            c64 = p[5] if len(p) > 5 else 0.0
+            k3  = p[6] if len(p) > 6 else 0.0
+            k4  = p[7] if len(p) > 7 else 0.0
+
+            aniso1 = c42 * I4_minus_1**2 + c44 * I4_minus_1**4
+            if k2 != 0.0:
+                aniso1 += (k1 / (2.0 * k2)) * (jnp.exp(k2 * I4_minus_1**2) - 1.0)
 
             aniso2 = 0.0
             if self.a1 is not None:
-                I4_bar_2 = jnp.einsum('i,...ij,j->...', self.a1, C_bar, self.a1)
-                I6_m1 = I4_bar_2 - 1.0
-                C62, C64, k3, k4 = ta[4], ta[5], ta[6], ta[7]
-                exp_arg2 = jnp.clip(k4 * I6_m1**2, -30.0, 30.0)
-                aniso2 = (C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
-
+                aniso2 = c62 * I6_minus_1**2 + c64 * I6_minus_1**4
+                if k4 != 0.0:
+                    aniso2 += (k3 / (2.0 * k4)) * (jnp.exp(k4 * I6_minus_1**2) - 1.0)
             return aniso1 + aniso2
 
     def psi(self, F: jnp.ndarray) -> jnp.ndarray:
@@ -270,195 +309,159 @@ class HyperelasticModel(BaseMaterialModel):
 @register_material("mooney-rivlin")
 class MooneyRivlin(HyperelasticModel):
     def __init__(self, dev_params=None, vol_params=None, **kwargs):
-        if dev_params is None:
-            dev_params = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if vol_params is None:
-            vol_params = [1.5, 0.0, 0.0]
+        if dev_params is None or vol_params is None:
+            raise ValueError("MooneyRivlin requires 'dev_params' and 'vol_params' from configuration.")
         super().__init__(dev_params=dev_params, vol_params=vol_params, **kwargs)
 
 
 @register_material("neohookean")
 class NeoHookean(HyperelasticModel):
-    def __init__(self, c1=1.0, c2=1.5, **kwargs):
-        super().__init__(dev_params=[c1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], vol_params=[c2, 0.0, 0.0], **kwargs)
-        self.c1 = c1
-        self.c2 = c2
+    def __init__(self, dev_params=None, vol_params=None, c1=None, c2=None, **kwargs):
+        if dev_params is None:
+            if c1 is None:
+                raise ValueError("NeoHookean requires 'dev_params' or 'c1' parameter from configuration.")
+            dev_params = [c1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if vol_params is None:
+            if c2 is None:
+                raise ValueError("NeoHookean requires 'vol_params' or 'c2' parameter from configuration.")
+            vol_params = [c2, 0.0, 0.0]
+        super().__init__(dev_params=dev_params, vol_params=vol_params, **kwargs)
 
 
 @register_material("isihara")
 class Isihara(HyperelasticModel):
-    def __init__(self, c10=0.5, c01=1.0, c20=1.0, d1=1.5, **kwargs):
-        super().__init__(dev_params=[c10, c01, c20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], vol_params=[d1, 0.0, 0.0], **kwargs)
+    def __init__(self, dev_params=None, vol_params=None, c10=None, c01=None, c20=None, d1=None, **kwargs):
+        if dev_params is None:
+            if c10 is None or c01 is None or c20 is None:
+                raise ValueError("Isihara requires 'dev_params' or (c10, c01, c20) from configuration.")
+            dev_params = [c10, c01, c20, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if vol_params is None:
+            if d1 is None:
+                raise ValueError("Isihara requires 'vol_params' or 'd1' from configuration.")
+            vol_params = [d1, 0.0, 0.0]
+        super().__init__(dev_params=dev_params, vol_params=vol_params, **kwargs)
 
 
 @register_material("gmr")
 @register_material("gmr_log")
 @register_material("gmr_nolog")
+@register_material("gmr_aniso")
 class GeneralizedMooneyRivlin(HyperelasticModel):
-    def __init__(self, dev_params=None, vol_params=None, **kwargs):
-        if dev_params is None:
-            dev_params = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if vol_params is None:
-            vol_params = [1.5, 0.0, 0.0]
-        super().__init__(dev_params=dev_params, vol_params=vol_params, **kwargs)
+    def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, **kwargs):
+        if dev_params is None or vol_params is None:
+            raise ValueError("GeneralizedMooneyRivlin requires 'dev_params' and 'vol_params' from configuration.")
+        super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
 
 
 @register_material("gentthomas")
 class GentThomas(HyperelasticModel):
-    def __init__(self, c1=0.5, c2=1.5, **kwargs):
-        super().__init__(dev_params=[c1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], vol_params=[c2, 0.0, 0.0], **kwargs)
+    def __init__(self, dev_params=None, vol_params=None, c1=None, c2=None, **kwargs):
+        if dev_params is None:
+            if c1 is None:
+                raise ValueError("GentThomas requires 'dev_params' or 'c1' from configuration.")
+            dev_params = [c1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        if vol_params is None:
+            if c2 is None:
+                raise ValueError("GentThomas requires 'vol_params' or 'c2' from configuration.")
+            vol_params = [c2, 0.0, 0.0]
+        super().__init__(dev_params=dev_params, vol_params=vol_params, **kwargs)
 
 
 @register_material("nh4")
 @register_material("neohookean4")
 class NeoHookean4(HyperelasticModel):
-    def __init__(self, c10=0.5, d2=1.5, **kwargs):
-        super().__init__(dev_params=[c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], vol_params=[0.0, d2, 0.0], **kwargs)
+    def __init__(self, dev_params=None, vol_params=None, c10=None, d2=None, **kwargs):
+        if dev_params is None:
+            if c10 is None:
+                raise ValueError("NeoHookean4 requires 'dev_params' or 'c10' from configuration.")
+            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if vol_params is None:
+            if d2 is None:
+                raise ValueError("NeoHookean4 requires 'vol_params' or 'd2' from configuration.")
+            vol_params = [0.0, d2, 0.0]
+        super().__init__(dev_params=dev_params, vol_params=vol_params, **kwargs)
 
 
 @register_material("nh2")
 @register_material("neohookean2")
 @register_material("nh")
 class NeoHookeanGMR(HyperelasticModel):
-    def __init__(self, c10=0.5, d1=1.5, **kwargs):
-        super().__init__(dev_params=[c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], vol_params=[d1, 0.0, 0.0], **kwargs)
-        self.c10 = c10
-        self.d1 = d1
+    def __init__(self, dev_params=None, vol_params=None, c10=None, d1=None, **kwargs):
+        if dev_params is None:
+            if c10 is None:
+                raise ValueError("NeoHookeanGMR requires 'dev_params' or 'c10' from configuration.")
+            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if vol_params is None:
+            if d1 is None:
+                raise ValueError("NeoHookeanGMR requires 'vol_params' or 'd1' from configuration.")
+            vol_params = [d1, 0.0, 0.0]
+        super().__init__(dev_params=dev_params, vol_params=vol_params, **kwargs)
 
 
 @register_material("c20_d10_d05")
 @register_material("c20d10d05")
 class CustomGT(HyperelasticModel):
-    def __init__(self, c10=2.0, d1=1.0, d2=0.5, **kwargs):
-        super().__init__(dev_params=[c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], vol_params=[d1, d2, 0.0], **kwargs)
+    def __init__(self, dev_params=None, vol_params=None, c10=None, d1=None, d2=None, **kwargs):
+        if dev_params is None:
+            if c10 is None:
+                raise ValueError("CustomGT requires 'dev_params' or 'c10' from configuration.")
+            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if vol_params is None:
+            if d1 is None or d2 is None:
+                raise ValueError("CustomGT requires 'vol_params' or (d1, d2) from configuration.")
+            vol_params = [d1, d2, 0.0]
+        super().__init__(dev_params=dev_params, vol_params=vol_params, **kwargs)
 
 
 @register_material("aniso30")
 class Aniso30(HyperelasticModel):
-    def __init__(self, c10=0.5, d1=1.0, c42=0.7, theta=jnp.pi/6.0, angles=None, dev_params=None, vol_params=None, aniso_params=None, **kwargs):
-        if angles is None:
-            angles = [float(jnp.degrees(theta))]
-        if dev_params is None:
-            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if vol_params is None:
-            vol_params = [d1, 0.0, 0.0]
-        if aniso_params is None:
-            aniso_params = [c42, 0.0, 0.0, 0.0, 0.0, 0.0]
-        super().__init__(
-            dev_params=dev_params,
-            vol_params=vol_params,
-            aniso_params=aniso_params,
-            angles=angles,
-            **kwargs
-        )
-        self.c10 = self.dev_params[0]
-        self.d1 = self.vol_params[0]
-        self.c42 = self.aniso_params[0]
+    def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, **kwargs):
+        if dev_params is None or vol_params is None or aniso_params is None or angles is None:
+            raise ValueError("Aniso30 requires 'dev_params', 'vol_params', 'aniso_params', and 'angles' from configuration.")
+        super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
 
 
 @register_material("ortho45")
 class Ortho45(HyperelasticModel):
-    def __init__(self, c10=0.5, d1=1.0, c42=0.7, c62=0.9, theta1=jnp.pi/4.0, theta2=-jnp.pi/4.0, angles=None, dev_params=None, vol_params=None, aniso_params=None, **kwargs):
-        if angles is None:
-            angles = [float(jnp.degrees(theta1)), float(jnp.degrees(theta2))]
-        if dev_params is None:
-            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if vol_params is None:
-            vol_params = [d1, 0.0, 0.0]
-        if aniso_params is None:
-            aniso_params = [c42, 0.0, 0.0, c62, 0.0, 0.0]
-        super().__init__(
-            dev_params=dev_params,
-            vol_params=vol_params,
-            aniso_params=aniso_params,
-            angles=angles,
-            **kwargs
-        )
-        self.c10 = self.dev_params[0]
-        self.d1 = self.vol_params[0]
-        self.c42 = self.aniso_params[0]
-        self.c62 = self.aniso_params[3] if len(self.aniso_params) > 3 else self.aniso_params[-1]
+    def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, **kwargs):
+        if dev_params is None or vol_params is None or aniso_params is None or angles is None:
+            raise ValueError("Ortho45 requires 'dev_params', 'vol_params', 'aniso_params', and 'angles' from configuration.")
+        super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
 
 
 @register_material("ortho090")
 class Ortho090(HyperelasticModel):
-    def __init__(self, c10=0.5, d1=1.0, c42=0.7, c62=0.7, angles=None, dev_params=None, vol_params=None, aniso_params=None, **kwargs):
-        if angles is None:
-            angles = [0.0, 90.0]
-        if dev_params is None:
-            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if vol_params is None:
-            vol_params = [d1, 0.0, 0.0]
-        if aniso_params is None:
-            aniso_params = [c42, 0.0, 0.0, c62, 0.0, 0.0]
-        super().__init__(
-            dev_params=dev_params,
-            vol_params=vol_params,
-            aniso_params=aniso_params,
-            angles=angles,
-            **kwargs
-        )
-        self.c10 = self.dev_params[0]
-        self.d1 = self.vol_params[0]
-        self.c42 = self.aniso_params[0]
-        self.c62 = self.aniso_params[3] if len(self.aniso_params) > 3 else self.aniso_params[-1]
+    def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, **kwargs):
+        if dev_params is None or vol_params is None or aniso_params is None or angles is None:
+            raise ValueError("Ortho090 requires 'dev_params', 'vol_params', 'aniso_params', and 'angles' from configuration.")
+        super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
 
 
 @register_material("ortho900")
 class Ortho900(HyperelasticModel):
-    def __init__(self, c10=0.5, d1=1.0, c42=0.7, c62=0.7, angles=None, dev_params=None, vol_params=None, aniso_params=None, **kwargs):
-        if angles is None:
-            angles = [90.0, 0.0]
-        if dev_params is None:
-            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if vol_params is None:
-            vol_params = [d1, 0.0, 0.0]
-        if aniso_params is None:
-            aniso_params = [c42, 0.0, 0.0, c62, 0.0, 0.0]
-        super().__init__(
-            dev_params=dev_params,
-            vol_params=vol_params,
-            aniso_params=aniso_params,
-            angles=angles,
-            **kwargs
-        )
-        self.c10 = self.dev_params[0]
-        self.d1 = self.vol_params[0]
-        self.c42 = self.aniso_params[0]
-        self.c62 = self.aniso_params[3] if len(self.aniso_params) > 3 else self.aniso_params[-1]
+    def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, **kwargs):
+        if dev_params is None or vol_params is None or aniso_params is None or angles is None:
+            raise ValueError("Ortho900 requires 'dev_params', 'vol_params', 'aniso_params', and 'angles' from configuration.")
+        super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
 
 
 @register_material("symnonortho60")
 class SymNonOrtho60(HyperelasticModel):
-    def __init__(self, c10=0.5, d1=1.0, c42=0.7, c62=0.9, theta1=jnp.pi/3.0, theta2=-jnp.pi/3.0, angles=None, dev_params=None, vol_params=None, aniso_params=None, **kwargs):
-        if angles is None:
-            angles = [float(jnp.degrees(theta1)), float(jnp.degrees(theta2))]
-        if dev_params is None:
-            dev_params = [c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        if vol_params is None:
-            vol_params = [d1, 0.0, 0.0]
-        if aniso_params is None:
-            aniso_params = [c42, 0.0, 0.0, c62, 0.0, 0.0]
-        super().__init__(
-            dev_params=dev_params,
-            vol_params=vol_params,
-            aniso_params=aniso_params,
-            angles=angles,
-            **kwargs
-        )
-        self.c10 = self.dev_params[0]
-        self.d1 = self.vol_params[0]
-        self.c42 = self.aniso_params[0]
-        self.c62 = self.aniso_params[3] if len(self.aniso_params) > 3 else self.aniso_params[-1]
+    def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, **kwargs):
+        if dev_params is None or vol_params is None or aniso_params is None or angles is None:
+            raise ValueError("SymNonOrtho60 requires 'dev_params', 'vol_params', 'aniso_params', and 'angles' from configuration.")
+        super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
 
 
 @register_material("ogden")
 class Ogden(BaseMaterialModel):
     def __init__(self, mu_params=None, alpha_params=None, vol_params=None, jit_P: bool = True):
         super().__init__(jit_P=jit_P)
-        self.mu_params = mu_params if mu_params is not None else [1.0, 0.0, 0.0]
-        self.alpha_params = alpha_params if alpha_params is not None else [2.0, 0.0, 0.0]
-        self.vol_params = vol_params if vol_params is not None else [1.5, 0.0, 0.0]
+        if mu_params is None or alpha_params is None or vol_params is None:
+            raise ValueError("Ogden model requires 'mu_params', 'alpha_params', and 'vol_params' from configuration.")
+        self.mu_params = mu_params
+        self.alpha_params = alpha_params
+        self.vol_params = vol_params
 
     def psi(self, F: jnp.ndarray) -> jnp.ndarray:
         if F.shape[-2:] == (2, 2):
@@ -494,24 +497,21 @@ class Ogden(BaseMaterialModel):
 @register_material("holzapfel")
 class AnisotropicHolzapfel(HyperelasticModel):
     """
-    Anisotropic Holzapfel-Gasser-Ogden material model with 1 fiber orientation.
-    Uses Macauley bracket to ensure fibers do not support compression.
+    Anisotropic Holzapfel-Gasser-Ogden material model.
     """
 
-    def __init__(self, c10=0.5, d1=1.5, k1=0.8, k2=0.9, kappa=0.0, theta=jnp.pi/6.0, angles=None, **kwargs):
-        if angles is None:
-            angles = [float(jnp.degrees(theta))]
+    def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, kappa=0.0, **kwargs):
+        if dev_params is None or vol_params is None or aniso_params is None or angles is None:
+            raise ValueError("AnisotropicHolzapfel requires 'dev_params', 'vol_params', 'aniso_params', and 'angles' from configuration.")
         super().__init__(
-            dev_params=[c10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            vol_params=[d1, 0.0, 0.0],
-            aniso_params=[0.0, 0.0, k1, k2, 0.0, 0.0, 0.0, 0.0],
+            dev_params=dev_params,
+            vol_params=vol_params,
+            aniso_params=aniso_params,
             angles=angles,
             **kwargs
         )
-        self.c10 = c10
-        self.d1 = d1
-        self.k1 = k1
-        self.k2 = k2
+        self.k1 = self.aniso_params[2] if len(self.aniso_params) > 2 else 0.0
+        self.k2 = self.aniso_params[3] if len(self.aniso_params) > 3 else 0.0
         self.kappa = kappa
 
     def psi_aniso(self, F: jnp.ndarray) -> jnp.ndarray:
@@ -521,4 +521,6 @@ class AnisotropicHolzapfel(HyperelasticModel):
         I4_bar = jnp.einsum('i,...ij,j->...', self.a0, C_bar, self.a0)
         E_bar = self.kappa * (i1_dev - 3.0) + (1.0 - 3.0 * self.kappa) * (I4_bar - 1.0)
         E_active = jnp.maximum(E_bar, 0.0)
+        if self.k2 == 0.0:
+            return 0.5 * self.k1 * (E_active**2)
         return (self.k1 / (2.0 * self.k2)) * (jnp.exp(self.k2 * (E_active**2)) - 1.0)

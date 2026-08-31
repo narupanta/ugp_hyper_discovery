@@ -4,6 +4,9 @@
 
 # 1. Synthetic Dataset Generation Config
 material_model_name: c20d10d05
+material_params:
+  dev_params: [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  vol_params: [1.0, 0.5, 0.0]
 disp_noise: 0.0001
 load_noise: 0.01
 target_load_true_top: 4.0

@@ -227,15 +227,14 @@ for SEED in $SEEDS_LIST; do
     FOLDER_NAME="${CURRENT_TIME}_${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${N_IP}_${BETA}_${FIXED_NOISE}_fip${FIXED_IP}_${MODEL_MODE}_${GEOMETRY}_${SEED}"
     EXTRACT_SEED_DIR="extraction/extracted_models/${FOLDER_NAME}"
     DISTILL_SEED_DIR="distillation/distilled_models/${FOLDER_NAME}"
-    mkdir -p "$EXTRACT_SEED_DIR"
-    mkdir -p "$DISTILL_SEED_DIR"
-    cp "$YAML_FILE" "$EXTRACT_SEED_DIR/recipe_config.yaml" 2>/dev/null || true
-    cp "$YAML_FILE" "$DISTILL_SEED_DIR/recipe_config.yaml" 2>/dev/null || true
 
     if [ "$SKIP_EXT" == "true" ]; then
         echo "⏭️ Skipping Step 2 (UGP Extraction Training) as requested."
     else
         echo "--- Step 2: UGP Extraction Training ($MODEL, $EXT_ITERS iterations, Seed: $SEED) ---"
+        mkdir -p "$EXTRACT_SEED_DIR"
+        cp "$YAML_FILE" "$EXTRACT_SEED_DIR/recipe_config.yaml" 2>/dev/null || true
+
         python3 extraction/train_unsupervised.py \
             --material_model_name "$MODEL" \
             --number_of_mci_sampling "$MCI_SAMPLING" \

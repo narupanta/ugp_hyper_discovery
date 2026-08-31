@@ -150,9 +150,9 @@ def main():
     min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
     max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
 
-    from core.material_models import get_material
+    from core.material_models import get_material_from_dir
+    true_model = get_material_from_dir(args.saved_model_dir, jit_P=False)
     true_model_name = infer_material_model_name(args.saved_model_dir)
-    true_model = get_material(true_model_name, jit_P=False)
 
     feature_extractor = None
     if aniso_z is not None:

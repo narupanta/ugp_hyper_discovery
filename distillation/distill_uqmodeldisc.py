@@ -682,8 +682,9 @@ def main():
     is_zero_strain = (f3x3 - identity_matrix).abs().max(dim=1)[0].max(dim=1)[0] < 1e-6
     test_cases[is_zero_strain] = 2 # test_case_identifier_biaxial_tension
 
+    from core.material_models import get_material_from_dir
     true_model_name = infer_material_model_name(args.saved_model_dir)
-    true_model = get_material(true_model_name, jit_P=False)
+    true_model = get_material_from_dir(args.saved_model_dir, jit_P=False)
 
     theta1 = np.pi / 4.0
     theta2 = -np.pi / 4.0
@@ -729,35 +730,23 @@ def main():
         out_dir = os.path.abspath(args.load_distilled_dir)
         log_mode = "a"
     else:
-        true_model_name = infer_material_model_name(args.saved_model_dir)
-        true_model = get_material(true_model_name, jit_P=False)
+        dev_names = ["$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$", "$E$"]
+        vol_names = ["$D_{1}$", "$D_{2}$", "$D_{3}$"]
+        aniso_names = ["$C_{42}$", "$C_{43}$", "$C_{44}$", "$C_{62}$", "$C_{63}$", "$C_{64}$"]
         
         true_params = {}
-        if true_model_name in ["ortho45", "ortho090", "ortho900", "symnonortho60"]:
-            true_params = {
-                "$C_{10}$": 0.5, "$C_{01}$": 0.0, "$C_{20}$": 0.0, "$C_{11}$": 0.0, "$C_{02}$": 0.0,
-                "$C_{30}$": 0.0, "$C_{21}$": 0.0, "$C_{12}$": 0.0, "$C_{03}$": 0.0,
-                "$D_{1}$": 1.0, "$D_{2}$": 0.0, "$D_{3}$": 0.0,
-                "$C_{42}$": 0.7, "$C_{43}$": 0.0, "$C_{44}$": 0.0,
-                "$C_{62}$": 0.9, "$C_{63}$": 0.0, "$C_{64}$": 0.0
-            }
-        elif true_model_name == "aniso30":
-            true_params = {
-                "$C_{10}$": 0.5, "$C_{01}$": 0.0, "$C_{20}$": 0.0, "$C_{11}$": 0.0, "$C_{02}$": 0.0,
-                "$C_{30}$": 0.0, "$C_{21}$": 0.0, "$C_{12}$": 0.0, "$C_{03}$": 0.0,
-                "$D_{1}$": 1.0, "$D_{2}$": 0.0, "$D_{3}$": 0.0,
-                "$C_{42}$": 0.7, "$C_{43}$": 0.0, "$C_{44}$": 0.0
-            }
-        elif true_model_name == "isihara":
-            true_params = {"$C_{10}$": true_model.c10, "$C_{01}$": true_model.c01, "$C_{20}$": true_model.c20, "$D_{1}$": true_model.d1}
-        elif true_model_name in ["nh", "neohookean2", "nh2"]:
-            true_params = {"$C_{10}$": true_model.dev_params[0], "$D_{1}$": true_model.vol_params[0]}
-        elif true_model_name in ["nh4", "neohookean4"]:
-            true_params = {"$C_{10}$": true_model.dev_params[0], "$D_{2}$": true_model.vol_params[1]}
-        elif true_model_name in ["gentthomas"]:
-            true_params = {"$C_{10}$": true_model.dev_params[0], "$E$": true_model.dev_params[9], "$D_{1}$": true_model.vol_params[0]}
-        elif true_model_name in ["c20d10d05", "c20_d10_d05"]:
-            true_params = {"$C_{10}$": true_model.dev_params[0], "$D_{1}$": true_model.vol_params[0], "$D_{2}$": true_model.vol_params[1]}
+        if hasattr(true_model, "dev_params"):
+            for name, val in zip(dev_names, true_model.dev_params):
+                if abs(val) > 1e-12:
+                    true_params[name] = float(val)
+        if hasattr(true_model, "vol_params"):
+            for name, val in zip(vol_names, true_model.vol_params):
+                if abs(val) > 1e-12:
+                    true_params[name] = float(val)
+        if hasattr(true_model, "aniso_params"):
+            for name, val in zip(aniso_names, true_model.aniso_params):
+                if abs(val) > 1e-12:
+                    true_params[name] = float(val)
 
         source_type = "exp" if any(x in args.saved_model_dir.lower() for x in ["exp", "dic", "18617429"]) else "syn"
 

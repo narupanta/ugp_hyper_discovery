@@ -70,8 +70,13 @@ def main():
                   "Uniaxial Compression", "Equibiaxial Compression", "Simple Shear"]
 
     # Calculate true model values if available
-    if get_material is not None and args.model_name:
-        true_model = get_material(args.model_name, jit_P=False)
+    try:
+        from core.material_models import get_material_from_dir
+        true_model = get_material_from_dir(args.export_dir, jit_P=False)
+    except Exception:
+        true_model = None
+
+    if true_model is not None:
         try:
             import jax
             import jax.numpy as jnp

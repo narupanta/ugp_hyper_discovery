@@ -4,6 +4,11 @@
 
 # 1. Synthetic Dataset Generation Config
 material_model_name: symnonortho60
+material_params:
+  dev_params: [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  vol_params: [1.0, 0.0, 0.0]
+  aniso_params: [0.7, 0.0, 0.0, 0.9, 0.0, 0.0]
+  angles: [60.0, -60.0]
 disp_noise: 0.0001
 load_noise: 0.01
 target_load_true_top: 5.0

@@ -281,3 +281,55 @@ def infer_material_model_name(path: str) -> str:
                 return model_cand
                 
     raise ValueError(f"Could not infer material model name from path '{path}'. Please ensure the path contains a valid model name or optimization_log.txt.")
+
+
+def load_model_config(path: str) -> dict:
+    """
+    Loads model configuration dictionary from a saved model directory or parent/subfolder.
+    Checks config.json, config.yaml, and recipe_config.yaml.
+    Raises FileNotFoundError or ValueError if no configuration is found.
+    """
+    if not path:
+        raise ValueError("Cannot load model config: path is empty or None.")
+    
+    import json
+    import yaml
+    
+    abs_path = os.path.abspath(path)
+    search_dirs = [
+        abs_path,
+        os.path.dirname(abs_path),
+        os.path.join(abs_path, "extraction"),
+        os.path.join(abs_path, "..")
+    ]
+    
+    # Check source_extraction_dir if present in distillation folder
+    for s_file in ["dev_source_extraction_dir.txt", "vol_source_extraction_dir.txt", "aniso_source_extraction_dir.txt", "source_extraction_dir.txt"]:
+        for d in search_dirs[:2]:
+            sf_path = os.path.join(d, s_file)
+            if os.path.exists(sf_path):
+                try:
+                    with open(sf_path, "r") as f:
+                        src_dir = f.read().strip()
+                        if os.path.isdir(src_dir):
+                            search_dirs.append(os.path.abspath(src_dir))
+                except Exception:
+                    pass
+
+    for d in search_dirs:
+        for cfg_name in ["config.json", "config.yaml", "recipe_config.yaml"]:
+            cfg_path = os.path.join(d, cfg_name)
+            if os.path.exists(cfg_path):
+                try:
+                    if cfg_name.endswith(".json"):
+                        with open(cfg_path, "r") as f:
+                            cfg = json.load(f)
+                    else:
+                        with open(cfg_path, "r") as f:
+                            cfg = yaml.safe_load(f)
+                    if isinstance(cfg, dict):
+                        return cfg
+                except Exception:
+                    pass
+
+    raise FileNotFoundError(f"No configuration file (config.json / config.yaml / recipe_config.yaml) found in or around '{path}'.")
