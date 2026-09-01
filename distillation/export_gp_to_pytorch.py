@@ -154,20 +154,31 @@ def main():
     true_model = get_material_from_dir(args.saved_model_dir, jit_P=False)
     true_model_name = infer_material_model_name(args.saved_model_dir)
 
+    import json
+    metadata_path = os.path.join(args.saved_model_dir, "metadata.json")
+    meta_dict = {}
+    if os.path.exists(metadata_path):
+        with open(metadata_path, "r") as f:
+            meta_dict = json.load(f)
+            cov_mode = meta_dict.get("covariance_mode", "diag")
+    else:
+        cov_mode = "full" if gp_params.raw_dev_u_var.ndim == 2 else "diag"
+
     feature_extractor = None
     if aniso_z is not None:
-        if true_model is not None and hasattr(true_model, 'a1') and hasattr(true_model, 'a2'):
-            a0 = np.array(true_model.a1)
-            a1 = np.array(true_model.a2)
-            feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
-        elif true_model is not None and hasattr(true_model, 'a0'):
+        if true_model is not None and getattr(true_model, 'a0', None) is not None:
             a0 = np.array(true_model.a0)
-            feature_extractor = AnisotropicFeatureExtractor(a0)
+            a1 = np.array(true_model.a1) if getattr(true_model, 'a1', None) is not None else None
+            feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
         elif getattr(gp_params, "raw_aniso_theta_mean", None) is not None:
             raw_th = gp_params.raw_aniso_theta_mean
             theta = float(np.pi * (1.0 / (1.0 + np.exp(-raw_th)) - 0.5))
             a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
             feature_extractor = AnisotropicFeatureExtractor(a0)
+        elif "a0" in meta_dict:
+            a0 = np.array(meta_dict["a0"])
+            a1 = np.array(meta_dict["a1"]) if "a1" in meta_dict else None
+            feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
         elif aniso_z.shape[1] == 4:
             a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
             a1 = np.array([np.cos(-np.pi / 4.0), np.sin(-np.pi / 4.0), 0.0])
@@ -176,15 +187,6 @@ def main():
             theta = np.pi / 4.0
             a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
             feature_extractor = AnisotropicFeatureExtractor(a0)
-
-    
-    import json
-    metadata_path = os.path.join(args.saved_model_dir, "metadata.json")
-    if os.path.exists(metadata_path):
-        with open(metadata_path, "r") as f:
-            cov_mode = json.load(f).get("covariance_mode", "diag")
-    else:
-        cov_mode = "full" if gp_params.raw_dev_u_var.ndim == 2 else "diag"
         
     gp_model = SparseHyperelasticityGP(
         gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
