@@ -1274,7 +1274,6 @@ def main():
     # Run validation plot scripts (only if not sef_split, otherwise we wait for both to finish in bash script)
     if args.distill_target != "sef_split":
         try:
-            import subprocess
             subprocess.run(["python3", "plots/plot_distilled_validation.py", 
                             "--distilled_dir", out_dir, 
                             "--material_model", args.material_model,
@@ -1292,6 +1291,7 @@ def main():
             
         subprocess.run(["python3", "plots/plot_invariant_sensitivity.py"] + args_tail, check=True)
         subprocess.run(["python3", "plots/plot_invariant_sensitivity_3d_pairs.py"] + args_tail, check=True)
+        subprocess.run(["python3", "plots/plot_deformation_sensitivity.py"] + args_tail, check=True)
 
     except Exception as e:
         print(f"Error running invariant sensitivity plots: {e}")

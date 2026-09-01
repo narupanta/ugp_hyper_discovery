@@ -461,6 +461,17 @@ class SymNonOrtho60(HyperelasticModel):
         super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
 
 
+@register_material("full_iso")
+@register_material("iso_full")
+@register_material("poly_iso")
+@register_material("full_isotropic")
+class FullIsotropic(HyperelasticModel):
+    def __init__(self, dev_params=None, vol_params=None, **kwargs):
+        if dev_params is None or vol_params is None:
+            raise ValueError("FullIsotropic requires 'dev_params' (10 elements) and 'vol_params' (3 elements) from configuration.")
+        super().__init__(dev_params=dev_params, vol_params=vol_params, **kwargs)
+
+
 @register_material("ogden")
 class Ogden(BaseMaterialModel):
     def __init__(self, mu_params=None, alpha_params=None, vol_params=None, jit_P: bool = True):

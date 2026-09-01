@@ -202,16 +202,12 @@ def main():
         saved_dir_abs = os.path.abspath(args.saved_model_dir)
         all_parts = saved_dir_abs.split(os.sep)
 
-        ugp_model_name = None
+        ugp_model_name = infer_material_model_name(args.saved_model_dir)
         disp_noise = "0.0001"
         load_noise = "0.01"
         
         for p in reversed(all_parts):
             subparts = p.split('_')
-            for model_candidate in ["ortho45", "ortho090", "ortho900", "symnonortho60", "aniso30", "aniso45", "isihara", "nh", "neohookean2", "nh2", "gentthomas", "nh4", "neohookean4", "c20d10d05", "c20_d10_d05"]:
-                if model_candidate in subparts:
-                    ugp_model_name = model_candidate
-                    break
             for sp in subparts:
                 if sp.startswith("d") and sp[1:].replace('.', '', 1).isdigit():
                     disp_noise = sp[1:]
@@ -220,11 +216,6 @@ def main():
                 elif sp.replace('.', '', 1).isdigit() and sp in subparts:
                     if disp_noise == "0.0001" and float(sp) < 0.005:
                         disp_noise = sp
-            if ugp_model_name is not None:
-                break
-                
-        if ugp_model_name is None:
-            ugp_model_name = "nh2"
             
         prep_dataset_path = None
         for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:

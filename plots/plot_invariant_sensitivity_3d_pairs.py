@@ -152,9 +152,11 @@ def main():
 
     plt.tight_layout()    
     out_path = os.path.join(args.distilled_dir, f"{img_prefix}invariant_sensitivity_3d.pdf")
+    out_png = os.path.join(args.distilled_dir, f"{img_prefix}invariant_sensitivity_3d.png")
     fig.savefig(out_path, dpi=200, bbox_inches='tight')
+    fig.savefig(out_png, dpi=200, bbox_inches='tight')
     plt.close(fig)
-    print(f"Plot saved to: {out_path}")
+    print(f"Plot saved to: {out_path} and {out_png}")
 
 if __name__ == "__main__":
     main()
