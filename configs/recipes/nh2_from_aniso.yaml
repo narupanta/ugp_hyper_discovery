@@ -1,22 +1,19 @@
 # ==============================================================================
-# Benchmark Recipe: Anisotropic 30 deg (Aniso30)
+# Benchmark Recipe: NeoHookean2 (nh2) Material Model
 # ==============================================================================
 
 # 1. Synthetic Dataset Generation Config
-material_model_name: aniso45
+material_model_name: nh2
 material_params:
   dev_params: [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-  vol_params: [1.0, 0.0, 0.0]
-  aniso_params: [0.7, 0.0, 0.5, 0.0, 0.0, 0.0]
-  angles: [45.0]
+  vol_params: [1.5, 0.0, 0.0]
 disp_noise: 0.0001
 load_noise: 0.01
-target_load_true_top: 3.0
+target_load_true_top: 1.5
 asym_factor: 0.95
 n_loadsteps: 10
 geometry: block
 mesh_size: 0.08
-
 # 2. UGP Extraction (Training) Config
 number_of_mci_sampling: 5
 num_rff: 800
@@ -34,12 +31,11 @@ cap_compression: 0
 distilled_material_model: gmr_aniso
 distillation_n_iterations: 5000
 dev_vol_distillation_n_iterations: 5000
-aniso_distillation_n_iterations: 5000
 distill_target: sef_split
 sample_mode: dataset_f
-num_points: 256
 num_func_samples: 512
-max_gamma: 10.0
+num_points: 256
+max_gamma: 1.0
 do_sensitivity: 1
 sobol_threshold: 0.0001
 sobol_samples_factor: 4096
@@ -47,5 +43,5 @@ sobol_samples_factor: 4096
 # 4. Validation Config
 run_validation: 0
 val_load_steps_indices: [9]
-seeds: [1,2,3,4,5]
+seeds: [2]
 val_number_samples: 1024
