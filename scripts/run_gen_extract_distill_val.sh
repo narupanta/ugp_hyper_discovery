@@ -394,6 +394,15 @@ for SEED in $SEEDS_LIST; do
                 --saved_model_dir "$SAVED_DIR" \
                 --material_model "$DIST_MODEL" \
                 --distill_target "$DIST_TARGET"
+
+            echo "Generating invariant & deformation sensitivity plots..."
+            for COMP in "dev" "vol" "aniso"; do
+                if [ -d "$SHARED_OUT_DIR/output/${COMP}_sensitivities" ] || [ -d "$SHARED_OUT_DIR/${COMP}_sensitivities" ]; then
+                    python3 plots/plot_invariant_sensitivity.py --distilled_dir "$SHARED_OUT_DIR" --component "$COMP" --distill_target "$DIST_TARGET" 2>/dev/null || true
+                    python3 plots/plot_invariant_sensitivity_3d_pairs.py --distilled_dir "$SHARED_OUT_DIR" --component "$COMP" --distill_target "$DIST_TARGET" 2>/dev/null || true
+                    python3 plots/plot_deformation_sensitivity.py --distilled_dir "$SHARED_OUT_DIR" --component "$COMP" --distill_target "$DIST_TARGET" 2>/dev/null || true
+                fi
+            done
         else
             python3 distillation/distill_uqmodeldisc.py \
                 --saved_model_dir "$SAVED_DIR" \
@@ -409,6 +418,12 @@ for SEED in $SEEDS_LIST; do
                 --sobol_samples_factor "$SOBOL_FACTOR" \
                 --seed "$SEED" \
                 $SENSITIVITY_FLAG
+
+            if [ -d "$SHARED_OUT_DIR/output/sensitivities" ] || [ -d "$SHARED_OUT_DIR/sensitivities" ]; then
+                python3 plots/plot_invariant_sensitivity.py --distilled_dir "$SHARED_OUT_DIR" 2>/dev/null || true
+                python3 plots/plot_invariant_sensitivity_3d_pairs.py --distilled_dir "$SHARED_OUT_DIR" 2>/dev/null || true
+                python3 plots/plot_deformation_sensitivity.py --distilled_dir "$SHARED_OUT_DIR" 2>/dev/null || true
+            fi
         fi
         echo "✅ Step 3 (Distillation for Seed $SEED) completed."
     fi

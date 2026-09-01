@@ -250,14 +250,23 @@ def farthest_point_sampling_with_fixed_point(pts, num_samples, fixed_point):
 
 def infer_material_model_name(path: str) -> str:
     """
-    Infers the material model name from the saved_model_dir path or its metadata.
+    Infers the material model name from the saved_model_dir path or its metadata/config.
     Raises ValueError if the model name cannot be determined.
     """
     if not path:
         raise ValueError("Cannot infer material model name: path is empty or None.")
+
+    try:
+        cfg = load_model_config(path)
+        if "material_model_name" in cfg and cfg["material_model_name"]:
+            return str(cfg["material_model_name"])
+    except Exception:
+        pass
+
     known_models = [
+        "full_isotropic", "full_iso", "iso_full", "poly_iso",
         "symnonortho60", "neohookean4", "neohookean2", "c20_d10_d05", "c20d10d05",
-        "gentthomas", "ortho45", "ortho090", "ortho900", "symnonortho60", "aniso30", "aniso45", "isihara", "nh4", "nh2", "nh"
+        "gentthomas", "ortho45", "ortho090", "ortho900", "aniso30", "aniso45", "isihara", "nh4", "nh2", "nh"
     ]
     abs_path = os.path.abspath(path)
     # Check optimization_log.txt first if it exists in the directory, parent, or extraction subfolder

@@ -140,9 +140,11 @@ def main():
     
     plt.tight_layout()    
     plot_path = os.path.join(args.distilled_dir, f"{img_prefix}deformation_sensitivity_modes.pdf")
+    plot_png = os.path.join(args.distilled_dir, f"{img_prefix}deformation_sensitivity_modes.png")
     fig.savefig(plot_path, dpi=200, bbox_inches='tight')
+    fig.savefig(plot_png, dpi=200, bbox_inches='tight')
     plt.close(fig)
-    print(f"Deformation sensitivity plot saved to {plot_path}")
+    print(f"Deformation sensitivity plot saved to {plot_path} and {plot_png}")
 
 if __name__ == "__main__":
     main()
