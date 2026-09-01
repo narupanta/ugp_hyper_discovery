@@ -212,31 +212,55 @@ if __name__ == "__main__" :
         if a0_val is None:
             a0_val = getattr(true_mat_model, "a1", None)
         if a0_val is None and "a0" in prep_data:
-            a0_val = prep_data["a0"]
+            cand = prep_data["a0"]
+            if hasattr(cand, "dtype") and cand.dtype == object:
+                cand_item = cand.item() if cand.ndim == 0 else None
+                a0_val = cand_item if cand_item is not None else None
+            else:
+                a0_val = cand
         if a0_val is None and args.angles is not None and len(args.angles) > 0:
             deg = float(args.angles[0])
             rad = float(jnp.radians(deg)) if abs(deg) > 2.0 * float(jnp.pi) else float(deg)
-            a0_val = [float(jnp.cos(rad)), float(jnp.sin(rad)), 0.0]
-        
-        # If still None (e.g. isotropic model trained with anisotropic mode), initialize random angle in [-89.9, 89.9] degrees
-        if a0_val is None:
+            a0_val = np.array([np.cos(rad), np.sin(rad), 0.0], dtype=np.float64)
+
+        # Validate that a0_val is a valid numeric array of size 3
+        is_valid_a0 = False
+        if a0_val is not None:
+            try:
+                a0_val_np = np.asarray(a0_val, dtype=np.float64)
+                if a0_val_np.size == 3:
+                    a0_val = a0_val_np
+                    is_valid_a0 = True
+            except Exception:
+                is_valid_a0 = False
+
+        # If not valid (e.g. isotropic model without angles), initialize random angle in [-89.9, 89.9] degrees
+        if not is_valid_a0:
             angle_key = jax.random.PRNGKey(args.seed + 1000)
             rand_deg = float(jax.random.uniform(angle_key, minval=-89.9, maxval=89.9))
             rand_rad = float(jnp.radians(rand_deg))
-            a0_val = [float(jnp.cos(rand_rad)), float(jnp.sin(rand_rad)), 0.0]
+            a0_val = np.array([np.cos(rand_rad), np.sin(rand_rad), 0.0], dtype=np.float64)
             args.angles = [rand_deg]
             config_dict["angles"] = [rand_deg]
-            config_dict["a0"] = a0_val
+            config_dict["a0"] = a0_val.tolist()
             with open(os.path.join(save_path, "config.json"), "w") as f:
                 json.dump(config_dict, f, indent=4)
             with open(os.path.join(save_path, "config.yaml"), "w") as f:
                 yaml.dump(config_dict, f, default_flow_style=False)
-            print(f"🎲 No structural fiber angle provided for '{args.model_mode}'. Initialized random fiber angle: {rand_deg:.2f}° -> a0 = {a0_val}")
+            print(f"🎲 No structural fiber angle provided for '{args.model_mode}'. Initialized random fiber angle: {rand_deg:.2f}° -> a0 = {a0_val.tolist()}")
 
-        a0 = jnp.asarray(a0_val)
+        a0 = jnp.asarray(a0_val, dtype=jnp.float64)
         
         a1_cand = getattr(true_mat_model, "a1", None) if getattr(true_mat_model, "a0", None) is not None else getattr(true_mat_model, "a2", None)
-        a1 = jnp.asarray(a1_cand) if a1_cand is not None else None
+        a1 = None
+        if a1_cand is not None:
+            try:
+                a1_np = np.asarray(a1_cand, dtype=np.float64)
+                if a1_np.size == 3:
+                    a1 = jnp.asarray(a1_np, dtype=jnp.float64)
+            except Exception:
+                a1 = None
+
         extractor = AnisotropicFeatureExtractor(a0, a1=a1, cap_compression=args.cap_compression == 1)
         dev, vol, aniso = jax.vmap(jax.vmap(extractor.extract))(f3x3)
         I_all = jnp.concatenate([dev, vol, aniso], axis=-1)
