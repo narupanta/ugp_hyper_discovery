@@ -1,6 +1,7 @@
 import os
 import sys
 import resource
+import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.random as jr
