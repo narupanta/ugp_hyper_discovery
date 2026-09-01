@@ -357,7 +357,7 @@ if __name__ == "__main__" :
     import math
     hole1 = model.addDisk(0.7, 0.7, 0.0, 0.2, 0.18)
     # thin ellipse in y axis (rx=0.02, ry=0.125 or we can define it and rotate)
-    hole2 = model.addDisk(0.25, 0.3, 0.0, 0.125, 0.02)
+    hole2 = model.addDisk(0.25, 0.3, 0.0, 0.18, 0.04)
     model.rotate([(2, hole2)], 0.25, 0.3, 0.0, 0.0, 0.0, 1.0, math.pi / 2.0)
 
     # Boolean Cut
