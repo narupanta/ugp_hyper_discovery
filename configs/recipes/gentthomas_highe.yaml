@@ -5,11 +5,11 @@
 # 1. Synthetic Dataset Generation Config
 material_model_name: gentthomas
 material_params:
-  dev_params: [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0]
+  dev_params: [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5]
   vol_params: [1.5, 0.0, 0.0]
 disp_noise: 0.0001
 load_noise: 0.01
-target_load_true_top: 2.5
+target_load_true_top: 3.0
 asym_factor: 0.95
 n_loadsteps: 10
 geometry: block

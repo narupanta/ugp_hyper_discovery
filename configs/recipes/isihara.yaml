@@ -9,7 +9,7 @@ material_params:
   vol_params: [1.5, 0.0, 0.0]
 disp_noise: 0.0001
 load_noise: 0.01
-target_load_true_top: 8.0
+target_load_true_top: 4.0
 asym_factor: 0.95
 n_loadsteps: 10
 geometry: block
@@ -44,4 +44,4 @@ sobol_samples_factor: 4096
 run_validation: 1
 val_load_steps_indices: [9]
 val_number_samples: 1024
-seeds: [1,2,3,4,5]
+seeds: [1]
