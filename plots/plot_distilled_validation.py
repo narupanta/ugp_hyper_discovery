@@ -107,6 +107,13 @@ def main():
         
         a1_val = getattr(true_model, "a1", None) if getattr(true_model, "a0", None) is not None else getattr(true_model, "a2", None)
         
+        import json
+        metadata_path = os.path.join(saved_model_dir, "metadata.json")
+        meta_dict = {}
+        if os.path.exists(metadata_path):
+            with open(metadata_path, "r") as f:
+                meta_dict = json.load(f)
+
         if a0_val is not None and a1_val is not None:
             feature_extractor = AnisotropicFeatureExtractor(np.array(a0_val), a1=np.array(a1_val))
         elif a0_val is not None:
@@ -116,6 +123,10 @@ def main():
             theta = float(np.pi * (1.0 / (1.0 + np.exp(-raw_th)) - 0.5))
             a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
             feature_extractor = AnisotropicFeatureExtractor(a0)
+        elif "a0" in meta_dict:
+            a0 = np.array(meta_dict["a0"])
+            a1 = np.array(meta_dict["a1"]) if "a1" in meta_dict else None
+            feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
         elif aniso_z.shape[1] == 4:
             a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
             a1 = np.array([np.cos(-np.pi / 4.0), np.sin(-np.pi / 4.0), 0.0])
@@ -125,7 +136,6 @@ def main():
             a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
             feature_extractor = AnisotropicFeatureExtractor(a0)
 
-    
     import json
     metadata_path = os.path.join(saved_model_dir, "metadata.json")
     if os.path.exists(metadata_path):

@@ -27,7 +27,11 @@ class HyperelasticGPTrainer:
             meta = {"covariance_mode": getattr(self.model, "covariance_mode", "diag")}
             if seed is not None:
                 meta["seed"] = seed
-            json.dump(meta, f)
+            if hasattr(self.model, "feature_extractor") and getattr(self.model.feature_extractor, "a0", None) is not None:
+                meta["a0"] = np.array(self.model.feature_extractor.a0).tolist()
+                if getattr(self.model.feature_extractor, "a1", None) is not None:
+                    meta["a1"] = np.array(self.model.feature_extractor.a1).tolist()
+            json.dump(meta, f, indent=4)
 
         self.I_z = I_z
         self.I_all = I_all

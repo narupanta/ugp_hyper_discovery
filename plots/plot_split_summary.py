@@ -166,6 +166,21 @@ def main():
             theta = float(np.pi * (1.0 / (1.0 + np.exp(-raw_th)) - 0.5))
             a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
             feature_extractor = AnisotropicFeatureExtractor(a0)
+        elif os.path.exists(os.path.join(saved_model_dir, "metadata.json")):
+            with open(os.path.join(saved_model_dir, "metadata.json")) as mf:
+                m_data = json.load(mf)
+                if "a0" in m_data:
+                    a0 = np.array(m_data["a0"])
+                    a1 = np.array(m_data["a1"]) if "a1" in m_data else None
+                    feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
+                elif aniso_z.shape[1] == 4:
+                    a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
+                    a1 = np.array([np.cos(-np.pi / 4.0), np.sin(-np.pi / 4.0), 0.0])
+                    feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
+                else:
+                    theta = np.pi / 4.0
+                    a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
+                    feature_extractor = AnisotropicFeatureExtractor(a0)
         elif aniso_z.shape[1] == 4:
             a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
             a1 = np.array([np.cos(-np.pi / 4.0), np.sin(-np.pi / 4.0), 0.0])

@@ -167,6 +167,24 @@ def main():
             feature_extractor = AnisotropicFeatureExtractor(np.array(a0_val), a1=np.array(a1_val))
         elif a0_val is not None:
             feature_extractor = AnisotropicFeatureExtractor(np.array(a0_val))
+        elif getattr(gp_params, "raw_aniso_theta_mean", None) is not None:
+            raw_th = gp_params.raw_aniso_theta_mean
+            theta = float(np.pi * (1.0 / (1.0 + np.exp(-raw_th)) - 0.5))
+            a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
+            feature_extractor = AnisotropicFeatureExtractor(a0)
+        elif os.path.exists(metadata_path):
+            with open(metadata_path, "r") as f:
+                meta_dict = json.load(f)
+                if "a0" in meta_dict:
+                    a0 = np.array(meta_dict["a0"])
+                    a1 = np.array(meta_dict["a1"]) if "a1" in meta_dict else None
+                    feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
+                else:
+                    a0 = np.array([np.cos(np.pi/4), np.sin(np.pi/4), 0.0])
+                    feature_extractor = AnisotropicFeatureExtractor(a0)
+        else:
+            a0 = np.array([np.cos(np.pi/4), np.sin(np.pi/4), 0.0])
+            feature_extractor = AnisotropicFeatureExtractor(a0)
 
     learned_gp = SparseHyperelasticityGP(
         gp_params, I_z, min_dev, min_vol, max_dev, max_vol,

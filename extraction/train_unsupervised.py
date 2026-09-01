@@ -210,7 +210,29 @@ if __name__ == "__main__" :
     if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
         a0_val = getattr(true_mat_model, "a0", None)
         if a0_val is None:
-            a0_val = getattr(true_mat_model, "a1", prep_data.get("a0", [1.0, 0.0, 0.0]))
+            a0_val = getattr(true_mat_model, "a1", None)
+        if a0_val is None and "a0" in prep_data:
+            a0_val = prep_data["a0"]
+        if a0_val is None and args.angles is not None and len(args.angles) > 0:
+            deg = float(args.angles[0])
+            rad = float(jnp.radians(deg)) if abs(deg) > 2.0 * float(jnp.pi) else float(deg)
+            a0_val = [float(jnp.cos(rad)), float(jnp.sin(rad)), 0.0]
+        
+        # If still None (e.g. isotropic model trained with anisotropic mode), initialize random angle in [-89.9, 89.9] degrees
+        if a0_val is None:
+            angle_key = jax.random.PRNGKey(args.seed + 1000)
+            rand_deg = float(jax.random.uniform(angle_key, minval=-89.9, maxval=89.9))
+            rand_rad = float(jnp.radians(rand_deg))
+            a0_val = [float(jnp.cos(rand_rad)), float(jnp.sin(rand_rad)), 0.0]
+            args.angles = [rand_deg]
+            config_dict["angles"] = [rand_deg]
+            config_dict["a0"] = a0_val
+            with open(os.path.join(save_path, "config.json"), "w") as f:
+                json.dump(config_dict, f, indent=4)
+            with open(os.path.join(save_path, "config.yaml"), "w") as f:
+                yaml.dump(config_dict, f, default_flow_style=False)
+            print(f"🎲 No structural fiber angle provided for '{args.model_mode}'. Initialized random fiber angle: {rand_deg:.2f}° -> a0 = {a0_val}")
+
         a0 = jnp.asarray(a0_val)
         
         a1_cand = getattr(true_mat_model, "a1", None) if getattr(true_mat_model, "a0", None) is not None else getattr(true_mat_model, "a2", None)
