@@ -46,8 +46,8 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
 
 def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.ndarray, n_nodes: int, 
         f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, piola2x2_cells: jnp.ndarray, dNdX: jnp.ndarray, dA: jnp.ndarray):
-    sigma_free_x = jnp.maximum(p.sigma_free_x, 1e-3)
-    sigma_free_y = jnp.maximum(p.sigma_free_y, 1e-3)
+    sigma_free_x = jnp.maximum(p.sigma_free_x, 1e-6)
+    sigma_free_y = jnp.maximum(p.sigma_free_y, 1e-6)
     sigma_fix_x = jnp.maximum(sigma_fix_x, 1e-3)
     sigma_fix_y = jnp.maximum(sigma_fix_y, 1e-3)
 
