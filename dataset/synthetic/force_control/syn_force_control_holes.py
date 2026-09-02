@@ -318,6 +318,7 @@ if __name__ == "__main__" :
     parser.add_argument('--n_steps', type=int, default=21)
     parser.add_argument('--geometry', type=str, default='holes')
     parser.add_argument('--mesh_dir', type=str, default="mesh")
+    parser.add_argument('--seed', type=int, default=42, help="Random seed for data generation")
     parser.add_argument('--raw_data_dir', type=str, default="dataset/synthetic/force_control")
     parser.add_argument('--precomputed_dir', type=str, default="dataset/preprocessed/syn_f")
     parser.add_argument('--mesh_size', type=float, default=0.05)
@@ -340,8 +341,8 @@ if __name__ == "__main__" :
     precomputed_dir = args.precomputed_dir
 
     os.makedirs(mesh_dir, exist_ok=True)
-    mesh_msh_path = os.path.join(mesh_dir, "training_mesh.msh")
-    mesh_npz_path = os.path.join(mesh_dir, "training_mesh.npz")
+    mesh_msh_path = os.path.join(mesh_dir, "holes_mesh.msh")
+    mesh_npz_path = os.path.join(mesh_dir, "holes_mesh.npz")
 
 
     gmsh.initialize()
@@ -540,7 +541,7 @@ if __name__ == "__main__" :
         "pc_type": "lu",
         "pc_factor_mat_solver_type": "mumps",
     }
-    key = jax.random.PRNGKey(42)
+    key = jax.random.PRNGKey(args.seed)
     # asym_factor = 0.95
     # num_load_samples = 32
     # loads_top = jnp.linspace(0.0, 10, 10)
@@ -585,7 +586,7 @@ if __name__ == "__main__" :
         return u_array
 
     u_true = solve_fem(problem_true, petsc_options, loads_true)
-    save_raw_dataset_dir = os.path.join(raw_data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_0.0")
+    save_raw_dataset_dir = os.path.join(raw_data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_0.0_{args.seed}")
     if not os.path.exists(save_raw_dataset_dir):
         os.makedirs(save_raw_dataset_dir)
     for step in range(u_true.shape[0]) :
@@ -594,7 +595,7 @@ if __name__ == "__main__" :
         
         np.savez_compressed(f"{save_raw_dataset_dir}/disp_{step:02d}.npz", **data_)
 
-    random_key = jax.random.PRNGKey(0)
+    random_key = jax.random.PRNGKey(args.seed)
 
     data_dir = Path(save_raw_dataset_dir)
 
@@ -658,7 +659,7 @@ if __name__ == "__main__" :
         precomputed_vfm['a1'] = true_mat_model.a1
     if hasattr(true_mat_model, 'a2'):
         precomputed_vfm['a2'] = true_mat_model.a2
-    dataset_name = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}_{args.geometry}"
+    dataset_name = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}_{args.geometry}_{args.seed}"
     np.savez_compressed(os.path.join(precomputed_dir, f"{dataset_name}.npz"), **precomputed_vfm)
     
     data = dict(u = u_true, mesh_pos = node_coords, cells = cells, node_type = node_type)

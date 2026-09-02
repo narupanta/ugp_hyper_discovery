@@ -204,14 +204,15 @@ def parse_args():
     parser.add_argument('--material_model', type=str, required=True)
     parser.add_argument('--n_sample', type=int, default=512)
     parser.add_argument('--subfolder', type=str, default="fem_validation")
-
+    parser.add_argument('--geometry', type=str, default="block")
+    parser.add_argument('--target_load', type=float, default=None)
 
     return parser.parse_args()
 if __name__ == "__main__" :
     args = parse_args()
     target_total_samples = args.n_sample
     analysis_dir = Path("validation/coverage_test") 
-    case_name = args.model_path
+    case_name = args.model_path if args.model_path else args.distilled_dir
     folder_name = os.path.basename(os.path.normpath(case_name))
     parent_folder_name = os.path.basename(os.path.dirname(os.path.normpath(case_name)))
     
@@ -224,13 +225,13 @@ if __name__ == "__main__" :
         material_model_name = dataset_params[1]
         disp_noise = float(dataset_params[2])
         load_noise = float(dataset_params[3])
-        target_load = float(dataset_params[4])
+        target_load = float(dataset_params[4]) if args.target_load is None else args.target_load
         asym_factor = float(dataset_params[5])
     else:
         material_model_name = dataset_params[1] if len(dataset_params) > 1 else "nh2"
         disp_noise = float(dataset_params[2]) if len(dataset_params) > 2 and dataset_params[2].replace('.', '', 1).isdigit() else 0.0001
         load_noise = float(dataset_params[3]) if len(dataset_params) > 3 and dataset_params[3].replace('.', '', 1).isdigit() else 0.01
-        target_load = 1.5
+        target_load = 1.5 if args.target_load is None else args.target_load
         asym_factor = 0.95
 
     print(f"Loaded model configuration: model={material_model_name}, disp_noise={disp_noise}, load_noise={load_noise}, target_load={target_load}, asym={asym_factor}")
@@ -254,7 +255,10 @@ if __name__ == "__main__" :
             def surface_map_top(u, x, load):
                 return jnp.array([0., -load[0]])
             def surface_map_right(u,x,load) :
-                return jnp.array([-load[0], 0.0])
+                if geometry_flag == "holes":
+                    return jnp.array([load[0], 0.0])
+                else:
+                    return jnp.array([-load[0], 0.0])
             return [surface_map_right, surface_map_top]
         def set_params(self, params):
             surface_params = params
@@ -268,17 +272,54 @@ if __name__ == "__main__" :
                 return P
 
             return first_PK_stress
-        
-    # Specify mesh-related information (first-order hexahedron element).
-    mesh_data = jnp.load("mesh/training_mesh.npz")
-    node_coords = mesh_data["node_coords"][:, :2]
-    cells = mesh_data["cells"]
+
+    geometry_flag = args.geometry
+
+    u_exp = None
+    prep_dataset_path = None
+    for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
+        if os.path.exists(search_dir):
+            for fname in os.listdir(search_dir):
+                if fname.startswith(f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}"):
+                    if geometry_flag == "block" and ("_holes" not in fname):
+                        if fname.endswith(".npz"):
+                            prep_dataset_path = os.path.join(search_dir, fname)
+                            break
+                    elif geometry_flag != "block" and (f"_{geometry_flag}" in fname):
+                        prep_dataset_path = os.path.join(search_dir, fname)
+                        break
+        if prep_dataset_path is not None:
+            break
+
+    if prep_dataset_path is not None:
+        try:
+            prep_data = np.load(prep_dataset_path, allow_pickle=True)
+            if "u_exp" in prep_data:
+                u_exp = prep_data["u_exp"]
+            elif "u_true" in prep_data:
+                u_exp = prep_data["u_true"]
+            else:
+                u_exp = prep_data["u"]
+            
+            # Load mesh directly from dataset
+            node_coords = prep_data["mesh_pos"][:, :2] if "mesh_pos" in prep_data else prep_data["node_coords"][:, :2]
+            cells = prep_data["cells"]
+            node_type = prep_data["node_type"]
+        except Exception as e:
+            print(f"Failed to load u_exp from {prep_dataset_path}: {e}")
+            sys.exit(1)
+    else:
+        print(f"Warning: No dataset found for geometry={geometry_flag}. Defaulting to mesh/{geometry_flag}_mesh.npz")
+        mesh_data = jnp.load(f"mesh/{geometry_flag}_mesh.npz")
+        node_coords = mesh_data["node_coords"][:, :2]
+        cells = mesh_data["cells"]
+        node_type = np.zeros(node_coords.shape[0], dtype=int)
+
     ele_type = 'TRI3'
     cell_type = get_meshio_cell_type(ele_type)
     data_dir = os.path.join('data')
 
     mesh = Mesh(node_coords, cells)
-
 
     # Define boundary locations.
     def left(point):
@@ -292,37 +333,24 @@ if __name__ == "__main__" :
 
     zero_dbc = lambda point : 0
     top_dbc = lambda point : 0.1
-    dirichlet_bc_info = [
-        [bottom, left] , 
-        [1, 0],
-        [zero_dbc, zero_dbc]]
-    
-    node_type = np.zeros(node_coords.shape[0], dtype=int)
-    check = jnp.sum(jax.vmap(left)(node_coords))
-    node_type[jax.vmap(left)(node_coords)] = 1
-    node_type[jax.vmap(bottom)(node_coords)] = 2
-    node_type[jax.vmap(right)(node_coords)] = 3
-    node_type[jax.vmap(top)(node_coords)] = 4
 
-    u_exp = None
-    prep_dataset_path = None
-    for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
-        if os.path.exists(search_dir):
-            for fname in os.listdir(search_dir):
-                if fname.startswith(f"{material_model_name}_{disp_noise}_{load_noise}") and fname.endswith(".npz"):
-                    prep_dataset_path = os.path.join(search_dir, fname)
-                    break
-        if prep_dataset_path is not None:
-            break
-
-    if prep_dataset_path is not None:
-        try:
-            prep_data = np.load(prep_dataset_path, allow_pickle=True)
-            if "u" in prep_data:
-                u_exp = prep_data["u"]
-                print(f"Loaded experimental training displacement (u_exp) from {prep_dataset_path}")
-        except Exception as e:
-            print(f"Could not load preprocessed dataset: {e}")
+    if geometry_flag == "holes":
+        dirichlet_bc_info = [
+            [bottom, bottom] , 
+            [0, 1],
+            [zero_dbc, zero_dbc]]
+    else:
+        dirichlet_bc_info = [
+            [bottom, left] , 
+            [1, 0],
+            [zero_dbc, zero_dbc]]
+        
+        # If node_type was not loaded from dataset, rebuild it for block
+        if "prep_dataset_path" not in locals() or prep_dataset_path is None:
+            node_type[jax.vmap(left)(node_coords)] = 1
+            node_type[jax.vmap(bottom)(node_coords)] = 2
+            node_type[jax.vmap(right)(node_coords)] = 3
+            node_type[jax.vmap(top)(node_coords)] = 4
 
     consolidated_file = os.path.join(save_path, "fem_distilled_samples.npz")
     existing_u_pred = None
@@ -356,15 +384,17 @@ if __name__ == "__main__" :
         if os.path.exists(dev_samples_path) and os.path.exists(vol_samples_path):
             dev_samples = np.load(dev_samples_path)
             vol_samples = np.load(vol_samples_path)
-            dev_indices = np.random.choice(len(dev_samples), n_sample, replace=False)
-            vol_indices = np.random.choice(len(vol_samples), n_sample, replace=False)
+            num_total = min(len(dev_samples), len(vol_samples))
+            dev_indices = np.random.choice(len(dev_samples), num_total, replace=False)
+            vol_indices = np.random.choice(len(vol_samples), num_total, replace=False)
             selected_samples = np.concatenate([dev_samples[dev_indices], vol_samples[vol_indices]], axis=1)
         else:
             flow_samples = np.load(flow_samples_path)
-            sample_indices = np.random.choice(len(flow_samples), n_sample, replace=False)
+            num_total = len(flow_samples)
+            sample_indices = np.random.choice(len(flow_samples), num_total, replace=False)
             selected_samples = flow_samples[sample_indices]
         
-        true_mat_model = get_material(material_model_name)
+        true_mat_model = true_material_model
         psi_true_func = lambda f: true_mat_model.psi(f)
         piola_true_func = lambda f: true_mat_model.P(f)
 
@@ -394,7 +424,10 @@ if __name__ == "__main__" :
         target_load_noisy = target_load + noise_std * jax.random.normal(key)
 
         noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1, 1)
-        noisy_load_right_base = noisy_load_top_base * asym_factor
+        if geometry_flag == "holes":
+            noisy_load_right_base = jnp.zeros_like(noisy_load_top_base)
+        else:
+            noisy_load_right_base = noisy_load_top_base * asym_factor
         loads_noisy = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
 
         def solve_fem(problem, petsc_options, loads):
@@ -429,77 +462,66 @@ if __name__ == "__main__" :
             np.savez_compressed(gt_file, u=u_true, cells=cells, node_coords=node_coords, node_type=node_type)
 
         u_pred_samples = []
+        actual_selected_samples = []
         main_key = jr.PRNGKey(128 + num_existing)
-        for i in range(n_sample):
-            success = False
-            tries = 0
-            max_tries = 5
-            sample_idx = i
-            while not success and tries < max_tries:
-                params = selected_samples[sample_idx]
-                if args.material_model == "isihara":
-                    c10, c01, c20, d1 = params[:4]
-                    mat = get_material(args.material_model, c10=c10, c01=c01, c20=c20, d1=d1)
-                elif args.material_model in ["gmr_aniso", "aniso_gmr"]:
-                    dev = params[:10]
-                    vol = params[10:13]
-                    aniso = params[13:]
-                    angles = getattr(true_material_model, "angles", None)
-                    a0 = getattr(true_material_model, "a0", None)
-                    a1 = getattr(true_material_model, "a1", None)
-                    mat = get_material("gmr_aniso", dev_params=dev, vol_params=vol, aniso_params=aniso, angles=angles, a0=a0, a1=a1)
-                elif args.material_model in ["gmr", "gmr_log", "gmr_nolog"]:
-                    if len(params) == 13:
-                        dev = params[:10]
-                        vol = params[10:13]
-                    elif len(params) >= 14:
-                        dev = params[:11]
-                        vol = params[11:14]
-                    else:
-                        dev = params[:9]
-                        vol = params[9:12]
-                    mat = get_material(args.material_model, dev_params=dev, vol_params=vol)
-                else:
-                    dev = params[:min(10, len(params))]
-                    vol = params[min(10, len(params)):min(13, len(params))]
-                    mat = get_material(args.material_model, dev_params=dev, vol_params=vol)
-                    
-                problem_pred = HyperElasticity(
-                    mesh=mesh,
-                    vec=2,
-                    dim=2,
-                    ele_type=ele_type,
-                    dirichlet_bc_info=dirichlet_bc_info,
-                    location_fns=[right, top],
-                    material_model_piola_stress=lambda f: mat.P(fto3x3(f))[:2, :2]
-                )
+        
+        sample_idx = 0
+        success_count = 0
+        
+        while success_count < n_sample and sample_idx < len(selected_samples):
+            params = selected_samples[sample_idx]
+            sample_idx += 1
+            
+            from core.material_models import HyperelasticModel
+            angles = getattr(true_material_model, "angles", None)
+            a0 = getattr(true_material_model, "a0", None)
+            a1 = getattr(true_material_model, "a1", None)
+            
+            # Generalized loading for 10 dev + 3 vol + N aniso
+            dev = list(params[:10])
+            vol = list(params[10:13]) if len(params) >= 13 else list(params[len(dev):len(dev)+3])
+            aniso = list(params[13:]) if len(params) > 13 else None
+            
+            # Pad to ensure expected lengths for HyperelasticModel
+            dev = dev + [0.0] * (10 - len(dev))
+            vol = vol + [0.0] * (3 - len(vol))
+            
+            mat = HyperelasticModel(dev_params=dev, vol_params=vol, aniso_params=aniso, angles=angles, a0=a0, a1=a1)
+
                 
-                try:
-                    print(f"Sample {num_existing + i + 1}/{target_total_samples}: Attempt {tries + 1}/{max_tries}...")
-                    u_pred = solve_fem(problem_pred, petsc_options, loads_noisy)
-                    success = True 
-                except Exception as e:
-                    tries += 1
-                    print(f"Simulation failed on sample attempt {tries}: {e}")
-                    if tries < max_tries:
-                        # Resample a new parameter vector from flow samples
-                        sample_idx = np.random.randint(0, len(dev_samples) if 'dev_samples' in locals() else len(flow_samples))
-                        print(f"Resampling parameter vector from flow samples (new index: {sample_idx})...")
-                    else:
-                        raise e
+            problem_pred = HyperElasticity(
+                mesh=mesh,
+                vec=2,
+                dim=2,
+                ele_type=ele_type,
+                dirichlet_bc_info=dirichlet_bc_info,
+                location_fns=[right, top],
+                material_model_piola_stress=lambda f: mat.P(fto3x3(f))[:2, :2]
+            )
+            
+            try:
+                print(f"Sample {num_existing + success_count + 1}/{target_total_samples}: Attempting realization {sample_idx}/{len(selected_samples)}...")
+                u_pred = solve_fem(problem_pred, petsc_options, loads_noisy)
+                success = True 
+            except Exception as e:
+                print(f"Simulation failed on realization {sample_idx}: {e}")
+                success = False
 
             if success:
                 u_pred_samples.append(u_pred)
-                print(f"Sample {num_existing + i + 1} completed successfully.")
+                actual_selected_samples.append(params)
+                success_count += 1
+                print(f"Sample {num_existing + success_count} completed successfully.")
 
         if len(u_pred_samples) > 0:
             new_u_arr = np.array(u_pred_samples) # Shape: (n_sample, n_steps, n_nodes, 2)
+            actual_selected_samples = np.array(actual_selected_samples)
             if existing_u_pred is not None:
                 combined_u = np.concatenate([existing_u_pred, new_u_arr], axis=0)
-                combined_params = np.concatenate([existing_selected_samples, selected_samples], axis=0)
+                combined_params = np.concatenate([existing_selected_samples, actual_selected_samples], axis=0)
             else:
                 combined_u = new_u_arr
-                combined_params = selected_samples
+                combined_params = actual_selected_samples
 
             save_dict = {
                 "u_pred": combined_u,

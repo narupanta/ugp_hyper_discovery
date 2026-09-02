@@ -252,7 +252,7 @@ if __name__ == "__main__" :
             return first_PK_stress
         
     # Specify mesh-related information (first-order hexahedron element).
-    mesh_data = jnp.load("mesh/training_mesh.npz")
+    mesh_data = jnp.load("mesh/block_mesh.npz")
     node_coords = mesh_data["node_coords"][:, :2]
     cells = mesh_data["cells"]
     ele_type = 'TRI3'

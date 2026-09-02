@@ -591,6 +591,10 @@ def main():
     parser.add_argument("--max_gamma", type=float, default=1.0, help="Max deformation intensity gamma when sample_mode is standard")
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"], help="Target mode: strain energy function (sef), joint SEF + Piola stress (sef_stress), joint SEF + Cauchy stress (sef_cauchy), or separate DEV and VOL energy (sef_split)")
     parser.add_argument("--component", type=str, default="total", choices=["total", "dev", "vol", "aniso"], help="Component to distill (used with sef_split)")
+    
+    parser.add_argument("--dev_params_disabled", type=int, nargs="*", default=[], help="Indices of deviatoric parameters to disable")
+    parser.add_argument("--vol_params_disabled", type=int, nargs="*", default=[], help="Indices of volumetric parameters to disable")
+    parser.add_argument("--aniso_params_disabled", type=int, nargs="*", default=[], help="Indices of anisotropic parameters to disable")
 
     parser.add_argument("--override_out_dir", type=str, default=None, help="Explicitly specify the output directory for distilled model logs and artifacts (overriding timestamp generation)")
     parser.add_argument("--load_existing_sensitivities", action="store_true", help="Skip Sobol resampling and directly load existing sensitivity CSVs from out_dir")
@@ -713,13 +717,29 @@ def main():
         else:
             model = PyTorchGMRModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log)
     
+    global_disabled = set()
+    
     if args.distill_target == "sef_split":
         if args.component == "dev":
-            model.deactivate_parameters([model.num_parameters - 3, model.num_parameters - 2, model.num_parameters - 1])
+            global_disabled.update(args.dev_params_disabled)
         elif args.component == "vol":
-            model.deactivate_parameters(list(range(model.num_parameters - 3)))
-
+            global_disabled.update(args.vol_params_disabled)
+        elif args.component == "aniso":
+            global_disabled.update(args.aniso_params_disabled)
+    else:
+        num_dev = 10 if include_log else 9
+        num_vol = 3
+        
+        for idx in args.dev_params_disabled:
+            global_disabled.add(idx)
+        for idx in args.vol_params_disabled:
+            global_disabled.add(num_dev + idx)
+        for idx in args.aniso_params_disabled:
+            global_disabled.add(num_dev + num_vol + idx)
             
+    if global_disabled:
+        model.deactivate_parameters(list(global_disabled))
+        
     full_param_names_master = model.parameter_names
     output_selector = EnergyOutputSelector(num_outputs=mean_psi.shape[0])
 

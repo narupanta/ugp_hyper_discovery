@@ -116,6 +116,7 @@ D_NOISE=$(get_yaml "['disp_noise']")
 L_NOISE=$(get_yaml "['load_noise']")
 ASYM=$(get_yaml "['asym_factor']")
 TOP_LOAD=$(get_yaml "['target_load_true_top']")
+TOP_LOAD_HOLES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('target_load_holes', d.get('target_load_true_top')))" 2>/dev/null || echo "$TOP_LOAD")
 STEPS=$(get_yaml "['n_loadsteps']")
 MESH_SIZE=$(get_yaml "['mesh_size']")
 if [ "$MESH_SIZE" == "None" ] || [ "$MESH_SIZE" == "" ] || [ "$MESH_SIZE" == "null" ]; then
@@ -167,10 +168,8 @@ VAL_SAMPLES=$(get_yaml "['val_number_samples']")
 VAL_LOAD_STEPS_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(*(d.get('val_load_steps_indices', [9])))")
 
 # 5. Geometry
-GEOMETRY=$(get_yaml "['geometry']")
-if [ "$GEOMETRY" == "" ] || [ "$GEOMETRY" == "null" ]; then
-    GEOMETRY="block"
-fi
+GEOMETRY_TRAIN=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('geometry_train', d.get('geometry', 'block')))" 2>/dev/null || echo "block")
+GEOMETRY_VAL=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('geometry_val', 'holes'))" 2>/dev/null || echo "holes")
 
 # Material Parameter Overrides
 ANGLES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); a=d.get('material_params', {}).get('angles', d.get('angles', None)); print(*(a if isinstance(a, list) else [a])) if a is not None else None" 2>/dev/null || true)
@@ -194,37 +193,39 @@ fi
 
 CURRENT_TIME=$(date +"%Y%m%dT%H%M%S")
 
-if [ "$SKIP_GEN" == "true" ]; then
-    echo "⏭️ Skipping Step 1 (Sequential Data Generation) as requested."
-else
-    echo "--- Step 1: Sequential Data Generation ($MODEL) on Geometry: $GEOMETRY ---"
-    
-    if [ "$GEOMETRY" == "holes" ]; then
-        GEN_SCRIPT="dataset/synthetic/force_control/syn_force_control_holes.py"
-    else
-        GEN_SCRIPT="dataset/synthetic/force_control/syn_force_control.py"
-    fi
-
-    python3 $GEN_SCRIPT \
-        --model "$MODEL" \
-        --disp_noise "$D_NOISE" \
-        --load_noise "$L_NOISE" \
-        --target_top "$TOP_LOAD" \
-        --asym "$ASYM" \
-        --n_steps "$STEPS" \
-        --geometry "$GEOMETRY" \
-        --mesh_size "$MESH_SIZE" \
-        $MAT_EXTRA_ARGS
-    echo "✅ Step 1 (Data Generation) completed."
-fi
-
 for SEED in $SEEDS_LIST; do
     echo ""
     echo "========================================================================"
     echo "=== Running Extraction & Distillation Pipeline for SEED = $SEED ==="
     echo "========================================================================"
 
-    FOLDER_NAME="${CURRENT_TIME}_${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${N_IP}_${BETA}_${FIXED_NOISE}_fip${FIXED_IP}_${MODEL_MODE}_${GEOMETRY}_${SEED}"
+    FOLDER_NAME="${CURRENT_TIME}_${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${N_IP}_${BETA}_${FIXED_NOISE}_fip${FIXED_IP}_${MODEL_MODE}_${GEOMETRY_TRAIN}_${SEED}"
+
+    if [ "$SKIP_GEN" == "true" ]; then
+        echo "⏭️ Skipping Step 1 (Sequential Data Generation) as requested."
+    else
+        echo "--- Step 1: Sequential Data Generation ($MODEL) on Geometry: $GEOMETRY_TRAIN (Seed: $SEED) ---"
+        
+        if [ "$GEOMETRY_TRAIN" == "holes" ]; then
+            GEN_SCRIPT="dataset/synthetic/force_control/syn_force_control_holes.py"
+        else
+            GEN_SCRIPT="dataset/synthetic/force_control/syn_force_control.py"
+        fi
+
+        python3 $GEN_SCRIPT \
+            --model "$MODEL" \
+            --disp_noise "$D_NOISE" \
+            --load_noise "$L_NOISE" \
+            --target_top "$TOP_LOAD" \
+            --asym "$ASYM" \
+            --n_steps "$STEPS" \
+            --geometry "$GEOMETRY_TRAIN" \
+            --mesh_size "$MESH_SIZE" \
+            --seed "$SEED" \
+            $MAT_EXTRA_ARGS || { echo "❌ Step 1 (Data Generation) failed for seed $SEED. Skipping to next seed."; continue; }
+        echo "✅ Step 1 (Data Generation) completed."
+    fi
+
     EXTRACT_SEED_DIR="extraction/extracted_models/${FOLDER_NAME}"
     DISTILL_SEED_DIR="distillation/distilled_models/${FOLDER_NAME}"
 
@@ -245,7 +246,7 @@ for SEED in $SEEDS_LIST; do
             --is_fixed_reaction_force_noise "$FIXED_NOISE" \
             --is_fixed_inducing_points "$FIXED_IP" \
             --n_iterations "$EXT_ITERS" \
-            --geometry "$GEOMETRY" \
+            --geometry "$GEOMETRY_TRAIN" \
             --disp_noise "$D_NOISE" \
             --load_noise "$L_NOISE" \
             --target_load_true_top "$TOP_LOAD" \
@@ -272,7 +273,7 @@ for SEED in $SEEDS_LIST; do
     elif [ -d "$EXTRACT_SEED_DIR" ] && [ -f "${EXTRACT_SEED_DIR}/best_params.npy" ]; then
         SAVED_DIR="$EXTRACT_SEED_DIR"
     else
-        SAVED_DIR=$(ls -td extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}*_${SEED} extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY}* 2>/dev/null | head -1)
+        SAVED_DIR=$(ls -td extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY_TRAIN}*_${SEED} extraction/extracted_models/*${MODEL}_${D_NOISE}_${L_NOISE}*${GEOMETRY_TRAIN}* 2>/dev/null | head -1)
     fi
 
     if [ -z "$SAVED_DIR" ] || [ ! -d "$SAVED_DIR" ]; then
@@ -445,7 +446,12 @@ for SEED in $SEEDS_LIST; do
     else
         DISTILLED_DIR="$DISTILL_SEED_DIR"
         if [ ! -d "$DISTILLED_DIR" ] || [ ! -f "${DISTILLED_DIR}/dev_flow_samples.npy" ]; then
-            DISTILLED_DIR=$(ls -td results/${MODEL}/*${MODEL}*d${D_NOISE}*l${L_NOISE}*${GEOMETRY}*/${SEED}/distillation distillation/distilled_models/*_${MODEL}* 2>/dev/null | head -n 1 || echo "")
+            for dir in $(ls -td results/${MODEL}/*${MODEL}*d${D_NOISE}*l${L_NOISE}*${GEOMETRY_TRAIN}*/${SEED}/distillation distillation/distilled_models/*_${MODEL}* 2>/dev/null); do
+                if [ -f "${dir}/dev_flow_samples.npy" ]; then
+                    DISTILLED_DIR="$dir"
+                    break
+                fi
+            done
         fi
     fi
     echo "ℹ️ Using distilled model at: $DISTILLED_DIR"
@@ -461,36 +467,61 @@ for SEED in $SEEDS_LIST; do
             --distilled_dir "$DISTILLED_DIR"
     fi
 
-    echo "--- Step 4: Stochastic Forward Sampling with Distilled Model (Seed: $SEED) ---"
+    echo "--- Step 4: Parallel FEM Validation on $GEOMETRY_TRAIN & $GEOMETRY_VAL (Seed: $SEED) ---"
 
     export OMP_NUM_THREADS=4 
     export XLA_PYTHON_CLIENT_MEM_FRACTION=0.45
+
+    mkdir -p "${DISTILLED_DIR}/fem_validation"
+    mkdir -p "${DISTILLED_DIR}/fem_validation_${GEOMETRY_VAL}"
+
+    VAL_LOG="${DISTILLED_DIR}/validation_${MODEL}_seed${SEED}_${GEOMETRY_TRAIN}.log"
+    VAL_LOG_HOLES="${DISTILLED_DIR}/validation_${MODEL}_seed${SEED}_${GEOMETRY_VAL}.log"
 
     python3 validation/forward_fem_distilled_piola_sample.py \
         --model_path "$MODEL_PATH" \
         --distilled_dir "$DISTILLED_DIR" \
         --material_model "$DIST_MODEL" \
-        --n_sample "$VAL_SAMPLES" > "validation_distilled_${MODEL}_seed${SEED}.log" 2>&1 &
-    PID_VAL=$!
+        --n_sample "$VAL_SAMPLES" \
+        --subfolder "fem_validation" \
+        --geometry "$GEOMETRY_TRAIN" \
+        --target_load "$TOP_LOAD" > "$VAL_LOG" 2>&1 &
+    PID1=$!
 
-    python3 validation/forward_fem_distilled_piola_traction_sample.py \
+    python3 validation/forward_fem_distilled_piola_sample.py \
         --model_path "$MODEL_PATH" \
         --distilled_dir "$DISTILLED_DIR" \
         --material_model "$DIST_MODEL" \
-        --n_sample "$VAL_SAMPLES" > "analysis_distilled_${MODEL}_seed${SEED}.log" 2>&1 &
-    PID_ANA=$!
+        --n_sample "$VAL_SAMPLES" \
+        --subfolder "fem_validation_${GEOMETRY_VAL}" \
+        --geometry "$GEOMETRY_VAL" \
+        --target_load "$TOP_LOAD_HOLES" > "$VAL_LOG_HOLES" 2>&1 &
+    PID2=$!
 
-    echo "Processes started: Validation (PID: $PID_VAL) and Analysis (PID: $PID_ANA)"
-    wait $PID_VAL $PID_ANA
+    echo "Processes started: Validation $GEOMETRY_TRAIN (PID: $PID1) and Validation $GEOMETRY_VAL (PID: $PID2)"
+    wait $PID1 || true
+    EXIT_CODE1=$?
+    wait $PID2 || true
+    EXIT_CODE2=$?
 
-    cp "validation_distilled_${MODEL}_seed${SEED}.log" "$DISTILLED_DIR/" 2>/dev/null || true
-    cp "analysis_distilled_${MODEL}_seed${SEED}.log" "$DISTILLED_DIR/" 2>/dev/null || true
+    if [ $EXIT_CODE1 -ne 0 ] || [ $EXIT_CODE2 -ne 0 ]; then
+        echo "❌ Step 4 Validation failed for seed $SEED."
+    else
+        echo "✅ Validation on $GEOMETRY_TRAIN and $GEOMETRY_VAL finished."
+    fi
 
     echo "Generating UQ verification displacement plots..."
     python3 plots/uq_verification_disp.py \
-        --model_path "$(basename "$DISTILLED_DIR")" \
+        --model_path "$DISTILLED_DIR" \
         --validation_load_step_indices $VAL_LOAD_STEPS_INDICES \
-        --n_sample "$VAL_SAMPLES"
+        --n_sample "$VAL_SAMPLES" \
+        --subfolder "fem_validation"
+
+    python3 plots/uq_verification_disp.py \
+        --model_path "$DISTILLED_DIR" \
+        --validation_load_step_indices $VAL_LOAD_STEPS_INDICES \
+        --n_sample "$VAL_SAMPLES" \
+        --subfolder "fem_validation_${GEOMETRY_VAL}"
 done
 
 echo ""

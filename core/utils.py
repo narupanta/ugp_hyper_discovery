@@ -326,7 +326,7 @@ def load_model_config(path: str) -> dict:
                     pass
 
     for d in search_dirs:
-        for cfg_name in ["config.json", "config.yaml", "recipe_config.yaml"]:
+        for cfg_name in ["recipe_config.yaml", "config.json", "config.yaml"]:
             cfg_path = os.path.join(d, cfg_name)
             if os.path.exists(cfg_path):
                 try:

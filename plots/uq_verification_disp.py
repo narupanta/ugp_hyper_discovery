@@ -591,47 +591,34 @@ def parse_args():
     parser.add_argument('--model_path', type=str, default="20260411T115941_isihara_0.0_0.01_8_0.975_5_40.0_1_0")
     parser.add_argument('--validation_load_step_indices', type=int, nargs='+', default=[2, 4, 6, 8])
     parser.add_argument('--n_sample', type=int, default=128)
-
+    parser.add_argument('--subfolder', type=str, default="fem_validation")
 
     return parser.parse_args()
 
 if __name__ == "__main__" :
-    # plt.rcParams.update({
-    # "font.family": "serif",
-    # "font.serif": ["Times New Roman", "DejaVu Serif"], # Falls back to DejaVu if Times isn't found
-    # "font.size": 14,                # Base font size
-    # "axes.titlesize": 22,           # Subplot titles
-    # "axes.labelsize": 20,           # X and Y labels
-    # "legend.fontsize": 16,          # Legend text
-    # "xtick.labelsize": 13,          # Axis tick numbers
-    # "ytick.labelsize": 13,
-    # "figure.dpi": 600,              # High resolution for the screen and save
-    # "savefig.dpi": 600,             # Ensures saved file is high quality
-    # "text.usetex": False            # Set to True only if you have a full LaTeX install
-    # })
     args = parse_args()
-    # read file from coverage/{mat_model}_{disp_noise}_{load_noise}
-    # material_model_name = "isihara"
     validation_load_step_indices = args.validation_load_step_indices
     print(validation_load_step_indices)
     n_sample = args.n_sample
     model_path = args.model_path
 
     # load result 
-
     true_data_dir = Path("dataset/precomputed_vfm")
 
     analysis_dir = Path("validation/coverage_test") 
     extraction_result_dir = Path("extraction/extracted_models") 
     case_name = args.model_path
-    # precomputed_vfm_name = f"{case_name.split('_')[1]}_{case_name.split('_')[2]}_{case_name.split('_')[3]}_{case_name.split('_')[4]}_{case_name.split('_')[5]}"
 
     if os.path.exists(Path(args.model_path)):
         pred_dir_name = Path(args.model_path)
     else:
         pred_dir_name = analysis_dir / case_name
 
-    if (pred_dir_name / "fem_validation" / "fem_distilled_samples.npz").exists():
+    if (pred_dir_name / args.subfolder / "fem_distilled_samples.npz").exists():
+        pred_dir_name = pred_dir_name / args.subfolder
+    elif not (pred_dir_name / "fem_distilled_samples.npz").exists() and (pred_dir_name.parent / args.subfolder / "fem_distilled_samples.npz").exists():
+        pred_dir_name = pred_dir_name.parent / args.subfolder
+    elif (pred_dir_name / "fem_validation" / "fem_distilled_samples.npz").exists():
         pred_dir_name = pred_dir_name / "fem_validation"
     elif not (pred_dir_name / "fem_distilled_samples.npz").exists() and (pred_dir_name.parent / "fem_validation" / "fem_distilled_samples.npz").exists():
         pred_dir_name = pred_dir_name.parent / "fem_validation"
