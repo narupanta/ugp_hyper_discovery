@@ -537,6 +537,23 @@ def main():
     fig_energy.savefig(os.path.join(distilled_dir, f"split_energy_{true_model_name}.pdf"), dpi=300, bbox_inches='tight')
     plt.close(fig_energy)
 
+    # Parse disabled parameters from config if available
+    import yaml
+    disabled_params_names = set()
+    try:
+        with open(os.path.join(distilled_dir, "recipe_config.yaml"), "r") as f:
+            recipe = yaml.safe_load(f)
+            for k, names_list in [("dev_params_disabled", all_dev_names), 
+                                  ("vol_params_disabled", all_vol_names), 
+                                  ("aniso_params_disabled", all_aniso_names)]:
+                disabled = recipe.get(k, [])
+                if disabled is not None:
+                    for idx in (disabled if isinstance(disabled, list) else [disabled]):
+                        if idx < len(names_list):
+                            disabled_params_names.add(names_list[idx].replace("$", "").replace("{", "").replace("}", "").replace("_", ""))
+    except Exception:
+        pass
+
     # 2. Parameters Figure (Sensitivity + Violin)
     h_params = 5.0
     fig_params = plt.figure(figsize=(fig_width, h_params))
@@ -546,12 +563,18 @@ def main():
     x_pos = np.arange(len(sorted_params))
     
     gt_label_added = False
+    disabled_label_added = False
     for i, p in enumerate(sorted_params):
         clean_p = p.replace('$', '').replace('{', '').replace('}', '').replace('_', '')
         if clean_p in true_params_set:
             label_gt = "Ground Truth Parameter" if not gt_label_added else ""
             ax_sens.axvspan(i - 0.25, i + 0.25, color='#E0E0E0', alpha=0.8, zorder=1, label=label_gt)
             gt_label_added = True
+            
+        if clean_p in disabled_params_names:
+            label_dis = "Disabled Parameter" if not disabled_label_added else ""
+            ax_sens.axvspan(i - 0.4, i + 0.4, color='red', alpha=0.15, zorder=2, label=label_dis)
+            disabled_label_added = True
             
         if param_types.get(p) == "dev":
             color = "#0072B2"
@@ -612,6 +635,10 @@ def main():
         true_val = true_val_dict.get(clean_p, 0.0)
         
         color = get_comp_color(clean_p)
+        
+        if clean_p in disabled_params_names:
+            ax_viol.axvspan(i - 0.4, i + 0.4, color='red', alpha=0.15, zorder=0)
+            ax_viol.plot(i, 0.0, marker='x', color='red', markersize=6, zorder=10)
         
         if is_active:
             # 95% CI interval as a light background bar

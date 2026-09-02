@@ -23,6 +23,7 @@ def find_dataset_path(saved_model_dir, true_model_name):
 
     disp_noise = "0.0001"
     load_noise = "0.01"
+    geometry = "block"
     
     for p in reversed(all_parts):
         subparts = p.split('_')
@@ -34,11 +35,13 @@ def find_dataset_path(saved_model_dir, true_model_name):
             elif sp.replace('.', '', 1).isdigit() and sp in subparts:
                 if disp_noise == "0.0001" and float(sp) < 0.005:
                     disp_noise = sp
+            elif sp in ["block", "holes", "cross"]:
+                geometry = sp
 
     for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
         if os.path.exists(search_dir):
             for fname in os.listdir(search_dir):
-                if (fname.startswith(f"{true_model_name}_{disp_noise}_{load_noise}") or fname.startswith(f"{true_model_name}_")) and fname.endswith(".npz"):
+                if (fname.startswith(f"{true_model_name}_{disp_noise}_{load_noise}") or fname.startswith(f"{true_model_name}_")) and geometry in fname and fname.endswith(".npz"):
                     return os.path.join(search_dir, fname)
     return None
 

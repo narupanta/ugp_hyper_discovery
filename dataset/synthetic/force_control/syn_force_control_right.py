@@ -334,8 +334,8 @@ if __name__ == "__main__" :
     precomputed_dir = args.precomputed_dir
 
     os.makedirs(mesh_dir, exist_ok=True)
-    mesh_msh_path = os.path.join(mesh_dir, "training_mesh.msh")
-    mesh_npz_path = os.path.join(mesh_dir, "training_mesh.npz")
+    mesh_msh_path = os.path.join(mesh_dir, "right_mesh.msh")
+    mesh_npz_path = os.path.join(mesh_dir, "right_mesh.npz")
 
 
     gmsh.initialize()
