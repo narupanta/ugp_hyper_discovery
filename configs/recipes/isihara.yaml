@@ -9,13 +9,13 @@ material_params:
   vol_params: [1.5, 0.0, 0.0]
 disp_noise: 0.0001
 load_noise: 0.01
-target_load_true_top: 4.0
+target_load_true_top: 6.0
 asym_factor: 0.95
 n_loadsteps: 10
 geometry: block
 mesh_size: 0.08
 # 2. UGP Extraction (Training) Config
-number_of_mci_sampling: 5
+number_of_mci_sampling: 8
 num_rff: 800
 train_load_steps_indices: [0, 3, 6]
 n_ip: 5
@@ -29,10 +29,10 @@ covariance_mode: diag
 
 # 3. Distillation (Uncertainty-Aware Model Discovery) Config
 distilled_material_model: gmr
-distillation_n_iterations: 5000
-dev_vol_distillation_n_iterations: 5000
+distillation_n_iterations: 10000
+dev_vol_distillation_n_iterations: 10000
 distill_target: sef_split
-sample_mode: dataset_f
+sample_mode: dataset_all
 num_func_samples: 512
 num_points: 256
 max_gamma: 1.0
@@ -44,4 +44,4 @@ sobol_samples_factor: 4096
 run_validation: 1
 val_load_steps_indices: [9]
 val_number_samples: 1024
-seeds: [1]
+seeds: [1,2,3,4,5]
