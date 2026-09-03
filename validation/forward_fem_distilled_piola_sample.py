@@ -2,6 +2,7 @@
 # Import some useful modules.
 import jax
 import jax.numpy as jnp
+import sys
 import os
 from pathlib import Path
 # Import JAX-FEM specific modules.
@@ -206,6 +207,10 @@ def parse_args():
     parser.add_argument('--subfolder', type=str, default="fem_validation")
     parser.add_argument('--geometry', type=str, default="block")
     parser.add_argument('--target_load', type=float, default=None)
+    parser.add_argument('--worker_id', type=int, default=0, help="Worker ID for parallel chunking (0-indexed)")
+    parser.add_argument('--total_workers', type=int, default=1, help="Total number of parallel workers")
+    parser.add_argument('--sample_offset', type=int, default=0, help="Starting index in candidate samples pool")
+    parser.add_argument('--output_suffix', type=str, default="", help="Optional suffix for worker output file")
 
     return parser.parse_args()
 if __name__ == "__main__" :
@@ -277,7 +282,17 @@ if __name__ == "__main__" :
 
     u_exp = None
     prep_dataset_path = None
-    for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(script_dir, '..'))
+    
+    search_dirs = [
+        os.path.join(project_root, "dataset/preprocessed/syn_f"),
+        os.path.join(project_root, "dataset/precomputed_vfm"),
+        "dataset/preprocessed/syn_f",
+        "dataset/precomputed_vfm"
+    ]
+    
+    for search_dir in search_dirs:
         if os.path.exists(search_dir):
             for fname in os.listdir(search_dir):
                 if fname.startswith(f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}"):
@@ -309,8 +324,14 @@ if __name__ == "__main__" :
             print(f"Failed to load u_exp from {prep_dataset_path}: {e}")
             sys.exit(1)
     else:
-        print(f"Warning: No dataset found for geometry={geometry_flag}. Defaulting to mesh/{geometry_flag}_mesh.npz")
-        mesh_data = jnp.load(f"mesh/{geometry_flag}_mesh.npz")
+        print(f"Warning: No dataset found for {material_model_name}_{disp_noise}_{load_noise}_{target_load} with geometry={geometry_flag}.")
+        print(f"Searched in: {search_dirs}")
+        print(f"Defaulting to mesh/{geometry_flag}_mesh.npz")
+        mesh_path = os.path.join(project_root, f"mesh/{geometry_flag}_mesh.npz")
+        if not os.path.exists(mesh_path):
+            print(f"CRITICAL ERROR: Fallback mesh {mesh_path} not found! Cannot proceed with FEM.")
+            sys.exit(1)
+        mesh_data = jnp.load(mesh_path)
         node_coords = mesh_data["node_coords"][:, :2]
         cells = mesh_data["cells"]
         node_type = np.zeros(node_coords.shape[0], dtype=int)
@@ -352,7 +373,13 @@ if __name__ == "__main__" :
             node_type[jax.vmap(right)(node_coords)] = 3
             node_type[jax.vmap(top)(node_coords)] = 4
 
-    consolidated_file = os.path.join(save_path, "fem_distilled_samples.npz")
+    if args.output_suffix:
+        file_name = f"fem_distilled_samples_{args.output_suffix}.npz"
+    elif args.total_workers > 1:
+        file_name = f"fem_distilled_samples_worker{args.worker_id}.npz"
+    else:
+        file_name = "fem_distilled_samples.npz"
+    consolidated_file = os.path.join(save_path, file_name)
     existing_u_pred = None
     existing_selected_samples = None
     num_existing = 0
@@ -380,7 +407,8 @@ if __name__ == "__main__" :
         dev_samples_path = os.path.join(args.distilled_dir, "dev_flow_samples.npy")
         vol_samples_path = os.path.join(args.distilled_dir, "vol_flow_samples.npy")
         
-        np.random.seed(42 + num_existing)
+        # Fixed master seed so block and holes draw the exact same realizations without replacement
+        np.random.seed(42)
         if os.path.exists(dev_samples_path) and os.path.exists(vol_samples_path):
             dev_samples = np.load(dev_samples_path)
             vol_samples = np.load(vol_samples_path)
@@ -394,6 +422,29 @@ if __name__ == "__main__" :
             sample_indices = np.random.choice(len(flow_samples), num_total, replace=False)
             selected_samples = flow_samples[sample_indices]
         
+        # Filter out already existing samples to guarantee no duplicate parameter realizations
+        if existing_selected_samples is not None and len(existing_selected_samples) > 0:
+            unique_candidates = []
+            for s in selected_samples:
+                # Check if this parameter candidate was already evaluated
+                is_duplicate = any(np.allclose(s, ex, atol=1e-7) for ex in existing_selected_samples)
+                if not is_duplicate:
+                    unique_candidates.append(s)
+            selected_samples = np.array(unique_candidates)
+            print(f"Filtered out {len(existing_selected_samples)} already evaluated realizations. {len(selected_samples)} candidates remaining.")
+
+        # Parallel chunking support across workers
+        if args.total_workers > 1:
+            worker_chunk_size = int(np.ceil(target_total_samples / args.total_workers))
+            start_idx = args.worker_id * worker_chunk_size
+            end_idx = min(start_idx + worker_chunk_size, len(selected_samples))
+            selected_samples = selected_samples[start_idx:end_idx]
+            n_sample = len(selected_samples)
+            print(f"Worker {args.worker_id}/{args.total_workers}: Assigned candidate slice [{start_idx}:{end_idx}] ({n_sample} samples).")
+        elif args.sample_offset > 0:
+            selected_samples = selected_samples[args.sample_offset:args.sample_offset + n_sample]
+            print(f"Worker with offset {args.sample_offset}: Evaluating {len(selected_samples)} samples.")
+
         true_mat_model = true_material_model
         psi_true_func = lambda f: true_mat_model.psi(f)
         piola_true_func = lambda f: true_mat_model.P(f)
@@ -465,6 +516,9 @@ if __name__ == "__main__" :
         actual_selected_samples = []
         main_key = jr.PRNGKey(128 + num_existing)
         
+        import time
+        t_fem_start = time.time()
+        
         sample_idx = 0
         success_count = 0
         
@@ -523,13 +577,15 @@ if __name__ == "__main__" :
                 combined_u = new_u_arr
                 combined_params = actual_selected_samples
 
+            t_fem_duration = float(time.time() - t_fem_start)
             save_dict = {
                 "u_pred": combined_u,
                 "selected_samples": combined_params,
                 "node_coords": node_coords,
                 "cells": cells,
                 "node_type": node_type,
-                "loads": loads_noisy
+                "loads": loads_noisy,
+                "fem_time_sec": t_fem_duration
             }
             if 'u_true' in locals() and u_true is not None:
                 save_dict["u_true"] = u_true
@@ -537,4 +593,4 @@ if __name__ == "__main__" :
                 save_dict["u_exp"] = u_exp
 
             np.savez_compressed(consolidated_file, **save_dict)
-            print(f"🎉 Consolidated FEM dataset updated: total {combined_u.shape[0]} samples saved to {consolidated_file}")
+            print(f"🎉 Consolidated FEM dataset updated: total {combined_u.shape[0]} samples (time: {t_fem_duration:.2f}s) saved to {consolidated_file}")
