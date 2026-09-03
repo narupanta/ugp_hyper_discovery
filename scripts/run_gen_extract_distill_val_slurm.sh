@@ -2,7 +2,7 @@
 #SBATCH --partition=iam
 #SBATCH --qos=iam_qos
 #SBATCH --nodes=1
-#SBATCH --time=20:00:00
+#SBATCH --time=100:00:00
 #SBATCH --job-name=gen-ext-dist-val
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
