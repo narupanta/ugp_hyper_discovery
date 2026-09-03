@@ -655,5 +655,21 @@ def main():
 
     print(f"\nSaved validation parity plots to:\n  - {out_split_pdf}\n  - {out_split_png}\n  - {out_tot_pdf}\n  - {out_tot_png}", flush=True)
 
+    # 10. Save Validation Metrics to JSON
+    val_json_path = os.path.join(distilled_dir, f"validation_metrics_{args.material_model}.json")
+    val_summary = {}
+    for comp, m in metrics_by_comp.items():
+        val_summary[comp] = {
+            "r2_dist": m["r2_dist"],
+            "rmse_dist": m["rmse_dist"],
+            "coverage_dist": m["coverage_dist"],
+            "r2_gp": m["r2_gp"],
+            "rmse_gp": m["rmse_gp"],
+            "coverage_gp": m["coverage_gp"]
+        }
+    with open(val_json_path, "w") as f:
+        json.dump(val_summary, f, indent=4)
+    print(f"Saved validation metrics JSON to: {val_json_path}", flush=True)
+
 if __name__ == "__main__":
     main()

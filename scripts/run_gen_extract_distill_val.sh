@@ -166,6 +166,7 @@ fi
 # 4. Validation Config
 VAL_SAMPLES=$(get_yaml "['val_number_samples']")
 VAL_LOAD_STEPS_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(*(d.get('val_load_steps_indices', [9])))")
+VAL_WORKERS=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('val_workers', 2))" 2>/dev/null || echo "2")
 
 # 5. Geometry
 GEOMETRY_TRAIN=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('geometry_train', d.get('geometry', 'block')))" 2>/dev/null || echo "block")
@@ -207,12 +208,19 @@ for SEED in $SEEDS_LIST; do
         echo "--- Step 1: Sequential Data Generation ($MODEL) on Geometry: $GEOMETRY_TRAIN (Seed: $SEED) ---"
         
         if [ "$GEOMETRY_TRAIN" == "holes" ]; then
-            GEN_SCRIPT="dataset/synthetic/force_control/syn_force_control_holes.py"
+            GEN_SCRIPT_TRAIN="dataset/synthetic/force_control/syn_force_control_holes.py"
         else
-            GEN_SCRIPT="dataset/synthetic/force_control/syn_force_control.py"
+            GEN_SCRIPT_TRAIN="dataset/synthetic/force_control/syn_force_control.py"
         fi
 
-        python3 $GEN_SCRIPT \
+        if [ "$GEOMETRY_VAL" == "holes" ]; then
+            GEN_SCRIPT_VAL="dataset/synthetic/force_control/syn_force_control_holes.py"
+        else
+            GEN_SCRIPT_VAL="dataset/synthetic/force_control/syn_force_control.py"
+        fi
+
+        echo "Generating training dataset ($GEOMETRY_TRAIN)..."
+        python3 $GEN_SCRIPT_TRAIN \
             --model "$MODEL" \
             --disp_noise "$D_NOISE" \
             --load_noise "$L_NOISE" \
@@ -222,7 +230,20 @@ for SEED in $SEEDS_LIST; do
             --geometry "$GEOMETRY_TRAIN" \
             --mesh_size "$MESH_SIZE" \
             --seed "$SEED" \
-            $MAT_EXTRA_ARGS || { echo "❌ Step 1 (Data Generation) failed for seed $SEED. Skipping to next seed."; continue; }
+            $MAT_EXTRA_ARGS || { echo "❌ Step 1 (Data Generation) failed for training geometry on seed $SEED. Skipping to next seed."; continue; }
+
+        echo "Generating validation dataset ($GEOMETRY_VAL)..."
+        python3 $GEN_SCRIPT_VAL \
+            --model "$MODEL" \
+            --disp_noise "$D_NOISE" \
+            --load_noise "$L_NOISE" \
+            --target_top "$TOP_LOAD_HOLES" \
+            --asym "$ASYM" \
+            --n_steps "$STEPS" \
+            --geometry "$GEOMETRY_VAL" \
+            --mesh_size "$MESH_SIZE" \
+            --seed "$SEED" \
+            $MAT_EXTRA_ARGS || { echo "❌ Step 1 (Data Generation) failed for validation geometry on seed $SEED. Skipping to next seed."; continue; }
         echo "✅ Step 1 (Data Generation) completed."
     fi
 
@@ -394,7 +415,8 @@ for SEED in $SEEDS_LIST; do
                 --distilled_dir "$SHARED_OUT_DIR" \
                 --saved_model_dir "$SAVED_DIR" \
                 --material_model "$DIST_MODEL" \
-                --distill_target "$DIST_TARGET"
+                --distill_target "$DIST_TARGET" \
+                --val_load_steps $VAL_LOAD_STEPS_INDICES
 
             echo "Generating invariant & deformation sensitivity plots..."
             for COMP in "dev" "vol" "aniso"; do
@@ -467,47 +489,66 @@ for SEED in $SEEDS_LIST; do
             --distilled_dir "$DISTILLED_DIR"
     fi
 
-    echo "--- Step 4: Parallel FEM Validation on $GEOMETRY_TRAIN & $GEOMETRY_VAL (Seed: $SEED) ---"
+    echo "--- Step 4: Parallel FEM Validation on $GEOMETRY_TRAIN & $GEOMETRY_VAL (Seed: $SEED, Workers per Geometry: $VAL_WORKERS) ---"
 
-    export OMP_NUM_THREADS=4 
+    export OMP_NUM_THREADS=3
     export XLA_PYTHON_CLIENT_MEM_FRACTION=0.45
 
     mkdir -p "${DISTILLED_DIR}/fem_validation"
     mkdir -p "${DISTILLED_DIR}/fem_validation_${GEOMETRY_VAL}"
 
-    VAL_LOG="${DISTILLED_DIR}/validation_${MODEL}_seed${SEED}_${GEOMETRY_TRAIN}.log"
-    VAL_LOG_HOLES="${DISTILLED_DIR}/validation_${MODEL}_seed${SEED}_${GEOMETRY_VAL}.log"
+    VAL_PIDS=()
 
-    python3 validation/forward_fem_distilled_piola_sample.py \
-        --model_path "$MODEL_PATH" \
-        --distilled_dir "$DISTILLED_DIR" \
-        --material_model "$DIST_MODEL" \
-        --n_sample "$VAL_SAMPLES" \
-        --subfolder "fem_validation" \
-        --geometry "$GEOMETRY_TRAIN" \
-        --target_load "$TOP_LOAD" > "$VAL_LOG" 2>&1 &
-    PID1=$!
+    # Launch workers for training geometry (e.g. block)
+    for ((w=0; w<VAL_WORKERS; w++)); do
+        W_LOG="${DISTILLED_DIR}/fem_validation/worker_${w}.log"
+        python3 validation/forward_fem_distilled_piola_sample.py \
+            --model_path "$MODEL_PATH" \
+            --distilled_dir "$DISTILLED_DIR" \
+            --material_model "$DIST_MODEL" \
+            --n_sample "$VAL_SAMPLES" \
+            --subfolder "fem_validation" \
+            --geometry "$GEOMETRY_TRAIN" \
+            --target_load "$TOP_LOAD" \
+            --total_workers "$VAL_WORKERS" \
+            --worker_id "$w" > "$W_LOG" 2>&1 &
+        VAL_PIDS+=($!)
+    done
 
-    python3 validation/forward_fem_distilled_piola_sample.py \
-        --model_path "$MODEL_PATH" \
-        --distilled_dir "$DISTILLED_DIR" \
-        --material_model "$DIST_MODEL" \
-        --n_sample "$VAL_SAMPLES" \
-        --subfolder "fem_validation_${GEOMETRY_VAL}" \
-        --geometry "$GEOMETRY_VAL" \
-        --target_load "$TOP_LOAD_HOLES" > "$VAL_LOG_HOLES" 2>&1 &
-    PID2=$!
+    # Launch workers for validation geometry (e.g. holes) simultaneously
+    for ((w=0; w<VAL_WORKERS; w++)); do
+        W_LOG_HOLES="${DISTILLED_DIR}/fem_validation_${GEOMETRY_VAL}/worker_${w}.log"
+        python3 validation/forward_fem_distilled_piola_sample.py \
+            --model_path "$MODEL_PATH" \
+            --distilled_dir "$DISTILLED_DIR" \
+            --material_model "$DIST_MODEL" \
+            --n_sample "$VAL_SAMPLES" \
+            --subfolder "fem_validation_${GEOMETRY_VAL}" \
+            --geometry "$GEOMETRY_VAL" \
+            --target_load "$TOP_LOAD_HOLES" \
+            --total_workers "$VAL_WORKERS" \
+            --worker_id "$w" > "$W_LOG_HOLES" 2>&1 &
+        VAL_PIDS+=($!)
+    done
 
-    echo "Processes started: Validation $GEOMETRY_TRAIN (PID: $PID1) and Validation $GEOMETRY_VAL (PID: $PID2)"
-    wait $PID1 || true
-    EXIT_CODE1=$?
-    wait $PID2 || true
-    EXIT_CODE2=$?
+    echo "Launched $((VAL_WORKERS * 2)) parallel FEM workers across $GEOMETRY_TRAIN and $GEOMETRY_VAL: PIDs (${VAL_PIDS[*]})"
+    
+    STEP4_FAILED=0
+    for pid in "${VAL_PIDS[@]}"; do
+        wait "$pid" || STEP4_FAILED=1
+    done
 
-    if [ $EXIT_CODE1 -ne 0 ] || [ $EXIT_CODE2 -ne 0 ]; then
-        echo "❌ Step 4 Validation failed for seed $SEED."
+    if [ "$VAL_WORKERS" -gt 1 ]; then
+        echo "Merging worker outputs for $GEOMETRY_TRAIN..."
+        python3 validation/merge_fem_workers.py --folder "${DISTILLED_DIR}/fem_validation"
+        echo "Merging worker outputs for $GEOMETRY_VAL..."
+        python3 validation/merge_fem_workers.py --folder "${DISTILLED_DIR}/fem_validation_${GEOMETRY_VAL}"
+    fi
+
+    if [ $STEP4_FAILED -ne 0 ]; then
+        echo "❌ Step 4 Validation encountered worker failures for seed $SEED."
     else
-        echo "✅ Validation on $GEOMETRY_TRAIN and $GEOMETRY_VAL finished."
+        echo "✅ Validation on $GEOMETRY_TRAIN and $GEOMETRY_VAL finished successfully."
     fi
 
     echo "Generating UQ verification displacement plots..."
@@ -522,6 +563,11 @@ for SEED in $SEEDS_LIST; do
         --validation_load_step_indices $VAL_LOAD_STEPS_INDICES \
         --n_sample "$VAL_SAMPLES" \
         --subfolder "fem_validation_${GEOMETRY_VAL}"
+
+    echo "Updating master validation_metrics.json (SEF, Displacement, and Model Structure)..."
+    python3 validation/update_validation_metrics_json.py \
+        --distilled_dir "$DISTILLED_DIR" \
+        --val_load_steps $VAL_LOAD_STEPS_INDICES
 done
 
 echo ""
