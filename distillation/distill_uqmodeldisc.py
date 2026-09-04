@@ -15,6 +15,14 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'U
 import torch
 import torch.nn as nn
 
+import uqmodeldisc.parameterdistillation.distillation as uq_distill
+
+# Monkey-patch torch.sqrt in uqmodeldisc.parameterdistillation.distillation to prevent NaN gradients when L2 norm is 0
+_orig_torch_sqrt = uq_distill.torch.sqrt
+def _safe_torch_sqrt(x):
+    return _orig_torch_sqrt(torch.clamp(x, min=1e-12))
+uq_distill.torch.sqrt = _safe_torch_sqrt
+
 from uqmodeldisc.parameterdistillation.distillation import (
     distill_parameter_distribution_from_gp,
     save_normalizing_flow_parameter_distribution,

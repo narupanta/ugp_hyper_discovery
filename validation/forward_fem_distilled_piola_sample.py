@@ -250,32 +250,78 @@ if __name__ == "__main__" :
     true_piola_stress_func = lambda f : true_material_model.P(fto3x3(f))[:2, :2]
 
     # Define constitutive relationship.
+    def eval_hyperelastic_psi(F_2d, p, a0=None, a1=None):
+        F_3d = jnp.eye(3, dtype=jnp.float64).at[:2, :2].set(F_2d)
+        C = C_func(F_3d)
+        I1 = I1_func(C)
+        I2 = I2_func(C)
+        I3 = I3_func(C)
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+
+        i1_dev = I3_safe ** (-1 / 3) * I1
+        i2_dev = I3_safe ** (-2 / 3) * I2
+        J = jnp.sqrt(I3_safe)
+        i1_m3 = i1_dev - 3.0
+        i2_m3 = i2_dev - 3.0
+        J_m1 = J - 1.0
+
+        dev_p = p[:10]
+        vol_p = p[10:13]
+
+        w_dev = (
+            dev_p[0] * i1_m3 + dev_p[1] * i2_m3 + dev_p[2] * i1_m3**2 +
+            dev_p[3] * i1_m3 * i2_m3 + dev_p[4] * i2_m3**2 + dev_p[5] * i1_m3**3 +
+            dev_p[6] * (i1_m3**2) * i2_m3 + dev_p[7] * i1_m3 * (i2_m3**2) +
+            dev_p[8] * i2_m3**3 + dev_p[9] * jnp.log(jnp.maximum(i2_dev / 3.0, 1e-8))
+        )
+        w_vol = vol_p[0] * J_m1**2 + vol_p[1] * J_m1**4 + vol_p[2] * J_m1**6
+
+        w_aniso = 0.0
+        if a0 is not None:
+            C_bar = (I3_safe ** (-1 / 3))[..., None, None] * C
+            I4_bar = jnp.einsum('i,...ij,j->...', a0, C_bar, a0)
+            I4_m1 = I4_bar - 1.0
+            aniso_p = p[13:19]
+            w_aniso = aniso_p[0] * I4_m1**2 + aniso_p[1] * I4_m1**3 + aniso_p[2] * I4_m1**4
+            if a1 is not None:
+                I6_bar = jnp.einsum('i,...ij,j->...', a1, C_bar, a1)
+                I6_m1 = I6_bar - 1.0
+                w_aniso += aniso_p[3] * I6_m1**2 + aniso_p[4] * I6_m1**3 + aniso_p[5] * I6_m1**4
+
+        return w_dev + w_vol + w_aniso
+
+    def piola_stress_2d(F_2d, p, a0=None, a1=None):
+        return jax.grad(eval_hyperelastic_psi, argnums=0)(F_2d, p, a0, a1)
+
     class HyperElasticity(Problem):
-        def __init__(self, material_model_piola_stress, **kwargs) :
+        def __init__(self, a0=None, a1=None, **kwargs):
+            self.a0 = a0
+            self.a1 = a1
             super().__init__(**kwargs)
-            self.material_model_piola_stress = material_model_piola_stress # should be function outputing piola stress [2x2 matrix]
+
         def custom_init(self):
             self.fe = self.fes[0]
+            self.internal_vars = [jnp.zeros((self.num_cells, self.fes[0].num_quads, 19), dtype=jnp.float64)]
+
+        def set_params(self, params):
+            self.internal_vars = [jnp.tile(params[None, None, :], (self.num_cells, self.fes[0].num_quads, 1))]
+
         def get_surface_maps(self):
             def surface_map_top(u, x, load):
                 return jnp.array([0., -load[0]])
-            def surface_map_right(u,x,load) :
+            def surface_map_right(u, x, load):
                 if geometry_flag == "holes":
                     return jnp.array([load[0], 0.0])
                 else:
                     return jnp.array([-load[0], 0.0])
             return [surface_map_right, surface_map_top]
-        def set_params(self, params):
-            surface_params = params
-            self.internal_vars_surfaces = [[surface_params]]
+
         def get_tensor_map(self):
-
-            def first_PK_stress(u_grad):
-                I = jnp.eye(self.dim)
-                F = u_grad + I
-                P = self.material_model_piola_stress(F)
-                return P
-
+            a0_fixed = self.a0
+            a1_fixed = self.a1
+            def first_PK_stress(u_grad, p):
+                F = u_grad + jnp.eye(self.dim)
+                return piola_stress_2d(F, p, a0_fixed, a1_fixed)
             return first_PK_stress
 
     geometry_flag = args.geometry
@@ -445,17 +491,32 @@ if __name__ == "__main__" :
             selected_samples = selected_samples[args.sample_offset:args.sample_offset + n_sample]
             print(f"Worker with offset {args.sample_offset}: Evaluating {len(selected_samples)} samples.")
 
-        true_mat_model = true_material_model
-        psi_true_func = lambda f: true_mat_model.psi(f)
-        piola_true_func = lambda f: true_mat_model.P(f)
+        angles = getattr(true_material_model, "angles", None)
+        a0 = getattr(true_material_model, "a0", None)
+        a1 = getattr(true_material_model, "a1", None)
 
-        problem_true = HyperElasticity(mesh=mesh,
-                                vec=2,
-                                dim=2,
-                                ele_type=ele_type,
-                                dirichlet_bc_info=dirichlet_bc_info,
-                                location_fns=[right, top],
-                                material_model_piola_stress=true_piola_stress_func)
+        # Helper to convert parameter sequence to fixed 19-vector (10 dev + 3 vol + 6 aniso)
+        def to_19_param_vec(p_seq):
+            p_arr = np.zeros(19, dtype=np.float64)
+            p_len = min(len(p_seq), 19)
+            p_arr[:p_len] = p_seq[:p_len]
+            return jnp.array(p_arr)
+
+        problem_true = HyperElasticity(
+            mesh=mesh,
+            vec=2,
+            dim=2,
+            ele_type=ele_type,
+            dirichlet_bc_info=dirichlet_bc_info,
+            location_fns=[right, top],
+            a0=a0,
+            a1=a1
+        )
+        true_dev = list(getattr(true_material_model, "dev_params", []))
+        true_vol = list(getattr(true_material_model, "vol_params", []))
+        true_aniso = list(getattr(true_material_model, "aniso_params", [])) if getattr(true_material_model, "aniso_params", None) is not None else []
+        true_p_vec = to_19_param_vec(true_dev + true_vol + true_aniso)
+        problem_true.set_params(true_p_vec)
 
         petsc_options = {
             "snes_type": "newtonls",
@@ -521,37 +582,26 @@ if __name__ == "__main__" :
         
         sample_idx = 0
         success_count = 0
+
+        # Instantiate problem_pred ONCE outside the sample loop
+        problem_pred = HyperElasticity(
+            mesh=mesh,
+            vec=2,
+            dim=2,
+            ele_type=ele_type,
+            dirichlet_bc_info=dirichlet_bc_info,
+            location_fns=[right, top],
+            a0=a0,
+            a1=a1
+        )
         
         while success_count < n_sample and sample_idx < len(selected_samples):
             params = selected_samples[sample_idx]
             sample_idx += 1
-            
-            from core.material_models import HyperelasticModel
-            angles = getattr(true_material_model, "angles", None)
-            a0 = getattr(true_material_model, "a0", None)
-            a1 = getattr(true_material_model, "a1", None)
-            
-            # Generalized loading for 10 dev + 3 vol + N aniso
-            dev = list(params[:10])
-            vol = list(params[10:13]) if len(params) >= 13 else list(params[len(dev):len(dev)+3])
-            aniso = list(params[13:]) if len(params) > 13 else None
-            
-            # Pad to ensure expected lengths for HyperelasticModel
-            dev = dev + [0.0] * (10 - len(dev))
-            vol = vol + [0.0] * (3 - len(vol))
-            
-            mat = HyperelasticModel(dev_params=dev, vol_params=vol, aniso_params=aniso, angles=angles, a0=a0, a1=a1)
 
-                
-            problem_pred = HyperElasticity(
-                mesh=mesh,
-                vec=2,
-                dim=2,
-                ele_type=ele_type,
-                dirichlet_bc_info=dirichlet_bc_info,
-                location_fns=[right, top],
-                material_model_piola_stress=lambda f: mat.P(fto3x3(f))[:2, :2]
-            )
+            # Update parameters dynamically without re-instantiating Problem or triggering JIT recompilation
+            p_vec = to_19_param_vec(params)
+            problem_pred.set_params(p_vec)
             
             try:
                 print(f"Sample {num_existing + success_count + 1}/{target_total_samples}: Attempting realization {sample_idx}/{len(selected_samples)}...")

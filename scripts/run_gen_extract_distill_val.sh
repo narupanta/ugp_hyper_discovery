@@ -499,6 +499,7 @@ for SEED in $SEEDS_LIST; do
 
     VAL_PIDS=()
 
+    MODEL_PATH="${FOLDER_NAME}"
     # Launch workers for training geometry (e.g. block)
     for ((w=0; w<VAL_WORKERS; w++)); do
         W_LOG="${DISTILLED_DIR}/fem_validation/worker_${w}.log"

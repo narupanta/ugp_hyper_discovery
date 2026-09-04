@@ -15,7 +15,7 @@ from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
-from core.utils import infer_material_model_name
+from core.utils import infer_material_model_name, deformation_gradient_element
 
 def find_dataset_path(saved_model_dir, true_model_name):
     saved_dir_abs = os.path.abspath(saved_model_dir)
@@ -111,6 +111,29 @@ def main():
     prep_data = np.load(dataset_path, allow_pickle=True)
     F_all_steps_2x2 = prep_data["F"]  # [num_steps, num_elements, 2, 2]
     total_steps = F_all_steps_2x2.shape[0]
+
+    # Look for clean (noiseless) FEM ground truth
+    u_fem_gt = None
+    F_fem_gt_2x2 = None
+    for cand_gt in [
+        os.path.join(distilled_dir, "fem_validation/gt/u_gt.npz"),
+        os.path.join(distilled_dir, "fem_validation_holes/gt/u_gt.npz"),
+        os.path.join(distilled_dir, "gt/u_gt.npz")
+    ]:
+        if os.path.exists(cand_gt):
+            gt_d = np.load(cand_gt)
+            u_fem_gt = gt_d["u"]
+            gt_cells = gt_d["cells"]
+            gt_coords = gt_d["node_coords"]
+            # Compute exact deformation gradient from clean FEM displacements
+            F_list = []
+            coords_elems = gt_coords[gt_cells]
+            for s in range(u_fem_gt.shape[0]):
+                f_s, _ = deformation_gradient_element(coords_elems, u_fem_gt[s][gt_cells])
+                F_list.append(np.array(f_s))
+            F_fem_gt_2x2 = np.stack(F_list, axis=0)
+            print(f"Loaded noiseless FEM ground truth from: {cand_gt}")
+            break
 
     # 2. Determine validation load steps
     train_steps = parse_train_load_steps(saved_model_dir)
@@ -321,9 +344,19 @@ def main():
         F_step_3x3[:, 2, 2] = 1.0
         F_step_3x3_jnp = jnp.array(F_step_3x3)
 
+        # Evaluate Ground Truth from noiseless FEM simulation if available, else from dataset F
+        if F_fem_gt_2x2 is not None and step_idx < F_fem_gt_2x2.shape[0]:
+            F_gt_step_2x2 = F_fem_gt_2x2[step_idx]
+            F_gt_step_3x3 = np.zeros((F_gt_step_2x2.shape[0], 3, 3), dtype=np.float64)
+            F_gt_step_3x3[:, :2, :2] = F_gt_step_2x2
+            F_gt_step_3x3[:, 2, 2] = 1.0
+            F_gt_step_3x3_jnp = jnp.array(F_gt_step_3x3)
+        else:
+            F_gt_step_3x3_jnp = F_step_3x3_jnp
+
         if args.distill_target == "sef_split":
             # 1. Deviatoric
-            psi_dev_true = np.array(jax.vmap(true_model.psi_dev)(F_step_3x3_jnp))
+            psi_dev_true = np.array(jax.vmap(true_model.psi_dev)(F_gt_step_3x3_jnp))
             dev_samples_step = np.array(eval_dev_batch(dev_samples_jnp, F_step_3x3_jnp))
             gp_dev_dist = learned_gp.dev_psi_dist(F_step_3x3_jnp)
             
@@ -336,7 +369,7 @@ def main():
             data_by_comp["dev"]["gp_std"].append(np.sqrt(np.maximum(1e-12, np.array(gp_dev_dist.var))))
 
             # 2. Volumetric
-            psi_vol_true = np.array(jax.vmap(true_model.psi_vol)(F_step_3x3_jnp))
+            psi_vol_true = np.array(jax.vmap(true_model.psi_vol)(F_gt_step_3x3_jnp))
             vol_samples_step = np.array(eval_vol_batch(vol_samples_jnp, F_step_3x3_jnp))
             gp_vol_dist = learned_gp.vol_psi_dist(F_step_3x3_jnp)
 
@@ -350,7 +383,7 @@ def main():
 
             # 3. Anisotropic (if active)
             if has_aniso:
-                psi_aniso_true = np.array(jax.vmap(true_model.psi_aniso)(F_step_3x3_jnp))
+                psi_aniso_true = np.array(jax.vmap(true_model.psi_aniso)(F_gt_step_3x3_jnp))
                 aniso_samples_step = np.array(eval_aniso_batch(aniso_samples_jnp, F_step_3x3_jnp))
                 gp_aniso_dist = learned_gp.aniso_psi_dist(F_step_3x3_jnp) if hasattr(learned_gp, "aniso_psi_dist") and learned_gp.is_anisotropic else None
 
@@ -382,7 +415,7 @@ def main():
             data_by_comp["total"]["gp_std"].append(np.sqrt(np.maximum(1e-12, np.array(gp_total_dist.var))))
 
         else:
-            psi_total_true = np.array(jax.vmap(true_model.psi)(F_step_3x3_jnp))
+            psi_total_true = np.array(jax.vmap(true_model.psi)(F_gt_step_3x3_jnp))
             total_samples_step = np.array(eval_all_samples_fn(jnp.array(samples), F_step_3x3_jnp))
             gp_total_dist = learned_gp.psi_dist(F_step_3x3_jnp)
 
@@ -576,7 +609,10 @@ def main():
         rep_step = val_steps[-1]
         rep_idx_in_val = val_steps.index(rep_step)
 
-        if u_all is not None:
+        # Prefer noiseless FEM displacements for mesh visualization if available
+        if u_fem_gt is not None and rep_step < u_fem_gt.shape[0]:
+            coords_rep = mesh_pos + u_fem_gt[rep_step]
+        elif u_all is not None:
             coords_rep = mesh_pos + u_all[rep_step]
         else:
             coords_rep = mesh_pos
@@ -597,9 +633,11 @@ def main():
 
         def plot_domain_figure(source_type="distilled"):
             is_dist = (source_type == "distilled")
-            fig_dom, axes_dom = plt.subplots(2, len(domain_cols), figsize=(4.6 * len(domain_cols), 7.2))
+            # 3 rows: Row 0 = Ground Truth, Row 1 = Predicted Mean, Row 2 = Uncertainty (Std)
+            fig_dom, axes_dom = plt.subplots(3, len(domain_cols), figsize=(4.6 * len(domain_cols), 10.5))
             
             for j, comp in enumerate(domain_cols):
+                true_arr = data_by_comp[comp]["true"][rep_idx_in_val]
                 if is_dist:
                     mean_arr = data_by_comp[comp]["dist_mean"][rep_idx_in_val]
                     std_arr = data_by_comp[comp]["dist_std"][rep_idx_in_val]
@@ -607,10 +645,25 @@ def main():
                     mean_arr = data_by_comp[comp]["gp_mean"][rep_idx_in_val]
                     std_arr = data_by_comp[comp]["gp_std"][rep_idx_in_val]
 
-                # Row 0: Mean Energy
-                ax_mean = axes_dom[0, j]
-                im_mean = ax_mean.tripcolor(triangulation, facecolors=mean_arr, cmap='viridis', edgecolors='none')
-                ax_mean.set_title(col_titles.get(comp, comp.upper()), fontsize=11, fontweight='bold', pad=6)
+                # Shared vmin / vmax for True Energy and Predicted Mean for direct visual parity
+                vmin_val = min(true_arr.min(), mean_arr.min())
+                vmax_val = max(true_arr.max(), mean_arr.max())
+
+                # Row 0: Ground Truth Energy
+                ax_true = axes_dom[0, j]
+                im_true = ax_true.tripcolor(triangulation, facecolors=true_arr, cmap='viridis', vmin=vmin_val, vmax=vmax_val, edgecolors='none')
+                ax_true.set_title(col_titles.get(comp, comp.upper()), fontsize=11, fontweight='bold', pad=6)
+                ax_true.set_aspect('equal')
+                ax_true.axis('off')
+
+                div_true = make_axes_locatable(ax_true)
+                cax_true = div_true.append_axes("right", size="5%", pad=0.08)
+                cb_true = fig_dom.colorbar(im_true, cax=cax_true)
+                cb_true.ax.tick_params(labelsize=8)
+
+                # Row 1: Predicted Mean Energy
+                ax_mean = axes_dom[1, j]
+                im_mean = ax_mean.tripcolor(triangulation, facecolors=mean_arr, cmap='viridis', vmin=vmin_val, vmax=vmax_val, edgecolors='none')
                 ax_mean.set_aspect('equal')
                 ax_mean.axis('off')
                 
@@ -619,8 +672,8 @@ def main():
                 cb_mean = fig_dom.colorbar(im_mean, cax=cax_mean)
                 cb_mean.ax.tick_params(labelsize=8)
 
-                # Row 1: Std Energy (Uncertainty)
-                ax_std = axes_dom[1, j]
+                # Row 2: Std Energy (Uncertainty)
+                ax_std = axes_dom[2, j]
                 im_std = ax_std.tripcolor(triangulation, facecolors=std_arr, cmap='magma', edgecolors='none')
                 ax_std.set_aspect('equal')
                 ax_std.axis('off')
@@ -631,13 +684,15 @@ def main():
                 cb_std.ax.tick_params(labelsize=8)
 
             # Row labels
-            axes_dom[0, 0].text(-0.08, 0.5, "Mean Energy\n$\mathbf{\mu(\Psi)}$", transform=axes_dom[0, 0].transAxes,
+            axes_dom[0, 0].text(-0.08, 0.5, f"Ground Truth\n({true_model_name})\n$\mathbf{{\Psi_{{true}}}}$", transform=axes_dom[0, 0].transAxes,
                                 fontsize=11, fontweight='bold', va='center', ha='right', rotation=90)
-            axes_dom[1, 0].text(-0.08, 0.5, "Uncertainty (Std)\n$\mathbf{\sigma(\Psi)}$", transform=axes_dom[1, 0].transAxes,
+            axes_dom[1, 0].text(-0.08, 0.5, "Predicted Mean\n$\mathbf{\mu(\Psi)}$", transform=axes_dom[1, 0].transAxes,
+                                fontsize=11, fontweight='bold', va='center', ha='right', rotation=90)
+            axes_dom[2, 0].text(-0.08, 0.5, "Uncertainty (Std)\n$\mathbf{\sigma(\Psi)}$", transform=axes_dom[2, 0].transAxes,
                                 fontsize=11, fontweight='bold', va='center', ha='right', rotation=90)
 
             title_prefix = f"Distilled Model ({args.material_model.upper()})" if is_dist else "Extracted GP Baseline"
-            fig_dom.suptitle(f"{title_prefix} - Domain Energy & Uncertainty Distribution\nValidation Load Step: {rep_step} | Ground Truth: {true_model_name}", fontsize=13, fontweight='bold', y=0.98)
+            fig_dom.suptitle(f"{title_prefix} vs Ground Truth - Domain Energy & Uncertainty Distribution\nValidation Load Step: {rep_step} | Ground Truth: {true_model_name}", fontsize=13, fontweight='bold', y=0.98)
             plt.tight_layout()
 
             prefix = "distilled" if is_dist else "extracted"
@@ -652,6 +707,54 @@ def main():
         out_gp_dom_pdf, out_gp_dom_png = plot_domain_figure("extracted")
         print(f"Saved distilled domain energy plot to:\n  - {out_dist_dom_pdf}\n  - {out_dist_dom_png}", flush=True)
         print(f"Saved extracted domain energy plot to:\n  - {out_gp_dom_pdf}\n  - {out_gp_dom_png}", flush=True)
+
+        # 9.1 Generate Domain Invariants Distribution Plot (I1_bar, I2_bar, J)
+        def plot_invariants_figure():
+            extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
+
+            # 1. Observed / Noisy kinematic invariants
+            F_obs_2x2 = F_all_steps_2x2[rep_step]
+            F_obs_3x3 = np.zeros((F_obs_2x2.shape[0], 3, 3), dtype=np.float64)
+            F_obs_3x3[:, :2, :2] = F_obs_2x2
+            F_obs_3x3[:, 2, 2] = 1.0
+            feats_obs = jax.vmap(extractor.extract)(jnp.array(F_obs_3x3))
+            i1_obs = np.array(feats_obs[0][:, 0])
+            i2_obs = np.array(feats_obs[0][:, 1])
+            j_obs  = np.array(feats_obs[1][:, 0])
+
+            inv_list = [
+                (r"$\mathbf{\bar{I}_1\ (Deviatoric\ First\ Invariant)}$", i1_obs, "plasma"),
+                (r"$\mathbf{\bar{I}_2\ (Deviatoric\ Second\ Invariant)}$", i2_obs, "plasma"),
+                (r"$\mathbf{J\ (Volume\ Ratio\ \det(F))}$", j_obs, "coolwarm")
+            ]
+
+            fig_inv, axes_inv = plt.subplots(1, 3, figsize=(14.2, 4.8))
+            for k, (title_str, arr_val, cmap_name) in enumerate(inv_list):
+                ax = axes_inv[k]
+                im = ax.tripcolor(triangulation, facecolors=arr_val, cmap=cmap_name, edgecolors='none')
+                ax.set_title(title_str, fontsize=11, fontweight='bold', pad=8)
+                ax.set_aspect('equal')
+                ax.axis('off')
+
+                div = make_axes_locatable(ax)
+                cax = div.append_axes("right", size="5%", pad=0.08)
+                cb = fig_inv.colorbar(im, cax=cax)
+                cb.ax.tick_params(labelsize=8)
+
+            geom_name = "holes" if "holes" in dataset_path else ("cross" if "cross" in dataset_path else "block")
+            fig_inv.suptitle(f"Kinematic Invariant Field Distributions ($\mathbf{{\\bar{{I}}_1, \\bar{{I}}_2, J}}$)\nValidation Load Step: {rep_step} | Specimen: {geom_name.upper()}",
+                             fontsize=13, fontweight='bold', y=0.98)
+            plt.tight_layout()
+
+            out_inv_pdf = os.path.join(distilled_dir, f"domain_invariants_{args.material_model}.pdf")
+            out_inv_png = os.path.join(distilled_dir, f"domain_invariants_{args.material_model}.png")
+            fig_inv.savefig(out_inv_pdf, dpi=300, bbox_inches='tight')
+            fig_inv.savefig(out_inv_png, dpi=300, bbox_inches='tight')
+            plt.close(fig_inv)
+            return out_inv_pdf, out_inv_png
+
+        out_inv_pdf, out_inv_png = plot_invariants_figure()
+        print(f"Saved domain invariants plot to:\n  - {out_inv_pdf}\n  - {out_inv_png}", flush=True)
 
     print(f"\nSaved validation parity plots to:\n  - {out_split_pdf}\n  - {out_split_png}\n  - {out_tot_pdf}\n  - {out_tot_png}", flush=True)
 
