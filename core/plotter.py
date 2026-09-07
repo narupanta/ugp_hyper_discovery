@@ -38,102 +38,144 @@ def plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_pa
     fig1.savefig(os.path.join(save_path, "loss_and_physics.pdf"))
 
 def plot_parameters_hist(params_hist, steps_history, save_path):
-    # --- FIGURE 1: Inducing Variables & Positions ---
+    is_single_gp = "single_gp_sigma_scaling" in params_hist and len(params_hist["single_gp_sigma_scaling"]) > 0 and params_hist["single_gp_sigma_scaling"][0] is not None
     has_aniso_inducing = "aniso_u_mean" in params_hist and len(params_hist["aniso_u_mean"]) > 0 and params_hist["aniso_u_mean"][0] is not None
-    rows1 = 3 if has_aniso_inducing else 2
-    fig1, axes1 = plt.subplots(rows1, 3, figsize=(18, 5 * rows1))
-    fig1.suptitle(r"Evolution of Inducing Variables and Positions ($Z, \mathbf{u}$)", fontsize=16)
 
-    # ROW 0: DEVIATORIC GP
-    axes1[0, 0].plot(steps_history, np.array(params_hist["dev_u_mean"]))
-    axes1[0, 0].set_title(r"Deviatoric Mean ($\mathbf{m}_{dev}$)")
-    
-    dev_u_var_arr = np.array(params_hist["dev_u_var"])
-    if dev_u_var_arr.ndim == 3:
-        dev_u_var_arr = np.diagonal(dev_u_var_arr, axis1=1, axis2=2)
-    axes1[0, 1].plot(steps_history, dev_u_var_arr)
-    axes1[0, 1].set_title(r"Deviatoric Variance ($\mathbf{S}_{dev}$)")
-    
-    dev_z_1 = np.array(params_hist["dev_z"])[:, :, 0]
-    dev_z_2 = np.array(params_hist["dev_z"])[:, :, 1]
-    axes1[0, 2].plot(steps_history, dev_z_1) 
-    axes1[0, 2].plot(steps_history, dev_z_2)
-    axes1[0, 2].set_title(r"Dev. Inducing Positions ($Z_{dev, I_1}$)")
+    if is_single_gp:
+        fig1, axes1 = plt.subplots(1, 3, figsize=(18, 5))
+        fig1.suptitle(r"Evolution of Inducing Variables and Positions ($Z, \mathbf{u}$)", fontsize=16)
 
-    # ROW 1: VOLUMETRIC GP
-    axes1[1, 0].plot(steps_history, np.array(params_hist["vol_u_mean"]))
-    axes1[1, 0].set_title(r"Volumetric Mean ($\mathbf{m}_{vol}$)")
-    
-    vol_u_var_arr = np.array(params_hist["vol_u_var"])
-    if vol_u_var_arr.ndim == 3:
-        vol_u_var_arr = np.diagonal(vol_u_var_arr, axis1=1, axis2=2)
-    axes1[1, 1].plot(steps_history, vol_u_var_arr)
-    axes1[1, 1].set_title(r"Volumetric Variance ($\mathbf{S}_{vol}$)")
-    
-    actual_vol_z = np.array(params_hist["vol_z"])[:, :, 0]
-    axes1[1, 2].plot(steps_history, actual_vol_z)
-    axes1[1, 2].set_title(r"Vol. Inducing Positions ($Z_{vol, J}$)")
+        axes1[0].plot(steps_history, np.array(params_hist["single_u_mean"]))
+        axes1[0].set_title(r"Variational Mean ($\mathbf{m}$)")
 
-    if has_aniso_inducing:
-        # ROW 2: ANISOTROPIC GP
-        axes1[2, 0].plot(steps_history, np.array(params_hist["aniso_u_mean"]))
-        axes1[2, 0].set_title(r"Anisotropic Mean ($\mathbf{m}_{aniso}$)")
+        single_u_var_arr = np.array(params_hist["single_u_var"])
+        if single_u_var_arr.ndim == 3:
+            single_u_var_arr = np.diagonal(single_u_var_arr, axis1=1, axis2=2)
+        axes1[1].plot(steps_history, single_u_var_arr)
+        axes1[1].set_title(r"Variational Variance ($\mathbf{S}$)")
+
+        z_single = np.array(params_hist["single_z"])
+        axes1[2].plot(steps_history, z_single[:, :, 0], label=r"$\bar{I}_1$")
+        axes1[2].plot(steps_history, z_single[:, :, 1], label=r"$\bar{I}_2$")
+        axes1[2].plot(steps_history, z_single[:, :, 2], label=r"$J$")
+        axes1[2].set_title(r"Inducing Positions ($Z$)")
+
+        for ax in axes1.flatten():
+            ax.set_xlabel("Iteration Step")
+            ax.grid(True, alpha=0.3)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        fig1.savefig(os.path.join(save_path, "inducing_state_evolution.pdf"))
+
+        # Hyperparameters
+        fig2, axes2 = plt.subplots(1, 2, figsize=(14, 5))
+        fig2.suptitle("Evolution of Kernel Hyperparameters", fontsize=16)
+        axes2[0].plot(steps_history, np.array(params_hist["single_gp_lengthscales"]))
+        axes2[0].set_title(r"Lengthscales ($\ell$)")
+        axes2[1].plot(steps_history, np.array(params_hist["single_gp_sigma_scaling"]))
+        axes2[1].set_title(r"Signal Scale ($\sigma$)")
+        for ax in axes2.flatten():
+            ax.set_xlabel("Iteration Step")
+            ax.grid(True, alpha=0.3)
+            ax.set_ylabel("Value")
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        fig2.savefig(os.path.join(save_path, "hyperparameters_evolution.pdf"))
+    else:
+        # --- FIGURE 1: Inducing Variables & Positions ---
+        rows1 = 3 if has_aniso_inducing else 2
+        fig1, axes1 = plt.subplots(rows1, 3, figsize=(18, 5 * rows1))
+        fig1.suptitle(r"Evolution of Inducing Variables and Positions ($Z, \mathbf{u}$)", fontsize=16)
+
+        # ROW 0: DEVIATORIC GP
+        axes1[0, 0].plot(steps_history, np.array(params_hist["dev_u_mean"]))
+        axes1[0, 0].set_title(r"Deviatoric Mean ($\mathbf{m}_{dev}$)")
         
-        aniso_u_var_arr = np.array(params_hist["aniso_u_var"])
-        if aniso_u_var_arr.ndim == 3:
-            aniso_u_var_arr = np.diagonal(aniso_u_var_arr, axis1=1, axis2=2)
-        axes1[2, 1].plot(steps_history, aniso_u_var_arr)
-        axes1[2, 1].set_title(r"Anisotropic Variance ($\mathbf{S}_{aniso}$)")
+        dev_u_var_arr = np.array(params_hist["dev_u_var"])
+        if dev_u_var_arr.ndim == 3:
+            dev_u_var_arr = np.diagonal(dev_u_var_arr, axis1=1, axis2=2)
+        axes1[0, 1].plot(steps_history, dev_u_var_arr)
+        axes1[0, 1].set_title(r"Deviatoric Variance ($\mathbf{S}_{dev}$)")
         
-        actual_aniso_z = np.array(params_hist["aniso_z"])[:, :, 0]
-        axes1[2, 2].plot(steps_history, actual_aniso_z)
-        axes1[2, 2].set_title(r"Aniso. Inducing Positions ($Z_{aniso, I_4}$)")
+        dev_z_1 = np.array(params_hist["dev_z"])[:, :, 0]
+        dev_z_2 = np.array(params_hist["dev_z"])[:, :, 1]
+        axes1[0, 2].plot(steps_history, dev_z_1) 
+        axes1[0, 2].plot(steps_history, dev_z_2)
+        axes1[0, 2].set_title(r"Dev. Inducing Positions ($Z_{dev, I_1}$)")
 
-    for ax in axes1.flatten():
-        ax.set_xlabel("Iteration Step")
-        ax.grid(True, alpha=0.3)
-
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    fig1.savefig(os.path.join(save_path, "inducing_state_evolution.pdf"))
-    # --- FIGURE 2: Kernel Hyperparameters ---
-    has_aniso = "aniso_gp_lengthscales" in params_hist and len(params_hist["aniso_gp_lengthscales"]) > 0 and params_hist["aniso_gp_lengthscales"][0] is not None
-    rows = 3 if has_aniso else 2
-    fig2, axes2 = plt.subplots(rows, 2, figsize=(14, 5 * rows))
-    fig2.suptitle("Evolution of Kernel Hyperparameters", fontsize=16)
-
-    # 0,0: Deviatoric Lengthscales
-    axes2[0, 0].plot(steps_history, np.array(params_hist["dev_gp_lengthscales"]))
-    axes2[0, 0].set_title(r"Deviatoric Lengthscales ($\ell_{dev}$)")
-    
-    # 0,1: Deviatoric Sigma Scaling
-    axes2[0, 1].plot(steps_history, np.array(params_hist["dev_gp_sigma_scaling"]))
-    axes2[0, 1].set_title(r"Deviatoric Signal Scale ($\sigma_{dev}$)")
-    
-    # 1,0: Volumetric Lengthscales
-    axes2[1, 0].plot(steps_history, np.array(params_hist["vol_gp_lengthscales"]))
-    axes2[1, 1].set_yscale('log') # Useful if lengthscales vary widely
-    axes2[1, 0].set_title(r"Volumetric Lengthscales ($\ell_{vol}$)")
-    
-    # 1,1: Volumetric Sigma Scaling
-    axes2[1, 1].plot(steps_history, np.array(params_hist["vol_gp_sigma_scaling"]))
-    axes2[1, 1].set_title(r"Volumetric Signal Scale ($\sigma_{vol}$)")
-
-    if has_aniso:
-        # 2,0: Anisotropic Lengthscales
-        axes2[2, 0].plot(steps_history, np.array(params_hist["aniso_gp_lengthscales"]))
-        axes2[2, 0].set_title(r"Anisotropic Lengthscales ($\ell_{aniso}$)")
+        # ROW 1: VOLUMETRIC GP
+        axes1[1, 0].plot(steps_history, np.array(params_hist["vol_u_mean"]))
+        axes1[1, 0].set_title(r"Volumetric Mean ($\mathbf{m}_{vol}$)")
         
-        # 2,1: Anisotropic Sigma Scaling
-        axes2[2, 1].plot(steps_history, np.array(params_hist["aniso_gp_sigma_scaling"]))
-        axes2[2, 1].set_title(r"Anisotropic Signal Scale ($\sigma_{aniso}$)")
+        vol_u_var_arr = np.array(params_hist["vol_u_var"])
+        if vol_u_var_arr.ndim == 3:
+            vol_u_var_arr = np.diagonal(vol_u_var_arr, axis1=1, axis2=2)
+        axes1[1, 1].plot(steps_history, vol_u_var_arr)
+        axes1[1, 1].set_title(r"Volumetric Variance ($\mathbf{S}_{vol}$)")
+        
+        actual_vol_z = np.array(params_hist["vol_z"])[:, :, 0]
+        axes1[1, 2].plot(steps_history, actual_vol_z)
+        axes1[1, 2].set_title(r"Vol. Inducing Positions ($Z_{vol, J}$)")
 
-    for ax in axes2.flatten():
-        ax.set_xlabel("Iteration Step")
-        ax.grid(True, alpha=0.3)
-        ax.set_ylabel("Value")
+        if has_aniso_inducing:
+            # ROW 2: ANISOTROPIC GP
+            axes1[2, 0].plot(steps_history, np.array(params_hist["aniso_u_mean"]))
+            axes1[2, 0].set_title(r"Anisotropic Mean ($\mathbf{m}_{aniso}$)")
+            
+            aniso_u_var_arr = np.array(params_hist["aniso_u_var"])
+            if aniso_u_var_arr.ndim == 3:
+                aniso_u_var_arr = np.diagonal(aniso_u_var_arr, axis1=1, axis2=2)
+            axes1[2, 1].plot(steps_history, aniso_u_var_arr)
+            axes1[2, 1].set_title(r"Anisotropic Variance ($\mathbf{S}_{aniso}$)")
+            
+            actual_aniso_z = np.array(params_hist["aniso_z"])[:, :, 0]
+            axes1[2, 2].plot(steps_history, actual_aniso_z)
+            axes1[2, 2].set_title(r"Aniso. Inducing Positions ($Z_{aniso, I_4}$)")
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    fig2.savefig(os.path.join(save_path, "hyperparameters_evolution.pdf"))
+        for ax in axes1.flatten():
+            ax.set_xlabel("Iteration Step")
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        fig1.savefig(os.path.join(save_path, "inducing_state_evolution.pdf"))
+        # --- FIGURE 2: Kernel Hyperparameters ---
+        has_aniso = "aniso_gp_lengthscales" in params_hist and len(params_hist["aniso_gp_lengthscales"]) > 0 and params_hist["aniso_gp_lengthscales"][0] is not None
+        rows = 3 if has_aniso else 2
+        fig2, axes2 = plt.subplots(rows, 2, figsize=(14, 5 * rows))
+        fig2.suptitle("Evolution of Kernel Hyperparameters", fontsize=16)
+
+        # 0,0: Deviatoric Lengthscales
+        axes2[0, 0].plot(steps_history, np.array(params_hist["dev_gp_lengthscales"]))
+        axes2[0, 0].set_title(r"Deviatoric Lengthscales ($\ell_{dev}$)")
+        
+        # 0,1: Deviatoric Sigma Scaling
+        axes2[0, 1].plot(steps_history, np.array(params_hist["dev_gp_sigma_scaling"]))
+        axes2[0, 1].set_title(r"Deviatoric Signal Scale ($\sigma_{dev}$)")
+        
+        # 1,0: Volumetric Lengthscales
+        axes2[1, 0].plot(steps_history, np.array(params_hist["vol_gp_lengthscales"]))
+        axes2[1, 1].set_yscale('log') # Useful if lengthscales vary widely
+        axes2[1, 0].set_title(r"Volumetric Lengthscales ($\ell_{vol}$)")
+        
+        # 1,1: Volumetric Sigma Scaling
+        axes2[1, 1].plot(steps_history, np.array(params_hist["vol_gp_sigma_scaling"]))
+        axes2[1, 1].set_title(r"Volumetric Signal Scale ($\sigma_{vol}$)")
+
+        if has_aniso:
+            # 2,0: Anisotropic Lengthscales
+            axes2[2, 0].plot(steps_history, np.array(params_hist["aniso_gp_lengthscales"]))
+            axes2[2, 0].set_title(r"Anisotropic Lengthscales ($\ell_{aniso}$)")
+            
+            # 2,1: Anisotropic Sigma Scaling
+            axes2[2, 1].plot(steps_history, np.array(params_hist["aniso_gp_sigma_scaling"]))
+            axes2[2, 1].set_title(r"Anisotropic Signal Scale ($\sigma_{aniso}$)")
+
+        for ax in axes2.flatten():
+            ax.set_xlabel("Iteration Step")
+            ax.grid(True, alpha=0.3)
+            ax.set_ylabel("Value")
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        fig2.savefig(os.path.join(save_path, "hyperparameters_evolution.pdf"))
+
 
     # Optional: If you want to track the physics noise parameter separately:
 
@@ -351,7 +393,12 @@ def _compute_regime_transitions(learned_gp, F_all, gamma):
     
     for mode in range(F_all.shape[0]):
         feats = jax.vmap(learned_gp.feature_extractor.extract)(F_all[mode])
-        dev_m, vol_m = feats[0], feats[1]
+        if getattr(learned_gp, "is_single_gp", False):
+            # feats is (num_points, 3) where [:, 0:2] is dev and [:, 2:3] is vol
+            dev_m = feats[:, 0:2]
+            vol_m = feats[:, 2:3]
+        else:
+            dev_m, vol_m = feats[0], feats[1]
         in_dev = ((dev_m[:, 0] >= true_min_dev[0]) & (dev_m[:, 0] <= true_max_dev[0]) &
                   (dev_m[:, 1] >= true_min_dev[1]) & (dev_m[:, 1] <= true_max_dev[1]))
         in_vol = (vol_m[:, 0] >= true_min_vol[0]) & (vol_m[:, 0] <= true_max_vol[0])

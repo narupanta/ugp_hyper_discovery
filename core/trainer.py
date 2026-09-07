@@ -75,6 +75,8 @@ class HyperelasticGPTrainer:
             "dev_u_mean": [], "dev_u_var": [], "vol_u_mean": [], "vol_u_var": [], "dev_z": [], "vol_z": [],
             "aniso_gp_sigma_scaling": [], "aniso_gp_lengthscales": [],
             "aniso_u_mean": [], "aniso_u_var": [], "aniso_z": [], "aniso_theta_mean": [], "aniso_theta_var": [],
+            "single_gp_sigma_scaling": [], "single_gp_lengthscales": [],
+            "single_u_mean": [], "single_u_var": [], "single_z": [],
             "sigma_free_x": [], "sigma_free_y": [], "sigma_fix_x": [], "sigma_fix_y": [],
             "vol_kappa": []
         }
@@ -121,13 +123,21 @@ class HyperelasticGPTrainer:
         self.params_hist["sigma_fix_x"].append(cur_params.sigma_fix_x)
         self.params_hist["sigma_fix_y"].append(cur_params.sigma_fix_y)
         self.params_hist["vol_kappa"].append(cur_params.vol_kappa)
+
+        if getattr(cur_params, "single_sig", None) is not None:
+            self.params_hist["single_gp_sigma_scaling"].append(cur_params.single_sig)
+            self.params_hist["single_gp_lengthscales"].append(cur_params.single_ls)
+            self.params_hist["single_u_mean"].append(cur_params.single_u_mean)
+            self.params_hist["single_u_var"].append(cur_params.single_u_var)
+            self.params_hist["single_z"].append(cur_params.single_z)
         
-        if hasattr(cur_params, "aniso_sig"):
+        if getattr(cur_params, "aniso_sig", None) is not None:
             self.params_hist["aniso_gp_sigma_scaling"].append(cur_params.aniso_sig)
             self.params_hist["aniso_gp_lengthscales"].append(cur_params.aniso_ls)
             self.params_hist["aniso_u_mean"].append(cur_params.aniso_u_mean)
             self.params_hist["aniso_u_var"].append(cur_params.aniso_u_var)
             self.params_hist["aniso_z"].append(cur_params.aniso_z)
+
 
         if getattr(cur_params, "aniso_theta_mean", None) is not None:
             self.params_hist["aniso_theta_mean"].append(cur_params.aniso_theta_mean)
