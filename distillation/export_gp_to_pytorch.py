@@ -164,9 +164,6 @@ def main():
     else:
         cov_mode = "full" if gp_params.raw_dev_u_var.ndim == 2 else "diag"
 
-    pos_var_mean = meta_dict.get("pos_var_mean", 1)
-    augmented_var_dist = meta_dict.get("augmented_var_dist", 1)
-
     feature_extractor = None
     if aniso_z is not None:
         if true_model is not None and getattr(true_model, 'a0', None) is not None:
@@ -196,9 +193,6 @@ def main():
         beta=1.0, feature_extractor=feature_extractor,
         aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,
         covariance_mode=cov_mode
-        covariance_mode=cov_mode,
-        pos_var_mean=pos_var_mean,
-        augmented_var_dist=augmented_var_dist
     )
 
     

@@ -23,7 +23,6 @@ class SparseHyperelasticityGP:
                  max_dev: jnp.ndarray, max_vol: jnp.ndarray, sampling_mode: str = "pws", 
                  beta: float = 1.0, L: int = 200, feature_extractor: Optional[FeatureExtractor] = None,
                  min_aniso: Optional[jnp.ndarray] = None, max_aniso: Optional[jnp.ndarray] = None, aniso_z: Optional[jnp.ndarray] = None,
-                 covariance_mode: str = "diag"):
                  covariance_mode: str = "diag", pos_var_mean: int = 1, augmented_var_dist: int = 1):
         self.feature_extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
         # 1. Inducing points split
@@ -70,8 +69,6 @@ class SparseHyperelasticityGP:
         def to_f64(x):
             return jnp.asarray(x, dtype=jnp.float64)
 
-        dev_mu = to_f64(jax.nn.softplus(p.raw_dev_u_mean))
-        vol_mu = to_f64(jax.nn.softplus(p.raw_vol_u_mean))
         if self.pos_var_mean == 1:
             dev_mu = to_f64(jax.nn.softplus(p.raw_dev_u_mean))
             vol_mu = to_f64(jax.nn.softplus(p.raw_vol_u_mean))
@@ -109,7 +106,6 @@ class SparseHyperelasticityGP:
         
         kwargs = {}
         if self.is_anisotropic:
-            aniso_mu = to_f64(jax.nn.softplus(p.raw_aniso_u_mean))
             if self.pos_var_mean == 1:
                 aniso_mu = to_f64(jax.nn.softplus(p.raw_aniso_u_mean))
             else:
@@ -184,17 +180,6 @@ class SparseHyperelasticityGP:
         K_inv = jnp.linalg.solve(Kzz, jnp.eye(z.shape[0], dtype=jnp.float64))
         
         # We strictly assume a zero-mean prior, so v_diff is just u_mean - 0
-        U_cov = u_var if "full" in self.covariance_mode else jnp.diag(u_var)
-        
-        if "whitened" in self.covariance_mode:
-            L_z = jnp.linalg.cholesky(Kzz)
-            v_diff = L_z @ u_mean
-            U_cov_true = L_z @ U_cov @ L_z.T
-            
-            M_mat = K_inv @ (Kzz - U_cov_true) @ K_inv.T
-            trace_term = jnp.trace(U_cov)
-            mahalanobis_term = jnp.sum(u_mean ** 2)
-            log_term = - jnp.log(jnp.linalg.det(U_cov))
         if self.augmented_var_dist == 0:
             v_diff = u_mean
             M_mat = K_inv  # K_inv @ (Kzz - 0) @ K_inv.T = K_inv
@@ -202,14 +187,8 @@ class SparseHyperelasticityGP:
             mahalanobis_term = v_diff.T @ K_inv @ v_diff
             log_term = 0.0
         else:
-            v_diff = u_mean
-            U_cov_true = U_cov
             U_cov = u_var if "full" in self.covariance_mode else jnp.diag(u_var)
             
-            M_mat = K_inv @ (Kzz - U_cov_true) @ K_inv.T
-            trace_term = jnp.trace(K_inv @ U_cov_true)
-            mahalanobis_term = v_diff.T @ K_inv @ v_diff
-            log_term = jnp.log(jnp.linalg.det(Kzz)) - jnp.log(jnp.linalg.det(U_cov_true))
             if "whitened" in self.covariance_mode:
                 L_z = jnp.linalg.cholesky(Kzz)
                 v_diff = L_z @ u_mean
@@ -284,16 +263,6 @@ class SparseHyperelasticityGP:
             phi = jnp.sqrt(2.0 * p.vol_sig**2 / self.L) * jnp.cos(jnp.dot(v, W_vol / p.vol_ls[:, None]) + b_vol)
             return jnp.dot(phi, w_vol_prior)
 
-        dev_U_cov = p.dev_u_var if "full" in self.covariance_mode else jnp.diag(p.dev_u_var)
-        vol_U_cov = p.vol_u_var if "full" in self.covariance_mode else jnp.diag(p.vol_u_var)
-        
-        # 2. Sample Inducing Values u ~ q(u) using independent PRNG keys
-        u_dev = jax.random.multivariate_normal(k7, p.dev_u_mean, dev_U_cov, dtype=jnp.float64)
-        u_vol = jax.random.multivariate_normal(k8, p.vol_u_mean, vol_U_cov, dtype=jnp.float64)
-        
-        if "whitened" in self.covariance_mode:
-            u_dev = jnp.linalg.cholesky(w.dev_Kzz) @ u_dev
-            u_vol = jnp.linalg.cholesky(w.vol_Kzz) @ u_vol
         if self.augmented_var_dist == 0:
             u_dev = p.dev_u_mean
             u_vol = p.vol_u_mean
@@ -330,11 +299,6 @@ class SparseHyperelasticityGP:
                 phi = jnp.sqrt(2.0 * p.aniso_sig**2 / self.L) * jnp.cos(jnp.dot(v, W_aniso / p.aniso_ls[:, None]) + b_aniso)
                 return jnp.dot(phi, w_aniso_prior)
 
-            aniso_U_cov = p.aniso_u_var if "full" in self.covariance_mode else jnp.diag(p.aniso_u_var)
-            u_aniso = jax.random.multivariate_normal(k12, p.aniso_u_mean, aniso_U_cov, dtype=jnp.float64)
-            
-            if "whitened" in self.covariance_mode:
-                u_aniso = jnp.linalg.cholesky(w.aniso_Kzz) @ u_aniso
             if self.augmented_var_dist == 0:
                 u_aniso = p.aniso_u_mean
             else:
