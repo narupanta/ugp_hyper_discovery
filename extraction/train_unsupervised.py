@@ -68,6 +68,8 @@ def parse_args():
     parser.add_argument('--dev_params', type=float, nargs='+', default=None)
     parser.add_argument('--vol_params', type=float, nargs='+', default=None)
     parser.add_argument('--aniso_params', type=float, nargs='+', default=None)
+    parser.add_argument('--pos_var_mean', type=int, default=1, choices=[0, 1], help="Whether to apply softplus to variational mean (1) or use unconstrained mean (0)")
+    parser.add_argument('--augmented_var_dist', type=int, default=1, choices=[0, 1], help="Whether to use augmented variational distribution q(u) (1) or deterministic point-estimate (0)")
 
     return parser.parse_args()
 
@@ -80,8 +82,13 @@ def inv_softplus(y):
     return jnp.where(y_safe > 20.0, y_safe, jnp.log(jnp.maximum(jnp.exp(y_safe) - 1.0, 1e-8)))
 
 def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag"):
+def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag", augmented_var_dist: int = 1):
     def freeze_fn(grads):
         if covariance_mode == "full":
+        if augmented_var_dist == 0:
+            raw_dev_u_var = jnp.zeros_like(grads.raw_dev_u_var)
+            raw_vol_u_var = jnp.zeros_like(grads.raw_vol_u_var)
+        elif covariance_mode == "full":
             raw_dev_u_var = grads.raw_dev_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
             raw_vol_u_var = grads.raw_vol_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
         else:
@@ -102,6 +109,9 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
             replace_kwargs["raw_aniso_z"] = grads.raw_aniso_z.at[0].set(0.0)
             replace_kwargs["raw_aniso_u_mean"] = grads.raw_aniso_u_mean.at[0].set(0.0)
             if covariance_mode == "full":
+            if augmented_var_dist == 0:
+                raw_aniso_u_var = jnp.zeros_like(grads.raw_aniso_u_var)
+            elif covariance_mode == "full":
                 raw_aniso_u_var = grads.raw_aniso_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
             else:
                 raw_aniso_u_var = grads.raw_aniso_u_var.at[0].set(0.0)
@@ -429,6 +439,9 @@ if __name__ == "__main__" :
         max_aniso=max_aniso,
         aniso_z=aniso_z,
         covariance_mode=args.covariance_mode
+        covariance_mode=args.covariance_mode,
+        pos_var_mean=args.pos_var_mean,
+        augmented_var_dist=args.augmented_var_dist
     )
 
 
@@ -455,6 +468,9 @@ if __name__ == "__main__" :
                 max_aniso=max_aniso,
                 aniso_z=aniso_z,
                 covariance_mode=args.covariance_mode
+                covariance_mode=args.covariance_mode,
+                pos_var_mean=args.pos_var_mean,
+                augmented_var_dist=args.augmented_var_dist
             )
         else:
             local_model = model
@@ -501,6 +517,7 @@ if __name__ == "__main__" :
         max_dev=max_dev,
         max_vol=max_vol,
         freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode),
+        freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode, args.augmented_var_dist),
         seed=args.seed
     )
 
