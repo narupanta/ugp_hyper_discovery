@@ -128,7 +128,9 @@ def main():
     args = parser.parse_args()
 
     best_params_dict = np.load(os.path.join(args.saved_model_dir, "best_params.npy"), allow_pickle=True).item()
-    gp_params = GPRawParams(**best_params_dict)
+    valid_keys = set(GPRawParams._fields)
+    filtered_params = {k: v for k, v in best_params_dict.items() if k in valid_keys}
+    gp_params = GPRawParams(**filtered_params)
     I_z = jnp.load(os.path.join(args.saved_model_dir, "I_z.npy"))
     
     dev_z = I_z[:, :2]
@@ -195,9 +197,7 @@ def main():
         gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
         beta=1.0, feature_extractor=feature_extractor,
         aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,
-        covariance_mode=cov_mode,
-        pos_var_mean=pos_var_mean,
-        augmented_var_dist=augmented_var_dist
+        covariance_mode=cov_mode
     )
 
     

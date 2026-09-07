@@ -27,8 +27,8 @@ class HyperelasticGPTrainer:
         with open(f"{self.save_path}/metadata.json", "w") as f:
             meta = {
                 "covariance_mode": getattr(self.model, "covariance_mode", "diag"),
-                "pos_var_mean": getattr(self.model, "pos_var_mean", 1),
-                "augmented_var_dist": getattr(self.model, "augmented_var_dist", 1),
+                "pos_var_mean": 1,
+                "augmented_var_dist": 1,
                 "normalize_ell": getattr(self.model, "normalize_ell", 0)
             }
             if seed is not None:
@@ -75,8 +75,7 @@ class HyperelasticGPTrainer:
             "dev_u_mean": [], "dev_u_var": [], "vol_u_mean": [], "vol_u_var": [], "dev_z": [], "vol_z": [],
             "aniso_gp_sigma_scaling": [], "aniso_gp_lengthscales": [],
             "aniso_u_mean": [], "aniso_u_var": [], "aniso_z": [], "aniso_theta_mean": [], "aniso_theta_var": [],
-            "sigma_free_x": [], "sigma_free_y": [], "sigma_fix_x": [], "sigma_fix_y": [],
-            "vol_kappa": []
+            "sigma_free_x": [], "sigma_free_y": [], "sigma_fix_x": [], "sigma_fix_y": []
         }
         self.steps_history = []
         self.best_loss = float('inf')
@@ -120,7 +119,6 @@ class HyperelasticGPTrainer:
         self.params_hist["sigma_free_y"].append(cur_params.sigma_free_y)
         self.params_hist["sigma_fix_x"].append(cur_params.sigma_fix_x)
         self.params_hist["sigma_fix_y"].append(cur_params.sigma_fix_y)
-        self.params_hist["vol_kappa"].append(cur_params.vol_kappa)
         
         if hasattr(cur_params, "aniso_sig"):
             self.params_hist["aniso_gp_sigma_scaling"].append(cur_params.aniso_sig)

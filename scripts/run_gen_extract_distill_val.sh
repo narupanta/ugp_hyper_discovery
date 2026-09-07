@@ -264,6 +264,7 @@ for SEED in $SEEDS_LIST; do
             --material_model_name "$MODEL" \
             --number_of_mci_sampling "$MCI_SAMPLING" \
             --train_load_steps_indices $TRAIN_INDICES \
+            --val_load_steps_indices $VAL_LOAD_STEPS_INDICES \
             --n_ip "$N_IP" \
             --beta "$BETA" \
             --num_rff "$NUM_RFF" \
@@ -280,8 +281,6 @@ for SEED in $SEEDS_LIST; do
             --cap_compression "$CAP_COMPRESSION" \
             --model_mode "$MODEL_MODE" \
             --covariance_mode "$COVARIANCE_MODE" \
-            --pos_var_mean "$POS_VAR_MEAN" \
-            --augmented_var_dist "$AUGMENTED_VAR_DIST" \
             --normalize_ell "$NORMALIZE_ELL" \
             --seed "$SEED" \
             --batch_dir "$EXTRACT_SEED_DIR" \

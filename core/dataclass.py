@@ -21,7 +21,6 @@ class GPRawParams(NamedTuple):
     raw_vol_u_mean: jnp.ndarray
     raw_vol_u_var: jnp.ndarray
     raw_vol_z: jnp.ndarray
-    raw_vol_kappa: jnp.ndarray
 
     log_sigma_free_x: jnp.ndarray
     log_sigma_free_y: jnp.ndarray
@@ -33,7 +32,6 @@ class GPRawParams(NamedTuple):
     raw_aniso_u_mean: jnp.ndarray = None
     raw_aniso_u_var: jnp.ndarray = None
     raw_aniso_z: jnp.ndarray = None
-    raw_aniso_kappa: jnp.ndarray = None
     raw_aniso_theta_mean: jnp.ndarray = None
     raw_aniso_theta_var: jnp.ndarray = None
 
@@ -49,7 +47,6 @@ class GPParams(NamedTuple) :
     vol_u_mean: jnp.ndarray = None
     vol_u_var: jnp.ndarray = None
     vol_z: jnp.ndarray = None
-    vol_kappa: jnp.ndarray = None
 
     sigma_free_x: jnp.ndarray = None
     sigma_free_y: jnp.ndarray = None
@@ -63,7 +60,6 @@ class GPParams(NamedTuple) :
     aniso_theta_mean: jnp.ndarray = None
     aniso_theta_var: jnp.ndarray = None
     aniso_z: jnp.ndarray = None
-    aniso_kappa: jnp.ndarray = None
 
 class GPWeights(NamedTuple) :
     dev_Kzz: jnp.ndarray

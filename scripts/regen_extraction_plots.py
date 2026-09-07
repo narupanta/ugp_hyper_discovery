@@ -60,7 +60,8 @@ def main():
 
     # Load GP parameters
     best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
-    best_params = GPRawParams(**best_params_dict)
+    valid_keys = set(GPRawParams._fields)
+    best_params = GPRawParams(**{k: v for k, v in best_params_dict.items() if k in valid_keys})
     I_z = jnp.load(os.path.join(saved_model_dir, "I_z.npy"))
 
     dev_z = I_z[:, :2]
@@ -119,8 +120,11 @@ def main():
         print(f"Generating training parity plot from dataset: {dataset_path}...")
         prep_data = np.load(dataset_path, allow_pickle=True)
         F_train_full_3x3 = jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
-        r2, rmse, coverage = plot_training_r2(learned_gp, true_model, F_train_full_3x3, saved_model_dir)
-        print(f"Training Parity Metrics: R2={r2:.4f}, RMSE={rmse:.4f}, EC={coverage:.1f}%")
+        r2_res = plot_training_r2(learned_gp, true_model, F_train_full_3x3, saved_model_dir)
+        r2, rmse, coverage = r2_res[0], r2_res[1], r2_res[2]
+        print(f"Train Parity Metrics: R2={r2:.4f}, RMSE={rmse:.4f}, EC={coverage:.1f}%")
+        if r2_res.val_metrics and r2_res.val_metrics.get("r2") is not None:
+            print(f"Val Parity Metrics: R2={r2_res.val_metrics['r2']:.4f}, RMSE={r2_res.val_metrics['rmse']:.4f}, EC={r2_res.val_metrics['ec']:.1f}%")
 
     print(f"🎉 Successfully regenerated all extraction plots in: {saved_model_dir}")
 

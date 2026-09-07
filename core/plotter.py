@@ -162,8 +162,8 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     axes3[0].legend()
     axes3[0].grid(True, alpha=0.3)
 
-    # Subplot 2: Volumetric Trend Parameters (k, q, vol_kappa)
-    vol_params = ["k", "q", "s", "vol_kappa"]
+    # Subplot 2: Volumetric Trend Parameters
+    vol_params = ["k", "q", "s"]
     for p in vol_params:
         if p in params_hist:
             axes3[1].plot(steps_history, np.array(params_hist[p]), label=fr"${p}$")
@@ -1065,10 +1065,88 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
     plt.savefig(os.path.join(save_path, "energy_decomposition.pdf"), bbox_inches='tight')
     plt.close()
 
+class ExtractionR2Metrics(tuple):
+    """
+    3-tuple (r2, rmse, coverage) ensuring backwards compatibility for callers
+    expecting a 3-tuple return value, while exposing .train_metrics, .val_metrics,
+    and .by_component for detailed evaluation.
+    """
+    def __new__(cls, r2, rmse, coverage, train_metrics=None, val_metrics=None, by_component=None):
+        return super().__new__(cls, (r2, rmse, coverage))
+
+    def __init__(self, r2, rmse, coverage, train_metrics=None, val_metrics=None, by_component=None):
+        self.r2 = r2
+        self.rmse = rmse
+        self.coverage = coverage
+        self.train_metrics = train_metrics or {}
+        self.val_metrics = val_metrics or {}
+        self.by_component = by_component or {}
+
+def _format_step_indices(steps):
+    if not steps:
+        return "None"
+    steps = sorted(list(steps))
+    if len(steps) > 2 and steps == list(range(steps[0], steps[-1] + 1)):
+        return f"{steps[0]}-{steps[-1]}"
+    elif len(steps) <= 5:
+        return ", ".join(map(str, steps))
+    else:
+        return f"{steps[0]}...{steps[-1]}"
+
 # --- FIGURE 2: R2 Plot on Training Data ---
-def plot_training_r2(learned_gp, true_model, F_train_full, save_path):
-    print("Generating Training Data R2 Plot...")
+def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_steps=None, val_steps=None):
+    print("Generating Training & Validation Data R2 Plot...")
     num_steps = F_train_full.shape[0]
+
+    # Resolve train_steps and val_steps from config files if omitted
+    if (val_steps is None or train_steps is None) and save_path:
+        for cfg_file in ["recipe_config.yaml", "config.yaml", "config.json"]:
+            cfg_path = os.path.join(save_path, cfg_file)
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r") as f:
+                        if cfg_file.endswith(".json"):
+                            import json
+                            cfg = json.load(f)
+                        else:
+                            import yaml
+                            cfg = yaml.safe_load(f)
+                        if cfg:
+                            if val_steps is None and "val_load_steps_indices" in cfg:
+                                val_steps = cfg["val_load_steps_indices"]
+                            if train_steps is None and "train_load_steps_indices" in cfg:
+                                train_steps = cfg["train_load_steps_indices"]
+                        if val_steps is not None and train_steps is not None:
+                            break
+                except Exception:
+                    pass
+
+    # Normalize val_steps to a list of ints
+    if val_steps is not None:
+        if isinstance(val_steps, (int, float)):
+            val_steps = [int(val_steps)]
+        else:
+            val_steps = [int(s) for s in val_steps if int(s) < num_steps]
+    else:
+        val_steps = []
+
+    # If train_steps was given, determine range (e.g. train_steps=[1, 3, 6] -> interp steps 1..6)
+    if train_steps is not None and len(train_steps) > 0:
+        train_steps_list = [int(s) for s in train_steps if int(s) < num_steps]
+        start_step = min(train_steps_list)
+        if len(val_steps) == 0 and max(train_steps_list) < num_steps - 1:
+            val_steps = list(range(max(train_steps_list) + 1, num_steps))
+    else:
+        start_step = 0
+
+    val_set = set(val_steps)
+    val_steps_clean = [s for s in range(num_steps) if s in val_set]
+    train_steps_clean = [s for s in range(start_step, num_steps) if s not in val_set]
+    if len(train_steps_clean) == 0:
+        train_steps_clean = [s for s in range(num_steps) if s not in val_set]
+
+    train_steps_str = _format_step_indices(train_steps_clean)
+    val_steps_str = _format_step_indices(val_steps_clean)
     
     has_aniso = (hasattr(learned_gp, 'is_anisotropic') and learned_gp.is_anisotropic) and hasattr(true_model, 'psi_aniso')
     
@@ -1098,64 +1176,127 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path):
     fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 6), squeeze=False)
     axes = axes[0]
     
-    colors = plt.cm.jet(np.linspace(0, 1, num_steps))
-    
-    tot_r2, tot_rmse, tot_cov = 0.0, 0.0, 0.0
+    comp_metrics = {}
+    ret_train = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
+    ret_val = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
+    ret_overall = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
+
+    def compute_metrics(y_t_list, y_m_list, y_s_list):
+        if len(y_t_list) == 0:
+            return np.nan, np.nan, np.nan
+        y_t = jnp.concatenate(y_t_list)
+        y_m = jnp.concatenate(y_m_list)
+        y_s = jnp.concatenate(y_s_list)
+        
+        ss_tot = jnp.sum((y_t - jnp.mean(y_t)) ** 2)
+        ss_res = jnp.sum((y_t - y_m) ** 2)
+        r2_val_c = 1.0 - ss_res / (ss_tot + 1e-12)
+        rmse_val_c = jnp.sqrt(jnp.mean((y_t - y_m) ** 2))
+        lower = y_m - 1.96 * y_s
+        upper = y_m + 1.96 * y_s
+        cov_val_c = jnp.mean((y_t >= lower) & (y_t <= upper)) * 100.0
+        return float(r2_val_c), float(rmse_val_c), float(cov_val_c)
     
     for ax_idx, (comp_name, comp_label, true_fn, gp_dist_fn) in enumerate(components):
         ax = axes[ax_idx]
-        ax.set_title(f"Training Energy R2: {comp_name}", fontsize=14)
+        ax.set_title(f"Energy Parity: {comp_name}", fontsize=14)
         
-        all_true = []
-        all_mean = []
-        all_std = []
+        train_true, train_mean, train_std = [], [], []
+        val_true, val_mean, val_std = [], [], []
+        
+        has_train_lbl = False
+        has_val_lbl = False
         
         for step in range(num_steps):
+            if step not in train_steps_clean and step not in val_steps_clean:
+                continue
+                
             F_step = F_train_full[step]
             true_psi = true_fn(F_step)
             dist = gp_dist_fn(F_step)
             mean_psi = dist.mean
             std_psi = jnp.sqrt(dist.var)
             
-            all_true.append(true_psi)
-            all_mean.append(mean_psi)
-            all_std.append(std_psi)
-            
-            ax.errorbar(true_psi, mean_psi, yerr=1.96*std_psi, fmt='o', color=colors[step], 
-                        alpha=0.2, markersize=3, label=f"Step {step}" if (step % 5 == 0 and ax_idx == n_panels - 1) else "")
-                        
-        all_true = jnp.concatenate(all_true)
-        all_mean = jnp.concatenate(all_mean)
-        all_std = jnp.concatenate(all_std)
-        
-        ss_tot = jnp.sum((all_true - jnp.mean(all_true)) ** 2)
-        r2 = 1.0 - jnp.sum((all_true - all_mean) ** 2) / (ss_tot + 1e-12)
-        rmse = jnp.sqrt(jnp.mean((all_true - all_mean)**2))
-        lower = all_mean - 1.96 * all_std
-        upper = all_mean + 1.96 * all_std
-        coverage = jnp.mean((all_true >= lower) & (all_true <= upper)) * 100
-        
-        if comp_name == "Total Energy":
-            tot_r2, tot_rmse, tot_cov = float(r2), float(rmse), float(coverage)
-        
-        min_val = min(float(all_true.min()), float(all_mean.min()))
-        max_val = max(float(all_true.max()), float(all_mean.max()))
-        margin = max((max_val - min_val) * 0.05, 1e-4)
-        ax.plot([min_val - margin, max_val + margin], [min_val - margin, max_val + margin], 'k--', lw=1.5, label="Parity")
-        
-        ax.text(0.05, 0.95, f"$R^2$: {r2:.4f}\nRMSE: {rmse:.4f}\nCoverage: {coverage:.1f}%", 
-                transform=ax.transAxes, verticalalignment='top', 
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8), fontsize=12)
-                
+            if step in val_set:
+                val_true.append(true_psi)
+                val_mean.append(mean_psi)
+                val_std.append(std_psi)
+                lbl = f"Val Steps ({val_steps_str})" if not has_val_lbl else ""
+                has_val_lbl = True
+                ax.errorbar(true_psi, mean_psi, yerr=1.96 * std_psi, fmt='o', 
+                            color='#d62728', ecolor='#e45756', alpha=0.35, 
+                            markersize=3, elinewidth=0.8, label=lbl)
+            else:
+                train_true.append(true_psi)
+                train_mean.append(mean_psi)
+                train_std.append(std_psi)
+                lbl = f"Train Steps ({train_steps_str})" if not has_train_lbl else ""
+                has_train_lbl = True
+                ax.errorbar(true_psi, mean_psi, yerr=1.96 * std_psi, fmt='o', 
+                            color='gray', ecolor='#b0b0b0', alpha=0.25, 
+                            markersize=3, elinewidth=0.8, label=lbl)
+
+        r2_tr, rmse_tr, cov_tr = compute_metrics(train_true, train_mean, train_std)
+        r2_v, rmse_v, cov_v = compute_metrics(val_true, val_mean, val_std)
+        r2_tot, rmse_tot, cov_tot = compute_metrics(train_true + val_true, train_mean + val_mean, train_std + val_std)
+
+        # Plot parity line
+        all_pts_true = train_true + val_true
+        all_pts_mean = train_mean + val_mean
+        if len(all_pts_true) > 0:
+            cat_true = jnp.concatenate(all_pts_true)
+            cat_mean = jnp.concatenate(all_pts_mean)
+            min_val = min(float(cat_true.min()), float(cat_mean.min()))
+            max_val = max(float(cat_true.max()), float(cat_mean.max()))
+            margin = max((max_val - min_val) * 0.05, 1e-4)
+            ax.plot([min_val - margin, max_val + margin], [min_val - margin, max_val + margin], 'k--', lw=1.5, label="Parity")
+
+        # Report separate Train and Val metrics in panel text box
+        box_lines = []
+        if len(train_true) > 0:
+            box_lines.append(f"Train (Steps {train_steps_str}):")
+            box_lines.append(f"  $R^2$: {r2_tr:.4f}")
+            box_lines.append(f"  RMSE: {rmse_tr:.4f}")
+            box_lines.append(f"  EC: {cov_tr:.1f}%")
+
+        if len(val_true) > 0:
+            if len(box_lines) > 0:
+                box_lines.append("")
+            box_lines.append(f"Val (Steps {val_steps_str}):")
+            box_lines.append(f"  $R^2$: {r2_v:.4f}")
+            box_lines.append(f"  RMSE: {rmse_v:.4f}")
+            box_lines.append(f"  EC: {cov_v:.1f}%")
+
+        box_text = "\n".join(box_lines)
+        ax.text(0.05, 0.95, box_text, transform=ax.transAxes, verticalalignment='top', 
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='#cccccc'), fontsize=10.5)
+
         ax.set_xlabel(f"True {comp_label}", fontsize=11)
         ax.set_ylabel(f"Predicted GP Mean {comp_label}", fontsize=11)
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal', adjustable='datalim')
-        if ax_idx == n_panels - 1:
-            ax.legend(loc='lower right', fontsize=9)
+        ax.legend(loc='lower right', fontsize=9, framealpha=0.85)
+
+        comp_metrics[comp_name] = {
+            "train": {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr},
+            "val": {"r2": r2_v, "rmse": rmse_v, "ec": cov_v},
+            "overall": {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot}
+        }
+        if comp_name == "Total Energy":
+            ret_train = {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr, "steps": train_steps_clean}
+            ret_val = {"r2": r2_v, "rmse": rmse_v, "ec": cov_v, "steps": val_steps_clean}
+            ret_overall = {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot, "steps": list(range(num_steps))}
         
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, "training_r2_energy.pdf"), bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, "training_r2_energy.png"), bbox_inches='tight', dpi=150)
     plt.close()
+
+    primary_r2 = ret_train["r2"] if not np.isnan(ret_train["r2"]) else ret_overall["r2"]
+    primary_rmse = ret_train["rmse"] if not np.isnan(ret_train["rmse"]) else ret_overall["rmse"]
+    primary_cov = ret_train["ec"] if not np.isnan(ret_train["ec"]) else ret_overall["ec"]
     
-    return tot_r2, tot_rmse, tot_cov
+    return ExtractionR2Metrics(
+        primary_r2, primary_rmse, primary_cov,
+        train_metrics=ret_train, val_metrics=ret_val, by_component=comp_metrics
+    )

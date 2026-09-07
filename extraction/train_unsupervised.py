@@ -1,33 +1,35 @@
-import jax 
-import jax.numpy as jnp
-from jax import config
-import jax.numpy as jnp
-import jax.random as jr
+import os
+import json
+import yaml
+import datetime
+from pathlib import Path
+import argparse
+import ast
+import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+import jax
+import jax.numpy as jnp
+import jax.random as jr
 import optax
+
+# Enforce mandatory 64-bit precision standard
+jax.config.update("jax_enable_x64", True)
+
 from core.model import SparseHyperelasticityGP
-from core.utils import transform_input_features
+from core.utils import transform_input_features, fto3x3, farthest_point_sampling_with_fixed_point
 from core.dataclass import GPRawParams, GPParams, GPWeights
 from core.material_models import get_material
 from core.trainer import HyperelasticGPTrainer
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
-from core.utils import *
-import datetime
-import os
-from tqdm import tqdm
-from core.datasetclass import TractionDataset
+from core.datasetclass import TractionDataset, DatasetFactory
 from core.loss_function import total_stochastic_loss
-from core.plotter import \
-    plot_loss_analysis, \
+from core.plotter import (
+    plot_loss_analysis,
     plot_parameters_hist, plot_inducing_points, plot_combined_validation, plot_training_r2
-# helper: per-element edge-based neumann traction contribution
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-from pathlib import Path
-import argparse
-import ast
+)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Isihara Model Dataset and Training Configuration")
@@ -53,6 +55,7 @@ def parse_args():
 
     # Handling the List [1, 5, 9] to cover the 10 steps range
     parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[1, 5, 9])
+    parser.add_argument('--val_load_steps_indices', type=int, nargs='+', default=None, help="Validation load steps indices for R2 evaluation")
     parser.add_argument('--n_iterations', type=int, default=1000)
     parser.add_argument('--learning_rate', type=float, default=0.01, help="Learning rate for Adam optimizer")
     parser.add_argument('--final_learning_rate', type=float, default=None, help="Final learning rate for cosine decay. If not set or equal to learning_rate, uses constant lr.")
@@ -68,8 +71,6 @@ def parse_args():
     parser.add_argument('--dev_params', type=float, nargs='+', default=None)
     parser.add_argument('--vol_params', type=float, nargs='+', default=None)
     parser.add_argument('--aniso_params', type=float, nargs='+', default=None)
-    parser.add_argument('--pos_var_mean', type=int, default=1, choices=[0, 1], help="Whether to apply softplus to variational mean (1) or use unconstrained mean (0)")
-    parser.add_argument('--augmented_var_dist', type=int, default=1, choices=[0, 1], help="Whether to augment variational distribution with reference state anchor point at index 0 (1) or use standard unaugmented variational distribution (0)")
     parser.add_argument('--normalize_ell', type=int, default=0, choices=[0, 1], help="Whether to normalize expected log-likelihood by degrees of freedom to prevent uncertainty collapse (1) or use unnormalized sum (0)")
 
     return parser.parse_args()
@@ -82,38 +83,37 @@ def inv_softplus(y):
     y_safe = jnp.maximum(y, 1e-6)
     return jnp.where(y_safe > 20.0, y_safe, jnp.log(jnp.maximum(jnp.exp(y_safe) - 1.0, 1e-8)))
 
-def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag", augmented_var_dist: int = 1):
+def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag"):
     def freeze_fn(grads):
         replace_kwargs = {}
 
-        if augmented_var_dist == 1:
-            # Anchor index 0 (reference stress-free state)
+        # Anchor index 0 (reference stress-free state)
+        if covariance_mode == "full":
+            raw_dev_u_var = grads.raw_dev_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+            raw_vol_u_var = grads.raw_vol_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+        else:
+            raw_dev_u_var = grads.raw_dev_u_var.at[0].set(0.0)
+            raw_vol_u_var = grads.raw_vol_u_var.at[0].set(0.0)
+
+        replace_kwargs.update({
+            "raw_dev_z": grads.raw_dev_z.at[0].set(0.0),
+            "raw_vol_z": grads.raw_vol_z.at[0].set(0.0),
+            "raw_dev_u_mean": grads.raw_dev_u_mean.at[0].set(0.0),
+            "raw_dev_u_var": raw_dev_u_var,
+            "raw_vol_u_mean": grads.raw_vol_u_mean.at[0].set(0.0),
+            "raw_vol_u_var": raw_vol_u_var
+        })
+
+        if getattr(grads, "raw_aniso_z", None) is not None:
             if covariance_mode == "full":
-                raw_dev_u_var = grads.raw_dev_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
-                raw_vol_u_var = grads.raw_vol_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+                raw_aniso_u_var = grads.raw_aniso_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
             else:
-                raw_dev_u_var = grads.raw_dev_u_var.at[0].set(0.0)
-                raw_vol_u_var = grads.raw_vol_u_var.at[0].set(0.0)
-
+                raw_aniso_u_var = grads.raw_aniso_u_var.at[0].set(0.0)
             replace_kwargs.update({
-                "raw_dev_z": grads.raw_dev_z.at[0].set(0.0),
-                "raw_vol_z": grads.raw_vol_z.at[0].set(0.0),
-                "raw_dev_u_mean": grads.raw_dev_u_mean.at[0].set(0.0),
-                "raw_dev_u_var": raw_dev_u_var,
-                "raw_vol_u_mean": grads.raw_vol_u_mean.at[0].set(0.0),
-                "raw_vol_u_var": raw_vol_u_var
+                "raw_aniso_z": grads.raw_aniso_z.at[0].set(0.0),
+                "raw_aniso_u_mean": grads.raw_aniso_u_mean.at[0].set(0.0),
+                "raw_aniso_u_var": raw_aniso_u_var
             })
-
-            if getattr(grads, "raw_aniso_z", None) is not None:
-                if covariance_mode == "full":
-                    raw_aniso_u_var = grads.raw_aniso_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
-                else:
-                    raw_aniso_u_var = grads.raw_aniso_u_var.at[0].set(0.0)
-                replace_kwargs.update({
-                    "raw_aniso_z": grads.raw_aniso_z.at[0].set(0.0),
-                    "raw_aniso_u_mean": grads.raw_aniso_u_mean.at[0].set(0.0),
-                    "raw_aniso_u_var": raw_aniso_u_var
-                })
 
         if replace_kwargs:
             grads = grads._replace(**replace_kwargs)
@@ -179,9 +179,6 @@ if __name__ == "__main__" :
         
     os.makedirs(save_path, exist_ok=True)
 
-    # Save training configuration
-    import json
-    import yaml
     config_dict = vars(args)
     with open(os.path.join(save_path, "config.json"), "w") as f:
         json.dump(config_dict, f, indent=4)
@@ -189,9 +186,16 @@ if __name__ == "__main__" :
         yaml.dump(config_dict, f, default_flow_style=False)
 
     # load precomputed dataset
-    from core.datasetclass import DatasetFactory
     data_dir = "dataset/preprocessed/syn_f" if os.path.exists("dataset/preprocessed/syn_f") else "dataset/precomputed_vfm" 
     prep_dataset_path = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{args.geometry}_{args.seed}.npz")
+    if not os.path.exists(prep_dataset_path):
+        fallback_path = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{args.geometry}.npz")
+        if os.path.exists(fallback_path):
+            prep_dataset_path = fallback_path
+        else:
+            fallback_path_no_geom = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}.npz")
+            if os.path.exists(fallback_path_no_geom):
+                prep_dataset_path = fallback_path_no_geom
     
     dataset = DatasetFactory.create("dataset/precomputed_vfm", data_path=prep_dataset_path)
     prep_data = dataset.get_data()
@@ -318,65 +322,51 @@ if __name__ == "__main__" :
     if args.resume_from:
         resume_dir = os.path.join(base_save_path, args.resume_from)
         best_params_dict = np.load(os.path.join(resume_dir, "best_params.npy"), allow_pickle=True).item()
-        gp_params = GPRawParams(**best_params_dict)
+        valid_keys = set(GPRawParams._fields)
+        filtered_params = {k: v for k, v in best_params_dict.items() if k in valid_keys}
+        params = GPRawParams(**filtered_params)
     else:
         raw_dev_z_fps = inv_softplus(dev_z - jnp.array([3.0, 3.0]))
         raw_vol_z_fps = inv_softplus(vol_z)
 
+        raw_dev_u_mean_init = jax.random.normal(k2, (n_ip,)).at[0].set(0.0)
+        raw_vol_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
         
-        if args.augmented_var_dist == 1:
-            raw_dev_u_mean_init = jax.random.normal(k2, (n_ip,)).at[0].set(0.0)
-            raw_vol_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
-            
-            if "full" in args.covariance_mode:
-                raw_dev_u_var_init = (jax.random.normal(k2, (n_ip, n_ip)) * 0.1)
-                raw_dev_u_var_init = raw_dev_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
-                raw_vol_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
-                raw_vol_u_var_init = raw_vol_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
-            else:
-                raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(1e-8))
-                raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+        if "full" in args.covariance_mode:
+            raw_dev_u_var_init = (jax.random.normal(k2, (n_ip, n_ip)) * 0.1)
+            raw_dev_u_var_init = raw_dev_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+            raw_vol_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+            raw_vol_u_var_init = raw_vol_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
         else:
-            raw_dev_u_mean_init = jax.random.normal(k2, (n_ip,))
-            raw_vol_u_mean_init = jax.random.normal(k4, (n_ip,))
-            
-            if "full" in args.covariance_mode:
-                raw_dev_u_var_init = (jax.random.normal(k2, (n_ip, n_ip)) * 0.1)
-                raw_vol_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
-            else:
-                raw_dev_u_var_init = jax.random.normal(k2, (n_ip,))
-                raw_vol_u_var_init = jax.random.normal(k4, (n_ip,))
+            raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(1e-8))
+            raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
 
         aniso_kwargs = {}
         if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
             raw_aniso_z_fps = inv_softplus(aniso_z)
-            if args.augmented_var_dist == 1:
-                raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
-                if "full" in args.covariance_mode:
-                    raw_aniso_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
-                    raw_aniso_u_var_init = raw_aniso_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
-                else:
-                    raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+            raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
+            if "full" in args.covariance_mode:
+                raw_aniso_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+                raw_aniso_u_var_init = raw_aniso_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
             else:
-                raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,))
-                if "full" in args.covariance_mode:
-                    raw_aniso_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
-                else:
-                    raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,))
+                raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
             aniso_dim = aniso_flat.shape[-1]
             aniso_kwargs = dict(
                 raw_aniso_ls=jax.random.normal(k1, (aniso_dim,)),
                 raw_aniso_sig=jax.random.normal(k1, ()),
                 raw_aniso_z=raw_aniso_z_fps,
                 raw_aniso_u_mean=raw_aniso_u_mean_init,
-                raw_aniso_u_var=raw_aniso_u_var_init,
-                raw_aniso_kappa=jnp.array(0.0)
+                raw_aniso_u_var=raw_aniso_u_var_init
             )
             if args.model_mode in ["aniso_unk_fiber", "aniso_unk_fiber_neg"]:
-                deg = jax.random.uniform(k1, minval=-89.9, maxval=89.9)
+                if args.model_mode == "aniso_unk_fiber_neg":
+                    deg = jax.random.uniform(k1, minval=-89.9, maxval=-0.1)
+                else:
+                    deg = jax.random.uniform(k1, minval=-89.9, maxval=89.9)
+                print(f"Initializing fiber angle mean at {float(deg):.2f} degrees...")
                 val = (deg / 180.0) + 0.5
                 raw_theta = jnp.log(val / (1.0 - val))
-                aniso_kwargs["raw_aniso_theta_mean"] = raw_theta
+                aniso_kwargs["raw_aniso_theta_mean"] = jnp.array(raw_theta)
 
         if is_fixed_reaction_force_noise:
             params = GPRawParams(
@@ -395,9 +385,6 @@ if __name__ == "__main__" :
                 raw_vol_z=raw_vol_z_fps,        
                 raw_vol_u_mean=raw_vol_u_mean_init,
                 raw_vol_u_var=raw_vol_u_var_init,
-                raw_vol_kappa=jnp.array(0.0),
-
-
 
                 # Noise parameters (Fixed PDE residual noise to prevent uncertainty collapse)
                 log_sigma_free_x=jnp.log(jnp.array(1.0)),
@@ -405,7 +392,7 @@ if __name__ == "__main__" :
                 log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 0]),
                 log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1]),
                 **aniso_kwargs
-                )
+            )
         else :
             params = GPRawParams(
                 # Lengthscales and signal variances (Normal(0, 1))
@@ -423,9 +410,6 @@ if __name__ == "__main__" :
                 raw_vol_z=raw_vol_z_fps,        
                 raw_vol_u_mean=raw_vol_u_mean_init,
                 raw_vol_u_var=raw_vol_u_var_init,
-                raw_vol_kappa=jnp.array(0.0),
-
-
 
                 # Noise parameters (Fixed PDE residual noise to prevent uncertainty collapse)
                 log_sigma_free_x=jnp.log(jnp.array(1.0)),
@@ -455,8 +439,6 @@ if __name__ == "__main__" :
         max_aniso=max_aniso,
         aniso_z=aniso_z,
         covariance_mode=args.covariance_mode,
-        pos_var_mean=args.pos_var_mean,
-        augmented_var_dist=args.augmented_var_dist,
         normalize_ell=args.normalize_ell
     )
 
@@ -484,27 +466,11 @@ if __name__ == "__main__" :
                 max_aniso=max_aniso,
                 aniso_z=aniso_z,
                 covariance_mode=args.covariance_mode,
-                pos_var_mean=args.pos_var_mean,
-                augmented_var_dist=args.augmented_var_dist,
                 normalize_ell=args.normalize_ell
             )
         else:
             local_model = model
         return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k_loss, number_of_mci_sampling, args.normalize_ell)
-
-    if args.model_mode in ["aniso_unk_fiber", "aniso_unk_fiber_neg"]:
-        if args.model_mode == "aniso_unk_fiber_neg":
-            deg = jax.random.uniform(k1, minval=-89.9, maxval=-0.1)
-        else:
-            deg = jax.random.uniform(k1, minval=-89.9, maxval=89.9)
-            
-        print(f"Initializing fiber angle mean at {float(deg):.2f} degrees...")
-        val = (deg / 180.0) + 0.5
-        raw_val = float(jnp.log(val / (1.0 - val)))
-        
-        params = params._replace(
-            raw_aniso_theta_mean=jnp.array(raw_val)
-        )
 
     if args.final_learning_rate is not None and args.final_learning_rate != learning_rate:
         schedule = optax.cosine_decay_schedule(
@@ -532,7 +498,7 @@ if __name__ == "__main__" :
         min_vol=min_vol,
         max_dev=max_dev,
         max_vol=max_vol,
-        freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode, args.augmented_var_dist),
+        freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode),
         seed=args.seed
     )
 
@@ -564,10 +530,30 @@ if __name__ == "__main__" :
         min_aniso=min_aniso,
         max_aniso=max_aniso,
         aniso_z=aniso_z,
-        covariance_mode=args.covariance_mode
+        covariance_mode=args.covariance_mode,
+        normalize_ell=args.normalize_ell
     )
     F_train_full_3x3 = jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
-    r2, rmse, coverage = plot_training_r2(learned_gp, true_mat_model, F_train_full_3x3, save_path)
+    
+    val_load_steps_indices = args.val_load_steps_indices
+    if val_load_steps_indices is None:
+        for cand in [os.path.join(save_path, "recipe_config.yaml"), os.path.join(save_path, "config.yaml")]:
+            if os.path.exists(cand):
+                try:
+                    with open(cand, "r") as f:
+                        yd = yaml.safe_load(f)
+                        if yd and "val_load_steps_indices" in yd:
+                            val_load_steps_indices = yd["val_load_steps_indices"]
+                            break
+                except Exception:
+                    pass
+
+    r2_res = plot_training_r2(
+        learned_gp, true_mat_model, F_train_full_3x3, save_path,
+        train_steps=train_load_steps_indices,
+        val_steps=val_load_steps_indices
+    )
+    r2, rmse, coverage = r2_res[0], r2_res[1], r2_res[2]
 
     # Capture peak memory
     import resource
@@ -585,6 +571,14 @@ if __name__ == "__main__" :
         "r2": r2,
         "rmse": rmse,
         "ec": coverage,
+        "r2_train": r2_res.train_metrics.get("r2"),
+        "rmse_train": r2_res.train_metrics.get("rmse"),
+        "ec_train": r2_res.train_metrics.get("ec"),
+        "r2_val": r2_res.val_metrics.get("r2"),
+        "rmse_val": r2_res.val_metrics.get("rmse"),
+        "ec_val": r2_res.val_metrics.get("ec"),
+        "train_steps": r2_res.train_metrics.get("steps", train_load_steps_indices),
+        "val_steps": r2_res.val_metrics.get("steps", val_load_steps_indices),
         "elbo": float(trainer.loss_components_hist["total_loss"][-1]) if trainer.loss_components_hist["total_loss"] else None,
         "ell": float(trainer.loss_components_hist["log_like"][-1]) if trainer.loss_components_hist["log_like"] else None,
         "kl": float(trainer.loss_components_hist["kl"][-1]) if trainer.loss_components_hist["kl"] else None,
@@ -598,7 +592,6 @@ if __name__ == "__main__" :
         "sigma_fix_y": np.array(phys_params.sigma_fix_y).tolist(),
     }
     
-    import json
     with open(os.path.join(save_path, "extraction_metrics.json"), "w") as f:
         json.dump(metrics, f, indent=4)
 

@@ -23,12 +23,11 @@ class SparseHyperelasticityGP:
                  max_dev: jnp.ndarray, max_vol: jnp.ndarray, sampling_mode: str = "pws", 
                  beta: float = 1.0, L: int = 200, feature_extractor: Optional[FeatureExtractor] = None,
                  min_aniso: Optional[jnp.ndarray] = None, max_aniso: Optional[jnp.ndarray] = None, aniso_z: Optional[jnp.ndarray] = None,
-                  covariance_mode: str = "diag", pos_var_mean: int = 1, augmented_var_dist: int = 1,
-                  normalize_ell: int = 0):
+                 covariance_mode: str = "diag", normalize_ell: int = 0, **kwargs):
         self.feature_extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
         # 1. Inducing points split
         self.dev_z = jnp.asarray(I_z[:, :2], dtype=jnp.float64)
-        self.vol_z = jnp.asarray(I_z[:, 2:], dtype=jnp.float64)
+        self.vol_z = jnp.asarray(I_z[:, 2:3], dtype=jnp.float64)
         self.min_dev = jnp.asarray(min_dev, dtype=jnp.float64)
         self.max_dev = jnp.asarray(max_dev, dtype=jnp.float64)
         self.min_vol = jnp.asarray(min_vol, dtype=jnp.float64)
@@ -44,8 +43,6 @@ class SparseHyperelasticityGP:
         self.L = L  # Number of Random Fourier Features for pathwise sampling
         self.beta = beta
         self.covariance_mode = covariance_mode
-        self.pos_var_mean = int(pos_var_mean)
-        self.augmented_var_dist = int(augmented_var_dist)
         self.normalize_ell = int(normalize_ell)
         
         # 2. Setup Parameters and Weights
@@ -71,12 +68,8 @@ class SparseHyperelasticityGP:
         def to_f64(x):
             return jnp.asarray(x, dtype=jnp.float64)
 
-        if self.pos_var_mean == 1:
-            dev_mu = to_f64(jax.nn.softplus(p.raw_dev_u_mean))
-            vol_mu = to_f64(jax.nn.softplus(p.raw_vol_u_mean))
-        else:
-            dev_mu = to_f64(p.raw_dev_u_mean)
-            vol_mu = to_f64(p.raw_vol_u_mean)
+        dev_mu = to_f64(jax.nn.softplus(p.raw_dev_u_mean))
+        vol_mu = to_f64(jax.nn.softplus(p.raw_vol_u_mean))
         
         if "full" in self.covariance_mode:
             def get_full_cov(raw):
@@ -90,50 +83,37 @@ class SparseHyperelasticityGP:
             dev_var = to_f64(jax.nn.softplus(p.raw_dev_u_var))
             vol_var = to_f64(jax.nn.softplus(p.raw_vol_u_var))
 
-        # Anchor points (First inducing point at reference zero energy state if augmented_var_dist == 1)
+        # Anchor points: First inducing point at reference zero energy state with mean 0 and var 1e-8
         dev_z = to_f64(jax.nn.softplus(p.raw_dev_z)) + to_f64(jnp.array([3.0, 3.0]))
         vol_z = to_f64(jax.nn.softplus(p.raw_vol_z))
 
-        if self.augmented_var_dist == 1:
-            dev_z = dev_z.at[0].set(to_f64(jnp.array([3.0, 3.0])))
-            vol_z = vol_z.at[0].set(to_f64(jnp.array([1.0])))
+        dev_z = dev_z.at[0].set(to_f64(jnp.array([3.0, 3.0])))
+        vol_z = vol_z.at[0].set(to_f64(jnp.array([1.0])))
 
-            dev_u_mean = dev_mu.at[0].set(0.0)
-            vol_u_mean = vol_mu.at[0].set(0.0)
-            if "full" in self.covariance_mode:
-                dev_u_var = dev_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
-                vol_u_var = vol_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
-            else:
-                dev_u_var  = dev_var.at[0].set(1e-8)
-                vol_u_var  = vol_var.at[0].set(1e-8)
+        dev_u_mean = dev_mu.at[0].set(0.0)
+        vol_u_mean = vol_mu.at[0].set(0.0)
+        if "full" in self.covariance_mode:
+            dev_u_var = dev_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
+            vol_u_var = vol_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
         else:
-            dev_u_mean = dev_mu
-            vol_u_mean = vol_mu
-            dev_u_var  = dev_var
-            vol_u_var  = vol_var
+            dev_u_var  = dev_var.at[0].set(1e-8)
+            vol_u_var  = vol_var.at[0].set(1e-8)
         
         kwargs = {}
         if self.is_anisotropic:
-            if self.pos_var_mean == 1:
-                aniso_mu = to_f64(jax.nn.softplus(p.raw_aniso_u_mean))
-            else:
-                aniso_mu = to_f64(p.raw_aniso_u_mean)
+            aniso_mu = to_f64(jax.nn.softplus(p.raw_aniso_u_mean))
             if "full" in self.covariance_mode:
                 aniso_var = to_f64(get_full_cov(p.raw_aniso_u_var))
             else:
                 aniso_var = to_f64(jax.nn.softplus(p.raw_aniso_u_var))
             
             aniso_z = to_f64(jax.nn.softplus(p.raw_aniso_z))
-            if self.augmented_var_dist == 1:
-                aniso_z = aniso_z.at[0].set(to_f64(jnp.ones(aniso_z.shape[-1])))
-                aniso_u_mean = aniso_mu.at[0].set(0.0)
-                if "full" in self.covariance_mode:
-                    aniso_u_var = aniso_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
-                else:
-                    aniso_u_var = aniso_var.at[0].set(1e-8)
+            aniso_z = aniso_z.at[0].set(to_f64(jnp.ones(aniso_z.shape[-1])))
+            aniso_u_mean = aniso_mu.at[0].set(0.0)
+            if "full" in self.covariance_mode:
+                aniso_u_var = aniso_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
             else:
-                aniso_u_mean = aniso_mu
-                aniso_u_var = aniso_var
+                aniso_u_var = aniso_var.at[0].set(1e-8)
             
             if "full" not in self.covariance_mode:
                 aniso_ls_val = to_f64(self.max_aniso.mean() * 2 * jax.nn.sigmoid(p.raw_aniso_ls))
@@ -145,8 +125,7 @@ class SparseHyperelasticityGP:
                 aniso_sig=to_f64(jnp.exp(p.raw_aniso_sig)),
                 aniso_u_mean=aniso_u_mean,
                 aniso_u_var=aniso_u_var,
-                aniso_z=aniso_z,
-                aniso_kappa=to_f64(jax.nn.softplus(p.raw_aniso_kappa))
+                aniso_z=aniso_z
             )
             if getattr(p, "raw_aniso_theta_mean", None) is not None:
                 kwargs["aniso_theta_mean"] = to_f64(jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta_mean) - 0.5))
@@ -172,7 +151,6 @@ class SparseHyperelasticityGP:
             vol_u_mean=vol_u_mean,
             vol_u_var=vol_u_var,
             vol_z=vol_z,
-            vol_kappa=to_f64(jax.nn.softplus(p.raw_vol_kappa)),
 
             sigma_free_x=to_f64(jnp.exp(p.log_sigma_free_x)),
             sigma_free_y=to_f64(jnp.exp(p.log_sigma_free_y)),
@@ -398,9 +376,8 @@ class SparseHyperelasticityGP:
                               w.vol_trace_term, p.vol_z.shape[0])
         total_kl = dev_kl + vol_kl
         if self.is_anisotropic:
-            aniso_kl = 0.5 * jnp.where("whitened" in self.covariance_mode, 
-                                    w.aniso_trace_term + w.aniso_mahalanobis_term + w.aniso_logterm,
-                                    w.aniso_trace_term + w.aniso_mahalanobis_term + w.aniso_logterm - p.aniso_z.shape[0])
+            aniso_kl = component_kl(w.aniso_mahalanobis_term, w.aniso_logterm,
+                                    w.aniso_trace_term, p.aniso_z.shape[0])
             total_kl += aniso_kl
             
             if getattr(p, "aniso_theta_var", None) is not None:
