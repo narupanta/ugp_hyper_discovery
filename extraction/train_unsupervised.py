@@ -70,6 +70,7 @@ def parse_args():
     parser.add_argument('--aniso_params', type=float, nargs='+', default=None)
     parser.add_argument('--pos_var_mean', type=int, default=1, choices=[0, 1], help="Whether to apply softplus to variational mean (1) or use unconstrained mean (0)")
     parser.add_argument('--augmented_var_dist', type=int, default=1, choices=[0, 1], help="Whether to use augmented variational distribution q(u) (1) or deterministic point-estimate (0)")
+    parser.add_argument('--augmented_var_dist', type=int, default=1, choices=[0, 1], help="Whether to augment variational distribution with reference state anchor point at index 0 (1) or use standard unaugmented variational distribution (0)")
 
     return parser.parse_args()
 
@@ -92,6 +93,7 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
         else:
             raw_dev_u_var = grads.raw_dev_u_var.at[0].set(0.0)
             raw_vol_u_var = grads.raw_vol_u_var.at[0].set(0.0)
+        replace_kwargs = {}
 
         # 1. ALWAYS anchor index 0 (reference free state) in BOTH training modes
         replace_kwargs = {
@@ -102,6 +104,14 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
             "raw_vol_u_mean": grads.raw_vol_u_mean.at[0].set(0.0),
             "raw_vol_u_var": raw_vol_u_var
         }
+        if augmented_var_dist == 1:
+            # Anchor index 0 (reference stress-free state)
+            if covariance_mode == "full":
+                raw_dev_u_var = grads.raw_dev_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+                raw_vol_u_var = grads.raw_vol_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+            else:
+                raw_dev_u_var = grads.raw_dev_u_var.at[0].set(0.0)
+                raw_vol_u_var = grads.raw_vol_u_var.at[0].set(0.0)
 
         if getattr(grads, "raw_aniso_z", None) is not None:
             replace_kwargs["raw_aniso_z"] = grads.raw_aniso_z.at[0].set(0.0)
@@ -115,6 +125,28 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
             replace_kwargs["raw_aniso_u_var"] = raw_aniso_u_var
             
         grads = grads._replace(**replace_kwargs)
+            replace_kwargs.update({
+                "raw_dev_z": grads.raw_dev_z.at[0].set(0.0),
+                "raw_vol_z": grads.raw_vol_z.at[0].set(0.0),
+                "raw_dev_u_mean": grads.raw_dev_u_mean.at[0].set(0.0),
+                "raw_dev_u_var": raw_dev_u_var,
+                "raw_vol_u_mean": grads.raw_vol_u_mean.at[0].set(0.0),
+                "raw_vol_u_var": raw_vol_u_var
+            })
+
+            if getattr(grads, "raw_aniso_z", None) is not None:
+                if covariance_mode == "full":
+                    raw_aniso_u_var = grads.raw_aniso_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+                else:
+                    raw_aniso_u_var = grads.raw_aniso_u_var.at[0].set(0.0)
+                replace_kwargs.update({
+                    "raw_aniso_z": grads.raw_aniso_z.at[0].set(0.0),
+                    "raw_aniso_u_mean": grads.raw_aniso_u_mean.at[0].set(0.0),
+                    "raw_aniso_u_var": raw_aniso_u_var
+                })
+
+        if replace_kwargs:
+            grads = grads._replace(**replace_kwargs)
         
         # 2. Optionally freeze reaction force noise parameters
         if is_fixed_noise:
@@ -331,9 +363,30 @@ if __name__ == "__main__" :
             raw_dev_u_var_init = raw_dev_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
             raw_vol_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
             raw_vol_u_var_init = raw_vol_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+        if args.augmented_var_dist == 1:
+            raw_dev_u_mean_init = jax.random.normal(k2, (n_ip,)).at[0].set(0.0)
+            raw_vol_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
+            
+            if "full" in args.covariance_mode:
+                raw_dev_u_var_init = (jax.random.normal(k2, (n_ip, n_ip)) * 0.1)
+                raw_dev_u_var_init = raw_dev_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+                raw_vol_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+                raw_vol_u_var_init = raw_vol_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+            else:
+                raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(1e-8))
+                raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
         else:
             raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(1e-8))
             raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+            raw_dev_u_mean_init = jax.random.normal(k2, (n_ip,))
+            raw_vol_u_mean_init = jax.random.normal(k4, (n_ip,))
+            
+            if "full" in args.covariance_mode:
+                raw_dev_u_var_init = (jax.random.normal(k2, (n_ip, n_ip)) * 0.1)
+                raw_vol_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+            else:
+                raw_dev_u_var_init = jax.random.normal(k2, (n_ip,))
+                raw_vol_u_var_init = jax.random.normal(k4, (n_ip,))
 
         aniso_kwargs = {}
         if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
@@ -342,8 +395,20 @@ if __name__ == "__main__" :
             if "full" in args.covariance_mode:
                 raw_aniso_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
                 raw_aniso_u_var_init = raw_aniso_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+            if args.augmented_var_dist == 1:
+                raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
+                if "full" in args.covariance_mode:
+                    raw_aniso_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+                    raw_aniso_u_var_init = raw_aniso_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+                else:
+                    raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
             else:
                 raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+                raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,))
+                if "full" in args.covariance_mode:
+                    raw_aniso_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+                else:
+                    raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,))
             aniso_dim = aniso_flat.shape[-1]
             aniso_kwargs = dict(
                 raw_aniso_ls=jax.random.normal(k1, (aniso_dim,)),
