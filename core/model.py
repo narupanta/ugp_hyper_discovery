@@ -23,7 +23,8 @@ class SparseHyperelasticityGP:
                  max_dev: jnp.ndarray, max_vol: jnp.ndarray, sampling_mode: str = "pws", 
                  beta: float = 1.0, L: int = 200, feature_extractor: Optional[FeatureExtractor] = None,
                  min_aniso: Optional[jnp.ndarray] = None, max_aniso: Optional[jnp.ndarray] = None, aniso_z: Optional[jnp.ndarray] = None,
-                 covariance_mode: str = "diag", normalize_ell: int = 0, **kwargs):
+                 covariance_mode: str = "diag", normalize_ell: int = 0,
+                 u_var_anchor: float = 1e-12, kzz_jitter: float = 1e-8, **kwargs):
         self.feature_extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
         # 1. Inducing points split
         self.dev_z = jnp.asarray(I_z[:, :2], dtype=jnp.float64)
@@ -44,6 +45,8 @@ class SparseHyperelasticityGP:
         self.beta = beta
         self.covariance_mode = covariance_mode
         self.normalize_ell = int(normalize_ell)
+        self.u_var_anchor = float(u_var_anchor)
+        self.kzz_jitter = float(kzz_jitter)
         
         # 2. Setup Parameters and Weights
         self.params: GPParams = self.load_params(raw_params)
@@ -93,11 +96,11 @@ class SparseHyperelasticityGP:
         dev_u_mean = dev_mu.at[0].set(0.0)
         vol_u_mean = vol_mu.at[0].set(0.0)
         if "full" in self.covariance_mode:
-            dev_u_var = dev_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
-            vol_u_var = vol_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
+            dev_u_var = dev_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(self.u_var_anchor)
+            vol_u_var = vol_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(self.u_var_anchor)
         else:
-            dev_u_var  = dev_var.at[0].set(1e-8)
-            vol_u_var  = vol_var.at[0].set(1e-8)
+            dev_u_var  = dev_var.at[0].set(self.u_var_anchor)
+            vol_u_var  = vol_var.at[0].set(self.u_var_anchor)
         
         kwargs = {}
         if self.is_anisotropic:
@@ -111,9 +114,9 @@ class SparseHyperelasticityGP:
             aniso_z = aniso_z.at[0].set(to_f64(jnp.ones(aniso_z.shape[-1])))
             aniso_u_mean = aniso_mu.at[0].set(0.0)
             if "full" in self.covariance_mode:
-                aniso_u_var = aniso_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
+                aniso_u_var = aniso_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(self.u_var_anchor)
             else:
-                aniso_u_var = aniso_var.at[0].set(1e-8)
+                aniso_u_var = aniso_var.at[0].set(self.u_var_anchor)
             
             if "full" not in self.covariance_mode:
                 aniso_ls_val = to_f64(self.max_aniso.mean() * 2 * jax.nn.sigmoid(p.raw_aniso_ls))
@@ -166,7 +169,7 @@ class SparseHyperelasticityGP:
     def _compute_component_weights(self, z: jnp.ndarray, u_mean: jnp.ndarray, u_var: jnp.ndarray, 
                                    ls: jnp.ndarray, sig: jnp.ndarray) -> Tuple[jnp.ndarray, ...]:
         """Helper to precompute reusable covariance matrices and vectors for GP."""
-        Kzz = rbf(z, z, sig, ls) + 1e-8 * jnp.eye(z.shape[0], dtype=jnp.float64)
+        Kzz = rbf(z, z, sig, ls) + self.kzz_jitter * jnp.eye(z.shape[0], dtype=jnp.float64)
         K_inv = jnp.linalg.solve(Kzz, jnp.eye(z.shape[0], dtype=jnp.float64))
         
         # We strictly assume a zero-mean prior, so v_diff is just u_mean - 0

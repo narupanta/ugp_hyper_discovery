@@ -141,6 +141,8 @@ COVARIANCE_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE'));
 POS_VAR_MEAN=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('pos_var_mean', 1))" 2>/dev/null || echo "1")
 AUGMENTED_VAR_DIST=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('augmented_var_dist', 1))" 2>/dev/null || echo "1")
 NORMALIZE_ELL=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('normalize_ell', 0))" 2>/dev/null || echo "0")
+U_VAR_ANCHOR=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('u_var_anchor', '1e-12'))" 2>/dev/null || echo "1e-12")
+KZZ_JITTER=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('kzz_jitter', '1e-8'))" 2>/dev/null || echo "1e-8")
 if [ -n "$SEED_OVERRIDE" ]; then
     SEEDS_LIST="$SEED_OVERRIDE"
 else
@@ -282,6 +284,8 @@ for SEED in $SEEDS_LIST; do
             --model_mode "$MODEL_MODE" \
             --covariance_mode "$COVARIANCE_MODE" \
             --normalize_ell "$NORMALIZE_ELL" \
+            --u_var_anchor "$U_VAR_ANCHOR" \
+            --kzz_jitter "$KZZ_JITTER" \
             --seed "$SEED" \
             --batch_dir "$EXTRACT_SEED_DIR" \
             $MAT_EXTRA_ARGS

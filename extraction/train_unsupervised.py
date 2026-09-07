@@ -72,6 +72,8 @@ def parse_args():
     parser.add_argument('--vol_params', type=float, nargs='+', default=None)
     parser.add_argument('--aniso_params', type=float, nargs='+', default=None)
     parser.add_argument('--normalize_ell', type=int, default=0, choices=[0, 1], help="Whether to normalize expected log-likelihood by degrees of freedom to prevent uncertainty collapse (1) or use unnormalized sum (0)")
+    parser.add_argument('--u_var_anchor', type=float, default=1e-12, help="Anchor point variance (default 1e-12)")
+    parser.add_argument('--kzz_jitter', type=float, default=1e-8, help="Numerical jitter added to Kzz diagonal (default 1e-8)")
 
     return parser.parse_args()
 
@@ -80,8 +82,8 @@ def sigma_fix_to_log_sigma_fix(sigma_fix) :
 
 def inv_softplus(y):
     """Computes initial raw parameters from physical coordinates in invariant space."""
-    y_safe = jnp.maximum(y, 1e-6)
-    return jnp.where(y_safe > 20.0, y_safe, jnp.log(jnp.maximum(jnp.exp(y_safe) - 1.0, 1e-8)))
+    y_safe = jnp.maximum(y, 1e-15)
+    return jnp.where(y_safe > 20.0, y_safe, jnp.log(jnp.expm1(y_safe)))
 
 def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag"):
     def freeze_fn(grads):
@@ -334,12 +336,12 @@ if __name__ == "__main__" :
         
         if "full" in args.covariance_mode:
             raw_dev_u_var_init = (jax.random.normal(k2, (n_ip, n_ip)) * 0.1)
-            raw_dev_u_var_init = raw_dev_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+            raw_dev_u_var_init = raw_dev_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(args.u_var_anchor))
             raw_vol_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
-            raw_vol_u_var_init = raw_vol_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+            raw_vol_u_var_init = raw_vol_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(args.u_var_anchor))
         else:
-            raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(1e-8))
-            raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+            raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
+            raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
 
         aniso_kwargs = {}
         if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
@@ -347,9 +349,9 @@ if __name__ == "__main__" :
             raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
             if "full" in args.covariance_mode:
                 raw_aniso_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
-                raw_aniso_u_var_init = raw_aniso_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(1e-8))
+                raw_aniso_u_var_init = raw_aniso_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(args.u_var_anchor))
             else:
-                raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(1e-8))
+                raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
             aniso_dim = aniso_flat.shape[-1]
             aniso_kwargs = dict(
                 raw_aniso_ls=jax.random.normal(k1, (aniso_dim,)),
@@ -439,7 +441,9 @@ if __name__ == "__main__" :
         max_aniso=max_aniso,
         aniso_z=aniso_z,
         covariance_mode=args.covariance_mode,
-        normalize_ell=args.normalize_ell
+        normalize_ell=args.normalize_ell,
+        u_var_anchor=args.u_var_anchor,
+        kzz_jitter=args.kzz_jitter
     )
 
 
@@ -466,7 +470,9 @@ if __name__ == "__main__" :
                 max_aniso=max_aniso,
                 aniso_z=aniso_z,
                 covariance_mode=args.covariance_mode,
-                normalize_ell=args.normalize_ell
+                normalize_ell=args.normalize_ell,
+                u_var_anchor=args.u_var_anchor,
+                kzz_jitter=args.kzz_jitter
             )
         else:
             local_model = model
@@ -531,7 +537,9 @@ if __name__ == "__main__" :
         max_aniso=max_aniso,
         aniso_z=aniso_z,
         covariance_mode=args.covariance_mode,
-        normalize_ell=args.normalize_ell
+        normalize_ell=args.normalize_ell,
+        u_var_anchor=args.u_var_anchor,
+        kzz_jitter=args.kzz_jitter
     )
     F_train_full_3x3 = jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
     
