@@ -195,7 +195,6 @@ def main():
         gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
         beta=1.0, feature_extractor=feature_extractor,
         aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,
-        covariance_mode=cov_mode
         covariance_mode=cov_mode,
         pos_var_mean=pos_var_mean,
         augmented_var_dist=augmented_var_dist
