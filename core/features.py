@@ -25,19 +25,6 @@ class IsotropicFeatureExtractor(FeatureExtractor):
         dev, vol = transform_input_features(invariants)
         return dev, vol
 
-class IsotropicSingleFeatureExtractor(FeatureExtractor):
-    def extract(self, f: jnp.ndarray) -> jnp.ndarray:
-        """
-        Extracts standard isotropic invariants (I1_bar, I2_bar, J) as a single
-        3D feature vector.
-        Returns:
-            features: (..., 3) array containing [I1_bar, I2_bar, J]
-        """
-        invariants, _ = invariants_and_derivatives(f)
-        dev, vol = transform_input_features(invariants)
-        return jnp.concatenate([dev, vol], axis=-1)
-
-
 class AnisotropicFeatureExtractor(FeatureExtractor):
     def __init__(self, a0: jnp.ndarray, a1: jnp.ndarray = None, cap_compression: bool = False):
         self.a0 = jnp.asarray(a0, dtype=jnp.float64)

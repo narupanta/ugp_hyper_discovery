@@ -37,13 +37,6 @@ class GPRawParams(NamedTuple):
     raw_aniso_theta_mean: jnp.ndarray = None
     raw_aniso_theta_var: jnp.ndarray = None
 
-    # Single 3D GP fields (I1_bar, I2_bar, J)
-    raw_single_ls: jnp.ndarray = None
-    raw_single_sig: jnp.ndarray = None
-    raw_single_u_mean: jnp.ndarray = None
-    raw_single_u_var: jnp.ndarray = None
-    raw_single_z: jnp.ndarray = None
-
 class GPParams(NamedTuple) :
     dev_ls: jnp.ndarray = None
     dev_sig: jnp.ndarray = None
@@ -72,29 +65,22 @@ class GPParams(NamedTuple) :
     aniso_z: jnp.ndarray = None
     aniso_kappa: jnp.ndarray = None
 
-    # Single 3D GP fields (I1_bar, I2_bar, J)
-    single_ls: jnp.ndarray = None
-    single_sig: jnp.ndarray = None
-    single_u_mean: jnp.ndarray = None
-    single_u_var: jnp.ndarray = None
-    single_z: jnp.ndarray = None
-
 class GPWeights(NamedTuple) :
-    dev_Kzz: jnp.ndarray = None
-    dev_v: jnp.ndarray = None
-    dev_trace_term: jnp.ndarray = None
-    dev_mahalanobis_term: jnp.ndarray = None
-    dev_M_mat: jnp.ndarray = None
-    dev_Kzz_inv: jnp.ndarray = None
-    dev_logterm: jnp.ndarray = None
+    dev_Kzz: jnp.ndarray
+    dev_v: jnp.ndarray
+    dev_trace_term: jnp.ndarray
+    dev_mahalanobis_term: jnp.ndarray
+    dev_M_mat: jnp.ndarray
+    dev_Kzz_inv: jnp.ndarray
+    dev_logterm: jnp.ndarray
 
-    vol_Kzz: jnp.ndarray = None
-    vol_v: jnp.ndarray = None
-    vol_trace_term: jnp.ndarray = None
-    vol_mahalanobis_term: jnp.ndarray = None
-    vol_M_mat: jnp.ndarray = None
-    vol_Kzz_inv: jnp.ndarray = None
-    vol_logterm: jnp.ndarray = None
+    vol_Kzz: jnp.ndarray
+    vol_v: jnp.ndarray
+    vol_trace_term: jnp.ndarray
+    vol_mahalanobis_term: jnp.ndarray
+    vol_M_mat: jnp.ndarray
+    vol_Kzz_inv: jnp.ndarray
+    vol_logterm: jnp.ndarray
 
     aniso_Kzz: jnp.ndarray = None
     aniso_v: jnp.ndarray = None
@@ -103,16 +89,6 @@ class GPWeights(NamedTuple) :
     aniso_M_mat: jnp.ndarray = None
     aniso_Kzz_inv: jnp.ndarray = None
     aniso_logterm: jnp.ndarray = None
-
-    # Single 3D GP weights
-    single_Kzz: jnp.ndarray = None
-    single_v: jnp.ndarray = None
-    single_trace_term: jnp.ndarray = None
-    single_mahalanobis_term: jnp.ndarray = None
-    single_M_mat: jnp.ndarray = None
-    single_Kzz_inv: jnp.ndarray = None
-    single_logterm: jnp.ndarray = None
-
 
 
 class SyntheticData(NamedTuple) :

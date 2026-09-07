@@ -11,7 +11,7 @@ from core.utils import transform_input_features
 from core.dataclass import GPRawParams, GPParams, GPWeights
 from core.material_models import get_material
 from core.trainer import HyperelasticGPTrainer
-from core.features import IsotropicFeatureExtractor, IsotropicSingleFeatureExtractor, AnisotropicFeatureExtractor
+from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 from core.utils import *
 import datetime
 import os
@@ -104,17 +104,6 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
                 "raw_vol_u_var": raw_vol_u_var
             })
 
-            if getattr(grads, "raw_single_z", None) is not None:
-                if covariance_mode == "full":
-                    raw_single_u_var = grads.raw_single_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
-                else:
-                    raw_single_u_var = grads.raw_single_u_var.at[0].set(0.0)
-                replace_kwargs.update({
-                    "raw_single_z": grads.raw_single_z.at[0].set(0.0),
-                    "raw_single_u_mean": grads.raw_single_u_mean.at[0].set(0.0),
-                    "raw_single_u_var": raw_single_u_var
-                })
-
             if getattr(grads, "raw_aniso_z", None) is not None:
                 if covariance_mode == "full":
                     raw_aniso_u_var = grads.raw_aniso_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
@@ -138,19 +127,17 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
             
         # 3. Optionally freeze ALL inducing point positions (from FPS)
         if is_fixed_z:
-            freeze_z_kwargs = {
+            replace_kwargs = {
                 "raw_dev_z": jnp.zeros_like(grads.raw_dev_z),
                 "raw_vol_z": jnp.zeros_like(grads.raw_vol_z)
             }
-            if getattr(grads, "raw_single_z", None) is not None:
-                freeze_z_kwargs["raw_single_z"] = jnp.zeros_like(grads.raw_single_z)
             if getattr(grads, "raw_aniso_z", None) is not None:
                 # If fiber angle is known (fixed), freeze aniso inducing points as well.
                 # Only keep aniso inducing points unfrozen if fiber angle is being learned dynamically.
                 is_unknown_fiber = getattr(grads, "raw_aniso_theta_mean", None) is not None
                 if not is_unknown_fiber:
-                    freeze_z_kwargs["raw_aniso_z"] = jnp.zeros_like(grads.raw_aniso_z)
-            grads = grads._replace(**freeze_z_kwargs)
+                    replace_kwargs["raw_aniso_z"] = jnp.zeros_like(grads.raw_aniso_z)
+            grads = grads._replace(**replace_kwargs)
         return grads
     return freeze_fn
 
@@ -205,14 +192,6 @@ if __name__ == "__main__" :
     from core.datasetclass import DatasetFactory
     data_dir = "dataset/preprocessed/syn_f" if os.path.exists("dataset/preprocessed/syn_f") else "dataset/precomputed_vfm" 
     prep_dataset_path = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{args.geometry}_{args.seed}.npz")
-    if not os.path.exists(prep_dataset_path):
-        fallback_path = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{args.geometry}.npz")
-        if os.path.exists(fallback_path):
-            prep_dataset_path = fallback_path
-        else:
-            fallback_path_no_geom = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}.npz")
-            if os.path.exists(fallback_path_no_geom):
-                prep_dataset_path = fallback_path_no_geom
     
     dataset = DatasetFactory.create("dataset/precomputed_vfm", data_path=prep_dataset_path)
     prep_data = dataset.get_data()
@@ -295,24 +274,16 @@ if __name__ == "__main__" :
         dev, vol, aniso = jax.vmap(jax.vmap(extractor.extract))(f3x3)
         I_all = jnp.concatenate([dev, vol, aniso], axis=-1)
         aniso_flat = aniso.reshape(-1, aniso.shape[-1])
-        dev_flat = dev.reshape(-1, dev.shape[-1])
-        vol_flat = vol.reshape(-1, vol.shape[-1])
-    elif args.model_mode == "isotropic_single":
-        extractor = IsotropicSingleFeatureExtractor()
-        I_all = jax.vmap(jax.vmap(extractor.extract))(f3x3)
-        dev = I_all[..., :2]
-        vol = I_all[..., 2:]
-        aniso_flat = None
-        dev_flat = dev.reshape(-1, dev.shape[-1])
-        vol_flat = vol.reshape(-1, vol.shape[-1])
     else:
         extractor = IsotropicFeatureExtractor()
         dev, vol = jax.vmap(jax.vmap(extractor.extract))(f3x3)
         I_all = jnp.concatenate([dev, vol], axis=-1)
         aniso_flat = None
-        dev_flat = dev.reshape(-1, dev.shape[-1])
-        vol_flat = vol.reshape(-1, vol.shape[-1])
 
+    # get all data inside prep_data
+    dev_flat =  dev.reshape(-1, dev.shape[-1]) 
+    vol_flat = vol.reshape(-1, vol.shape[-1])
+    
     aniso_z = None
     min_aniso = None
     max_aniso = None
@@ -327,11 +298,6 @@ if __name__ == "__main__" :
             aniso_z = I_z[:, 3:]
             min_aniso = jnp.min(aniso_flat, axis=0)
             max_aniso = jnp.max(aniso_flat, axis=0)
-    elif args.model_mode == "isotropic_single":
-        single_flat = I_all.reshape(-1, 3)
-        I_z = farthest_point_sampling_with_fixed_point(single_flat, n_ip, jnp.array([3.0, 3.0, 1.0]))
-        dev_z = I_z[:, :2]
-        vol_z = I_z[:, 2:]
     else:
         dev_z = farthest_point_sampling_with_fixed_point(dev_flat, n_ip, jnp.array([3.0, 3.0]))
         vol_z = farthest_point_sampling_with_fixed_point(vol_flat, n_ip, jnp.array([1.0]))
@@ -344,7 +310,6 @@ if __name__ == "__main__" :
         I_z = jnp.concat(I_z_list, axis = -1)
         
     plot_inducing_points(dev_z, vol_z, dev_flat, vol_flat, save_path, aniso_z=aniso_z, aniso_I=aniso_flat, feature_extractor=extractor)
-
 
     # Setup random key
     key = jax.random.PRNGKey(args.seed)
@@ -599,10 +564,7 @@ if __name__ == "__main__" :
         min_aniso=min_aniso,
         max_aniso=max_aniso,
         aniso_z=aniso_z,
-        covariance_mode=args.covariance_mode,
-        pos_var_mean=args.pos_var_mean,
-        augmented_var_dist=args.augmented_var_dist,
-        normalize_ell=args.normalize_ell
+        covariance_mode=args.covariance_mode
     )
     F_train_full_3x3 = jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
     r2, rmse, coverage = plot_training_r2(learned_gp, true_mat_model, F_train_full_3x3, save_path)

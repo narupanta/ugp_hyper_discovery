@@ -8,7 +8,7 @@ jax.config.update("jax_enable_x64", True)
 
 from .kernel import rbf
 from .dataclass import EnergyDist, StressDist, GPParams, GPWeights
-from .features import IsotropicFeatureExtractor, IsotropicSingleFeatureExtractor, FeatureExtractor
+from .features import IsotropicFeatureExtractor, FeatureExtractor
 
 
 class SparseHyperelasticityGP:
@@ -26,53 +26,19 @@ class SparseHyperelasticityGP:
                   covariance_mode: str = "diag", pos_var_mean: int = 1, augmented_var_dist: int = 1,
                   normalize_ell: int = 0):
         self.feature_extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
-        self.is_single_gp = isinstance(self.feature_extractor, IsotropicSingleFeatureExtractor)
-
-        # 1. Inducing points setup
-        if self.is_single_gp:
-            self.single_z = jnp.asarray(I_z, dtype=jnp.float64)
-            if min_dev is not None and min_vol is not None:
-                if len(min_dev) == 3:
-                    self.min_single = jnp.asarray(min_dev, dtype=jnp.float64)
-                else:
-                    self.min_single = jnp.concatenate([jnp.atleast_1d(min_dev), jnp.atleast_1d(min_vol)], axis=0)
-            else:
-                self.min_single = jnp.min(self.single_z, axis=0)
-
-            if max_dev is not None and max_vol is not None:
-                if len(max_dev) == 3:
-                    self.max_single = jnp.asarray(max_dev, dtype=jnp.float64)
-                else:
-                    self.max_single = jnp.concatenate([jnp.atleast_1d(max_dev), jnp.atleast_1d(max_vol)], axis=0)
-            else:
-                self.max_single = jnp.max(self.single_z, axis=0)
-
-            self.dev_z = self.single_z[:, :2]
-            self.vol_z = self.single_z[:, 2:]
-            self.min_dev = self.min_single[:2]
-            self.max_dev = self.max_single[:2]
-            self.min_vol = self.min_single[2:]
-            self.max_vol = self.max_single[2:]
-        else:
-            self.single_z = None
-            self.min_single = None
-            self.max_single = None
-            self.dev_z = jnp.asarray(I_z[:, :2], dtype=jnp.float64)
-            self.vol_z = jnp.asarray(I_z[:, 2:], dtype=jnp.float64)
-            self.min_dev = jnp.asarray(min_dev, dtype=jnp.float64)
-            self.max_dev = jnp.asarray(max_dev, dtype=jnp.float64)
-            self.min_vol = jnp.asarray(min_vol, dtype=jnp.float64)
-            self.max_vol = jnp.asarray(max_vol, dtype=jnp.float64)
+        # 1. Inducing points split
+        self.dev_z = jnp.asarray(I_z[:, :2], dtype=jnp.float64)
+        self.vol_z = jnp.asarray(I_z[:, 2:], dtype=jnp.float64)
+        self.min_dev = jnp.asarray(min_dev, dtype=jnp.float64)
+        self.max_dev = jnp.asarray(max_dev, dtype=jnp.float64)
+        self.min_vol = jnp.asarray(min_vol, dtype=jnp.float64)
+        self.max_vol = jnp.asarray(max_vol, dtype=jnp.float64)
         
-        self.is_anisotropic = (aniso_z is not None) and not self.is_single_gp
+        self.is_anisotropic = (aniso_z is not None)
         if self.is_anisotropic:
             self.aniso_z = jnp.asarray(aniso_z, dtype=jnp.float64)
             self.min_aniso = jnp.asarray(min_aniso, dtype=jnp.float64)
             self.max_aniso = jnp.asarray(max_aniso, dtype=jnp.float64)
-        else:
-            self.aniso_z = None
-            self.min_aniso = None
-            self.max_aniso = None
 
         self.sampling_mode = sampling_mode
         self.L = L  # Number of Random Fourier Features for pathwise sampling
@@ -147,83 +113,6 @@ class SparseHyperelasticityGP:
             vol_u_var  = vol_var
         
         kwargs = {}
-        if self.is_single_gp:
-            raw_s_mean = getattr(p, "raw_single_u_mean", None)
-            if raw_s_mean is None:
-                raw_s_mean = p.raw_dev_u_mean
-            
-            raw_s_var = getattr(p, "raw_single_u_var", None)
-            if raw_s_var is None:
-                raw_s_var = p.raw_dev_u_var
-
-            raw_s_z = getattr(p, "raw_single_z", None)
-            if raw_s_z is None:
-                if getattr(p, "raw_dev_z", None) is not None and getattr(p, "raw_vol_z", None) is not None:
-                    raw_s_z = jnp.concatenate([p.raw_dev_z, p.raw_vol_z], axis=-1)
-                else:
-                    raw_s_z = p.raw_dev_z
-
-            raw_s_ls = getattr(p, "raw_single_ls", None)
-            if raw_s_ls is None:
-                if getattr(p, "raw_dev_ls", None) is not None and getattr(p, "raw_vol_ls", None) is not None:
-                    raw_s_ls = jnp.concatenate([p.raw_dev_ls, p.raw_vol_ls], axis=-1)
-                else:
-                    raw_s_ls = p.raw_dev_ls
-
-            raw_s_sig = getattr(p, "raw_single_sig", None)
-            if raw_s_sig is None:
-                raw_s_sig = p.raw_dev_sig
-
-
-            if self.pos_var_mean == 1:
-                single_mu = to_f64(jax.nn.softplus(raw_s_mean))
-            else:
-                single_mu = to_f64(raw_s_mean)
-
-            if "full" in self.covariance_mode:
-                def get_full_cov(raw):
-                    L_raw = jnp.tril(raw, k=-1)
-                    L_diag = jnp.diag(jax.nn.softplus(jnp.diag(raw)))
-                    L = L_raw + L_diag
-                    return L @ L.T
-                single_var = to_f64(get_full_cov(raw_s_var))
-            else:
-                single_var = to_f64(jax.nn.softplus(raw_s_var))
-
-            single_z = to_f64(jax.nn.softplus(raw_s_z)) + to_f64(jnp.array([3.0, 3.0, 1.0]))
-            if self.augmented_var_dist == 1:
-                single_z = single_z.at[0].set(to_f64(jnp.array([3.0, 3.0, 1.0])))
-                single_u_mean = single_mu.at[0].set(0.0)
-                if "full" in self.covariance_mode:
-                    single_u_var = single_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(1e-8)
-                else:
-                    single_u_var = single_var.at[0].set(1e-8)
-            else:
-                single_u_mean = single_mu
-                single_u_var = single_var
-
-            if "full" not in self.covariance_mode:
-                single_ls_val = to_f64(self.max_single.mean() * 2 * jax.nn.sigmoid(raw_s_ls))
-            else:
-                single_ls_val = to_f64(jax.nn.softplus(raw_s_ls))
-
-            kwargs.update(dict(
-                single_ls=single_ls_val,
-                single_sig=to_f64(jnp.exp(raw_s_sig)),
-                single_u_mean=single_u_mean,
-                single_u_var=single_u_var,
-                single_z=single_z,
-            ))
-            dev_ls_val = single_ls_val[:2]
-            vol_ls_val = single_ls_val[2:]
-            dev_u_mean = single_u_mean
-            vol_u_mean = single_u_mean
-            dev_u_var = single_u_var
-            vol_u_var = single_u_var
-            dev_z = single_z[:, :2]
-            vol_z = single_z[:, 2:]
-
-
         if self.is_anisotropic:
             if self.pos_var_mean == 1:
                 aniso_mu = to_f64(jax.nn.softplus(p.raw_aniso_u_mean))
@@ -251,27 +140,25 @@ class SparseHyperelasticityGP:
             else:
                 aniso_ls_val = to_f64(jax.nn.softplus(p.raw_aniso_ls))
 
-            kwargs.update(dict(
+            kwargs = dict(
                 aniso_ls=aniso_ls_val,
                 aniso_sig=to_f64(jnp.exp(p.raw_aniso_sig)),
                 aniso_u_mean=aniso_u_mean,
                 aniso_u_var=aniso_u_var,
                 aniso_z=aniso_z,
                 aniso_kappa=to_f64(jax.nn.softplus(p.raw_aniso_kappa))
-            ))
+            )
             if getattr(p, "raw_aniso_theta_mean", None) is not None:
                 kwargs["aniso_theta_mean"] = to_f64(jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta_mean) - 0.5))
             if getattr(p, "raw_aniso_theta_var", None) is not None:
                 kwargs["aniso_theta_var"] = to_f64(jax.nn.softplus(p.raw_aniso_theta_var) + 1e-6)
 
-        if not self.is_single_gp:
-            if "full" not in self.covariance_mode:
-                dev_ls_val = to_f64(self.max_dev.mean() * 2 * jax.nn.sigmoid(p.raw_dev_ls))
-                vol_ls_val = to_f64(self.max_vol * 2 * jax.nn.sigmoid(p.raw_vol_ls))
-            else:
-                dev_ls_val = to_f64(jax.nn.softplus(p.raw_dev_ls))
-                vol_ls_val = to_f64(jax.nn.softplus(p.raw_vol_ls))
-
+        if "full" not in self.covariance_mode:
+            dev_ls_val = to_f64(self.max_dev.mean() * 2 * jax.nn.sigmoid(p.raw_dev_ls))
+            vol_ls_val = to_f64(self.max_vol * 2 * jax.nn.sigmoid(p.raw_vol_ls))
+        else:
+            dev_ls_val = to_f64(jax.nn.softplus(p.raw_dev_ls))
+            vol_ls_val = to_f64(jax.nn.softplus(p.raw_vol_ls))
 
         return GPParams(
             dev_ls=dev_ls_val,
@@ -328,22 +215,7 @@ class SparseHyperelasticityGP:
         return Kzz, K_inv, v_diff, trace_term, mahalanobis_term, M_mat, log_term
 
     def precompute_weights_from_loaded(self, p: GPParams) -> GPWeights:
-        if self.is_single_gp:
-            s_z = p.single_z if p.single_z is not None else self.single_z
-            s_u_mean = p.single_u_mean if p.single_u_mean is not None else p.dev_u_mean
-            s_u_var = p.single_u_var if p.single_u_var is not None else p.dev_u_var
-            s_ls = p.single_ls if p.single_ls is not None else jnp.concatenate([p.dev_ls, p.vol_ls])
-            s_sig = p.single_sig if p.single_sig is not None else p.dev_sig
-            s_res = self._compute_component_weights(s_z, s_u_mean, s_u_var, s_ls, s_sig)
-            return GPWeights(
-                single_Kzz=s_res[0], single_Kzz_inv=s_res[1], single_v=s_res[2], single_trace_term=s_res[3],
-                single_mahalanobis_term=s_res[4], single_M_mat=s_res[5], single_logterm=s_res[6],
-                dev_Kzz=s_res[0], dev_Kzz_inv=s_res[1], dev_v=s_res[2], dev_trace_term=s_res[3],
-                dev_mahalanobis_term=s_res[4], dev_M_mat=s_res[5], dev_logterm=s_res[6],
-                vol_Kzz=s_res[0], vol_Kzz_inv=s_res[1], vol_v=s_res[2], vol_trace_term=s_res[3],
-                vol_mahalanobis_term=s_res[4], vol_M_mat=s_res[5], vol_logterm=s_res[6]
-            )
-
+        """Precomputes weights directly from loaded GPParams."""
         d_res = self._compute_component_weights(p.dev_z, p.dev_u_mean, p.dev_u_var, p.dev_ls, p.dev_sig)
         v_res = self._compute_component_weights(p.vol_z, p.vol_u_mean, p.vol_u_var, p.vol_ls, p.vol_sig)
         
@@ -439,34 +311,7 @@ class SparseHyperelasticityGP:
                 k_az = rbf(aniso_feats, p.aniso_z, p.aniso_sig, p.aniso_ls)
                 return f_prior_aniso(aniso_feats) + jnp.dot(k_az, v_aniso_corr)
             
-        if self.is_single_gp:
-            w_single_prior = random.normal(k1, (self.L,), dtype=jnp.float64)
-            W_single = random.normal(k3, (3, self.L), dtype=jnp.float64)
-            b_single = random.uniform(k4, (self.L,), dtype=jnp.float64) * 2 * jnp.pi
-
-            s_ls = p.single_ls if p.single_ls is not None else jnp.concatenate([p.dev_ls, p.vol_ls])
-            s_sig = p.single_sig if p.single_sig is not None else p.dev_sig
-            s_z = p.single_z if p.single_z is not None else self.single_z
-            s_u_mean = p.single_u_mean if p.single_u_mean is not None else p.dev_u_mean
-            s_u_var = p.single_u_var if p.single_u_var is not None else p.dev_u_var
-            s_Kzz = w.single_Kzz if w.single_Kzz is not None else w.dev_Kzz
-
-            def f_prior_single(x):
-                phi = jnp.sqrt(2.0 * s_sig**2 / self.L) * jnp.cos(jnp.dot(x, W_single / s_ls[:, None]) + b_single)
-                return jnp.dot(phi, w_single_prior)
-
-            single_U_cov = s_u_var if "full" in self.covariance_mode else jnp.diag(s_u_var)
-            u_single = jax.random.multivariate_normal(k7, s_u_mean, single_U_cov, dtype=jnp.float64)
-            if "whitened" in self.covariance_mode:
-                u_single = jnp.linalg.cholesky(s_Kzz) @ u_single
-
-            v_single_corr = jnp.linalg.solve(s_Kzz, u_single - vmap(f_prior_single)(s_z))
-
-            def path_single(single_feats):
-                k_sz = rbf(single_feats, s_z, s_sig, s_ls)
-                return f_prior_single(single_feats) + jnp.dot(k_sz, v_single_corr)
-
-            return (path_single,)
+            return path_dev, path_vol, path_aniso
 
         return path_dev, path_vol
 
@@ -477,12 +322,6 @@ class SparseHyperelasticityGP:
         """
         p, w = self._resolve_state(params, weights)
         paths = self._sample_path_components(key, p, w)
-
-        if self.is_single_gp:
-            def path_psi_single(f: jnp.ndarray) -> jnp.ndarray:
-                feats = self.feature_extractor.extract(f)
-                return paths[0](feats).squeeze()
-            return path_psi_single
 
         def path_psi(f: jnp.ndarray) -> jnp.ndarray:
             feats = self.feature_extractor.extract(f)
@@ -499,14 +338,6 @@ class SparseHyperelasticityGP:
         """Returns a scalar function that outputs (psi_dev, psi_vol, psi_aniso) separately."""
         p, w = self._resolve_state(params, weights)
         paths = self._sample_path_components(key, p, w)
-        if self.is_single_gp:
-            def path_components_psi_single(f: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-                feats = self.feature_extractor.extract(f)
-                psi_tot = paths[0](feats).squeeze()
-                zero = jnp.zeros_like(psi_tot)
-                return psi_tot, zero, zero
-            return path_components_psi_single
-
         path_dev, path_vol = paths[0], paths[1]
         path_aniso = paths[2] if self.is_anisotropic else None
 
@@ -560,14 +391,6 @@ class SparseHyperelasticityGP:
         p, w = self._resolve_state(params, weights)
         def component_kl(ma, log_t, tr, M):
             return 0.5 * (log_t - M + tr + ma)
-
-        if self.is_single_gp:
-            s_z = p.single_z if p.single_z is not None else self.single_z
-            s_w = w.single_mahalanobis_term if w.single_mahalanobis_term is not None else w.dev_mahalanobis_term
-            s_log = w.single_logterm if w.single_logterm is not None else w.dev_logterm
-            s_tr = w.single_trace_term if w.single_trace_term is not None else w.dev_trace_term
-            total_kl = component_kl(s_w, s_log, s_tr, s_z.shape[0])
-            return total_kl * self.beta
         
         dev_kl = component_kl(w.dev_mahalanobis_term, w.dev_logterm, 
                               w.dev_trace_term, p.dev_z.shape[0])
@@ -581,6 +404,8 @@ class SparseHyperelasticityGP:
             total_kl += aniso_kl
             
             if getattr(p, "aniso_theta_var", None) is not None:
+                # Variational Fiber Angle: We explicitly remove the KL penalty for the angle 
+                # so the optimizer can freely collapse the variance to 0 when it finds the true angle basin!
                 pass
             
         return total_kl * self.beta
@@ -588,16 +413,6 @@ class SparseHyperelasticityGP:
     # ---------------------------------------------------------
     # 5. Analytical GP Moments (Mean & Covariance for MDS)
     # ---------------------------------------------------------
-    def single_gp_mean(self, x: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
-        p, w = self._resolve_state(params, weights)
-        s_z = p.single_z if p.single_z is not None else self.single_z
-        s_sig = p.single_sig if p.single_sig is not None else p.dev_sig
-        s_ls = p.single_ls if p.single_ls is not None else jnp.concatenate([p.dev_ls, p.vol_ls])
-        s_inv = w.single_Kzz_inv if w.single_Kzz_inv is not None else w.dev_Kzz_inv
-        s_v = w.single_v if w.single_v is not None else w.dev_v
-        k_sz = rbf(x, s_z, s_sig, s_ls)
-        return k_sz @ s_inv @ s_v
-
     def dev_gp_mean(self, d: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
         k_dz = rbf(d, p.dev_z, p.dev_sig, p.dev_ls)
@@ -621,13 +436,6 @@ class SparseHyperelasticityGP:
         is_single = (f.ndim == 2)
         if is_single:
             f = f[None, ...]
-        
-        if self.is_single_gp:
-            feats = jax.vmap(self.feature_extractor.extract)(f)
-            gp_mean = self.single_gp_mean(feats, params=p, weights=w)
-            res = gp_mean.squeeze()
-            return res if not is_single else jnp.reshape(res, ())
-
         feats = jax.vmap(self.feature_extractor.extract)(f)
         dev, vol = feats[0], feats[1]
         gp_mean = self.dev_gp_mean(dev, params=p, weights=w) + self.vol_gp_mean(vol, params=p, weights=w)
@@ -643,17 +451,6 @@ class SparseHyperelasticityGP:
         is_single = (f.ndim == 2)
         if is_single:
             f = f[None, ...]
-
-        if self.is_single_gp:
-            feats = jax.vmap(self.feature_extractor.extract)(f)
-            s_z = p.single_z if p.single_z is not None else self.single_z
-            s_sig = p.single_sig if p.single_sig is not None else p.dev_sig
-            s_ls = p.single_ls if p.single_ls is not None else jnp.concatenate([p.dev_ls, p.vol_ls])
-            s_M = w.single_M_mat if w.single_M_mat is not None else w.dev_M_mat
-            k_sz = rbf(feats, s_z, s_sig, s_ls)
-            var_single = jnp.maximum(s_sig**2 - jnp.sum((k_sz @ s_M) * k_sz, axis=-1), 1e-8)
-            return var_single if not is_single else var_single[0]
-
         feats = jax.vmap(self.feature_extractor.extract)(f)
         dev, vol = feats[0], feats[1]
         
@@ -676,18 +473,6 @@ class SparseHyperelasticityGP:
         p, w = self._resolve_state(params, weights)
         if f.ndim == 2:
             f = f[None, ...]
-
-        if self.is_single_gp:
-            feats = jax.vmap(self.feature_extractor.extract)(f)
-            s_z = p.single_z if p.single_z is not None else self.single_z
-            s_sig = p.single_sig if p.single_sig is not None else p.dev_sig
-            s_ls = p.single_ls if p.single_ls is not None else jnp.concatenate([p.dev_ls, p.vol_ls])
-            s_M = w.single_M_mat if w.single_M_mat is not None else w.dev_M_mat
-            k_sz = rbf(feats, s_z, s_sig, s_ls)
-            k_ss = rbf(feats, feats, s_sig, s_ls)
-            cov_single = k_ss - k_sz @ s_M @ k_sz.T
-            return 0.5 * (cov_single + cov_single.T)
-
         feats = jax.vmap(self.feature_extractor.extract)(f)
         dev, vol = feats[0], feats[1]
         k_dz = rbf(dev, p.dev_z, p.dev_sig, p.dev_ls)
@@ -713,8 +498,6 @@ class SparseHyperelasticityGP:
         p, w = self._resolve_state(params, weights)
         if f.ndim == 2:
             f = f[None, ...]
-        if self.is_single_gp:
-            return self.psi_joint_cov(f, params=params, weights=weights)
         feats = jax.vmap(self.feature_extractor.extract)(f)
         dev = feats[0]
         k_dz = rbf(dev, p.dev_z, p.dev_sig, p.dev_ls)
@@ -726,9 +509,6 @@ class SparseHyperelasticityGP:
         p, w = self._resolve_state(params, weights)
         if f.ndim == 2:
             f = f[None, ...]
-        if self.is_single_gp:
-            N = f.shape[0]
-            return jnp.zeros((N, N), dtype=jnp.float64)
         feats = jax.vmap(self.feature_extractor.extract)(f)
         vol = feats[1]
         k_vz = rbf(vol, p.vol_z, p.vol_sig, p.vol_ls)
@@ -753,19 +533,7 @@ class SparseHyperelasticityGP:
         p, w = self._resolve_state(params, weights)
 
         def psi_cov_single(fa, fb):
-            if self.is_single_gp:
-                s1 = self.feature_extractor.extract(fa)
-                s2 = self.feature_extractor.extract(fb)
-                s_z = p.single_z if p.single_z is not None else self.single_z
-                s_sig = p.single_sig if p.single_sig is not None else p.dev_sig
-                s_ls = p.single_ls if p.single_ls is not None else jnp.concatenate([p.dev_ls, p.vol_ls])
-                s_M = w.single_M_mat if w.single_M_mat is not None else w.dev_M_mat
-                k_s1z = rbf(s1[None, :], s_z, s_sig, s_ls)
-                k_zs2 = rbf(s_z, s2[None, :], s_sig, s_ls)
-                k_s1s2 = rbf(s1[None, :], s2[None, :], s_sig, s_ls)
-                cov_s = k_s1s2 - k_s1z @ s_M @ k_zs2
-                return cov_s.squeeze()
-            elif self.is_anisotropic:
+            if self.is_anisotropic:
                 dev1, vol1, aniso1 = self.feature_extractor.extract(fa)
                 dev2, vol2, aniso2 = self.feature_extractor.extract(fb)
                 
@@ -813,9 +581,6 @@ class SparseHyperelasticityGP:
 
     def psi_det(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
-        if self.is_single_gp:
-            feats = self.feature_extractor.extract(f)
-            return self.single_gp_mean(feats[None, :], params=p, weights=w).reshape()
         if self.is_anisotropic:
             dev, vol, aniso = self.feature_extractor.extract(f)
             return (self.dev_gp_mean(dev[None, :], params=p, weights=w).reshape() + 
@@ -828,10 +593,7 @@ class SparseHyperelasticityGP:
     def piola_det(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
         def single_psi_det(f_single):
-            if self.is_single_gp:
-                feats = self.feature_extractor.extract(f_single)
-                return self.single_gp_mean(feats[None, :], params=p, weights=w).reshape()
-            elif self.is_anisotropic:
+            if self.is_anisotropic:
                 dev, vol, aniso = self.feature_extractor.extract(f_single)
                 return (self.dev_gp_mean(dev[None, :], params=p, weights=w).reshape() + 
                         self.vol_gp_mean(vol[None, :], params=p, weights=w).reshape() + 
@@ -851,8 +613,6 @@ class SparseHyperelasticityGP:
 
     def dev_psi_dist(self, f_mesh: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> EnergyDist:
         p, w = self._resolve_state(params, weights)
-        if self.is_single_gp:
-            return self.psi_dist(f_mesh, params=p, weights=w)
         is_single = (f_mesh.ndim == 2)
         if is_single:
             f_mesh = f_mesh[None, ...]
@@ -870,10 +630,6 @@ class SparseHyperelasticityGP:
         is_single = (f_mesh.ndim == 2)
         if is_single:
             f_mesh = f_mesh[None, ...]
-        if self.is_single_gp:
-            N = f_mesh.shape[0]
-            zeros = jnp.zeros(N, dtype=jnp.float64)
-            return EnergyDist(zeros[0] if is_single else zeros, zeros[0] if is_single else zeros)
         feats = jax.vmap(self.feature_extractor.extract)(f_mesh)
         vol = feats[1]
         mean = self.vol_gp_mean(vol, params=p, weights=w)
@@ -911,10 +667,7 @@ class SparseHyperelasticityGP:
             f_mesh = f_mesh[None, ...]
         
         def single_psi_mean(f):
-            if self.is_single_gp:
-                feats = self.feature_extractor.extract(f)
-                return self.single_gp_mean(feats[None, :], params=p, weights=w).reshape()
-            elif self.is_anisotropic:
+            if self.is_anisotropic:
                 dev, vol, aniso = self.feature_extractor.extract(f)
                 return (self.dev_gp_mean(dev[None, :], params=p, weights=w) + 
                         self.vol_gp_mean(vol[None, :], params=p, weights=w) + 
