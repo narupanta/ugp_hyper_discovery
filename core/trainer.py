@@ -26,6 +26,11 @@ class HyperelasticGPTrainer:
         import json
         with open(f"{self.save_path}/metadata.json", "w") as f:
             meta = {"covariance_mode": getattr(self.model, "covariance_mode", "diag")}
+            meta = {
+                "covariance_mode": getattr(self.model, "covariance_mode", "diag"),
+                "pos_var_mean": getattr(self.model, "pos_var_mean", 1),
+                "augmented_var_dist": getattr(self.model, "augmented_var_dist", 1)
+            }
             if seed is not None:
                 meta["seed"] = seed
             if hasattr(self.model, "feature_extractor") and getattr(self.model.feature_extractor, "a0", None) is not None:

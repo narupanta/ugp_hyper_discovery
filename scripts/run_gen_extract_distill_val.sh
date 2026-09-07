@@ -138,6 +138,8 @@ CAP_COMPRESSION=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE'));
 TRAIN_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(*(d['train_load_steps_indices']))")
 MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('model_mode', 'isotropic'))" 2>/dev/null || echo "isotropic")
 COVARIANCE_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('covariance_mode', 'diag'))" 2>/dev/null || echo "diag")
+POS_VAR_MEAN=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('pos_var_mean', 1))" 2>/dev/null || echo "1")
+AUGMENTED_VAR_DIST=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('augmented_var_dist', 1))" 2>/dev/null || echo "1")
 if [ -n "$SEED_OVERRIDE" ]; then
     SEEDS_LIST="$SEED_OVERRIDE"
 else
@@ -277,6 +279,8 @@ for SEED in $SEEDS_LIST; do
             --cap_compression "$CAP_COMPRESSION" \
             --model_mode "$MODEL_MODE" \
             --covariance_mode "$COVARIANCE_MODE" \
+            --pos_var_mean "$POS_VAR_MEAN" \
+            --augmented_var_dist "$AUGMENTED_VAR_DIST" \
             --seed "$SEED" \
             --batch_dir "$EXTRACT_SEED_DIR" \
             $MAT_EXTRA_ARGS
