@@ -23,7 +23,8 @@ class SparseHyperelasticityGP:
                  max_dev: jnp.ndarray, max_vol: jnp.ndarray, sampling_mode: str = "pws", 
                  beta: float = 1.0, L: int = 200, feature_extractor: Optional[FeatureExtractor] = None,
                  min_aniso: Optional[jnp.ndarray] = None, max_aniso: Optional[jnp.ndarray] = None, aniso_z: Optional[jnp.ndarray] = None,
-                 covariance_mode: str = "diag", pos_var_mean: int = 1, augmented_var_dist: int = 1):
+                  covariance_mode: str = "diag", pos_var_mean: int = 1, augmented_var_dist: int = 1,
+                  normalize_ell: int = 0):
         self.feature_extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
         # 1. Inducing points split
         self.dev_z = jnp.asarray(I_z[:, :2], dtype=jnp.float64)
@@ -45,6 +46,7 @@ class SparseHyperelasticityGP:
         self.covariance_mode = covariance_mode
         self.pos_var_mean = int(pos_var_mean)
         self.augmented_var_dist = int(augmented_var_dist)
+        self.normalize_ell = int(normalize_ell)
         
         # 2. Setup Parameters and Weights
         self.params: GPParams = self.load_params(raw_params)

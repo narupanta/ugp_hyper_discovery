@@ -140,6 +140,7 @@ MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); prin
 COVARIANCE_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('covariance_mode', 'diag'))" 2>/dev/null || echo "diag")
 POS_VAR_MEAN=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('pos_var_mean', 1))" 2>/dev/null || echo "1")
 AUGMENTED_VAR_DIST=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('augmented_var_dist', 1))" 2>/dev/null || echo "1")
+NORMALIZE_ELL=$(python3 -c "import yaml; d=yaml.safe_load(open('$YAML_FILE')); print(d.get('normalize_ell', 0))" 2>/dev/null || echo "0")
 if [ -n "$SEED_OVERRIDE" ]; then
     SEEDS_LIST="$SEED_OVERRIDE"
 else
@@ -281,6 +282,7 @@ for SEED in $SEEDS_LIST; do
             --covariance_mode "$COVARIANCE_MODE" \
             --pos_var_mean "$POS_VAR_MEAN" \
             --augmented_var_dist "$AUGMENTED_VAR_DIST" \
+            --normalize_ell "$NORMALIZE_ELL" \
             --seed "$SEED" \
             --batch_dir "$EXTRACT_SEED_DIR" \
             $MAT_EXTRA_ARGS

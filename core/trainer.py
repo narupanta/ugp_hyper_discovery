@@ -28,7 +28,8 @@ class HyperelasticGPTrainer:
             meta = {
                 "covariance_mode": getattr(self.model, "covariance_mode", "diag"),
                 "pos_var_mean": getattr(self.model, "pos_var_mean", 1),
-                "augmented_var_dist": getattr(self.model, "augmented_var_dist", 1)
+                "augmented_var_dist": getattr(self.model, "augmented_var_dist", 1),
+                "normalize_ell": getattr(self.model, "normalize_ell", 0)
             }
             if seed is not None:
                 meta["seed"] = seed

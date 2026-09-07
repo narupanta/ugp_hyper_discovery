@@ -12,7 +12,7 @@ from .model import SparseHyperelasticityGP
 
 def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, cells: jnp.ndarray, 
                           n_nodes: int, f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, dNdX: jnp.ndarray, 
-                          dA: jnp.ndarray, key: jnp.ndarray, n_s: int) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+                          dA: jnp.ndarray, key: jnp.ndarray, n_s: int, normalize_ell: int = 0) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
     """
     Computes the variational stochastic VFM loss and KL divergence ELBO objective.
     Strictly preserves functional purity without mutating stateful class instance attributes.
@@ -32,9 +32,9 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
     piola2x2_cells = piola_sampling(f3x3, subkey)
 
     # vmapped_ell maps over Monte Carlo samples
-    vmapped_ell = jax.vmap(ell, in_axes=(None, None, None, None, None, None, None, 0, None, None))
+    vmapped_ell = jax.vmap(ell, in_axes=(None, None, None, None, None, None, None, 0, None, None, None))
     ell_, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_free_loss, sum_fix_loss) = vmapped_ell(
-        params, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA
+        params, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA, normalize_ell
     )
     
     kl_div = model.kl_divergence(params=params, weights=gpweight)
@@ -45,7 +45,8 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
 
 
 def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.ndarray, n_nodes: int, 
-        f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, piola2x2_cells: jnp.ndarray, dNdX: jnp.ndarray, dA: jnp.ndarray):
+        f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, piola2x2_cells: jnp.ndarray, dNdX: jnp.ndarray, dA: jnp.ndarray,
+        normalize_ell: int = 0):
     sigma_free_x = jnp.maximum(p.sigma_free_x, 1e-6)
     sigma_free_y = jnp.maximum(p.sigma_free_y, 1e-6)
     sigma_fix_x = jnp.maximum(sigma_fix_x, 1e-3)
@@ -60,11 +61,20 @@ def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.n
     n_freedofs_x = free_x_loss.shape[1]
     n_freedofs_y = free_y_loss.shape[1]
 
-    free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2) - (n_steps * n_freedofs_x) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
-    free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2) - (n_steps * n_freedofs_y) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
-    
-    fix_x_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_x**2))) * (fix_x_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_x**2)))
-    fix_y_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_y**2))) * (fix_y_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_y**2)))
+    if normalize_ell == 1:
+        n_free_total_x = n_steps * n_freedofs_x
+        n_free_total_y = n_steps * n_freedofs_y
+        free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * (jnp.sum(free_x_loss**2) / n_free_total_x) - 0.5 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
+        free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * (jnp.sum(free_y_loss**2) / n_free_total_y) - 0.5 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
+        
+        fix_x_log_likelihood = (1.0 / n_steps) * jnp.sum(- (1.0 / (2 * (sigma_fix_x**2))) * (fix_x_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_x**2)))
+        fix_y_log_likelihood = (1.0 / n_steps) * jnp.sum(- (1.0 / (2 * (sigma_fix_y**2))) * (fix_y_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_y**2)))
+    else:
+        free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2) - (n_steps * n_freedofs_x) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
+        free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2) - (n_steps * n_freedofs_y) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
+        
+        fix_x_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_x**2))) * (fix_x_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_x**2)))
+        fix_y_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_y**2))) * (fix_y_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_y**2)))
 
     expected_log_likelihood = free_x_log_likelihood + free_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
     return expected_log_likelihood, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, jnp.sum(free_x_loss**2) + jnp.sum(free_y_loss**2), jnp.sum(fix_x_loss**2) + jnp.sum(fix_y_loss**2))

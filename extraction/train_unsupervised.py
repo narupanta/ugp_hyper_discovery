@@ -70,6 +70,7 @@ def parse_args():
     parser.add_argument('--aniso_params', type=float, nargs='+', default=None)
     parser.add_argument('--pos_var_mean', type=int, default=1, choices=[0, 1], help="Whether to apply softplus to variational mean (1) or use unconstrained mean (0)")
     parser.add_argument('--augmented_var_dist', type=int, default=1, choices=[0, 1], help="Whether to augment variational distribution with reference state anchor point at index 0 (1) or use standard unaugmented variational distribution (0)")
+    parser.add_argument('--normalize_ell', type=int, default=0, choices=[0, 1], help="Whether to normalize expected log-likelihood by degrees of freedom to prevent uncertainty collapse (1) or use unnormalized sum (0)")
 
     return parser.parse_args()
 
@@ -455,7 +456,8 @@ if __name__ == "__main__" :
         aniso_z=aniso_z,
         covariance_mode=args.covariance_mode,
         pos_var_mean=args.pos_var_mean,
-        augmented_var_dist=args.augmented_var_dist
+        augmented_var_dist=args.augmented_var_dist,
+        normalize_ell=args.normalize_ell
     )
 
 
@@ -483,11 +485,12 @@ if __name__ == "__main__" :
                 aniso_z=aniso_z,
                 covariance_mode=args.covariance_mode,
                 pos_var_mean=args.pos_var_mean,
-                augmented_var_dist=args.augmented_var_dist
+                augmented_var_dist=args.augmented_var_dist,
+                normalize_ell=args.normalize_ell
             )
         else:
             local_model = model
-        return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k_loss, number_of_mci_sampling)
+        return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k_loss, number_of_mci_sampling, args.normalize_ell)
 
     if args.model_mode in ["aniso_unk_fiber", "aniso_unk_fiber_neg"]:
         if args.model_mode == "aniso_unk_fiber_neg":
