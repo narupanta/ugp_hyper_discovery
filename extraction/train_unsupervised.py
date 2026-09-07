@@ -81,10 +81,8 @@ def inv_softplus(y):
     y_safe = jnp.maximum(y, 1e-6)
     return jnp.where(y_safe > 20.0, y_safe, jnp.log(jnp.maximum(jnp.exp(y_safe) - 1.0, 1e-8)))
 
-def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag"):
 def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag", augmented_var_dist: int = 1):
     def freeze_fn(grads):
-        if covariance_mode == "full":
         if augmented_var_dist == 0:
             raw_dev_u_var = jnp.zeros_like(grads.raw_dev_u_var)
             raw_vol_u_var = jnp.zeros_like(grads.raw_vol_u_var)
@@ -108,7 +106,6 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
         if getattr(grads, "raw_aniso_z", None) is not None:
             replace_kwargs["raw_aniso_z"] = grads.raw_aniso_z.at[0].set(0.0)
             replace_kwargs["raw_aniso_u_mean"] = grads.raw_aniso_u_mean.at[0].set(0.0)
-            if covariance_mode == "full":
             if augmented_var_dist == 0:
                 raw_aniso_u_var = jnp.zeros_like(grads.raw_aniso_u_var)
             elif covariance_mode == "full":
@@ -438,7 +435,6 @@ if __name__ == "__main__" :
         min_aniso=min_aniso,
         max_aniso=max_aniso,
         aniso_z=aniso_z,
-        covariance_mode=args.covariance_mode
         covariance_mode=args.covariance_mode,
         pos_var_mean=args.pos_var_mean,
         augmented_var_dist=args.augmented_var_dist
@@ -467,7 +463,6 @@ if __name__ == "__main__" :
                 min_aniso=min_aniso,
                 max_aniso=max_aniso,
                 aniso_z=aniso_z,
-                covariance_mode=args.covariance_mode
                 covariance_mode=args.covariance_mode,
                 pos_var_mean=args.pos_var_mean,
                 augmented_var_dist=args.augmented_var_dist
@@ -516,7 +511,6 @@ if __name__ == "__main__" :
         min_vol=min_vol,
         max_dev=max_dev,
         max_vol=max_vol,
-        freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode),
         freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode, args.augmented_var_dist),
         seed=args.seed
     )
