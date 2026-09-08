@@ -9,6 +9,7 @@ from jax import config
 config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
+from plots.theme import apply_style, save_figure
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material
@@ -90,11 +91,7 @@ def get_sensitivities(out_dir, prefix, subdir):
     return tot_dict, first_dict
 
 def main():
-    plt.rcParams.update({
-        'font.family': 'serif',
-        'mathtext.fontset': 'cm',
-        'text.usetex': False
-    })
+    apply_style()
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, default=None)
@@ -468,8 +465,9 @@ def main():
     plt.subplots_adjust(hspace=0.2)
     out_path_pdf = os.path.join(distilled_dir, f"summary_plot_{true_model_name}.pdf")
     out_path_png = os.path.join(distilled_dir, f"summary_plot_{true_model_name}.png")
-    fig.savefig(out_path_pdf, dpi=300, bbox_inches='tight')
-    fig.savefig(out_path_png, dpi=300, bbox_inches='tight')
+    save_figure(fig, out_path_pdf)
+    save_figure(fig, out_path_png)
+    plt.close(fig)
     print(f"Saved combined summary plot to {out_path_pdf} and {out_path_png}")
 
 if __name__ == "__main__":

@@ -17,36 +17,23 @@ from core.dataclass import GPParams, GPRawParams
 from core.material_models import get_material
 from core.datasetclass import BenchmarkDataset
 
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.tri as tri
-from matplotlib.colors import LinearSegmentedColormap
-
-import matplotlib.pyplot as plt
-import matplotlib.tri as tri
-import numpy as np
-import matplotlib.pyplot as plt
-import numpy as np
-
-from sklearn.metrics import r2_score
-import matplotlib.pyplot as plt
-import numpy as np
-from scipy.stats import norm
-import os
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.tri as tri
-import numpy as np
-import matplotlib.pyplot as plt
 import argparse
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.tri as tri
 import matplotlib.ticker as ticker
+from matplotlib.colors import LinearSegmentedColormap
+from sklearn.metrics import r2_score
+from scipy.stats import norm
+
+from plots.theme import apply_style, save_figure
 
 def plot_comprehensive_analysis(u_true, u_pred_samples, node_type, node_to_plot, save_path):
     """
     Generates and saves two separate 2x2 figures (X and Y directions).
     Includes statistical text annotations and a zero-line for error distributions.
     """
+    apply_style()
     # Filter for free nodes
     free_nodes = (node_type[:, 1] != 1) & (node_type[:, 2] != 1)
     
@@ -84,7 +71,7 @@ def plot_comprehensive_analysis(u_true, u_pred_samples, node_type, node_to_plot,
 
         # --- PLOT 1: UNCERTAINTY (LINE CHART) ---
         ax1.plot(node_indices, u_std_per_node, color=main_color, linewidth=1.5)
-        ax1.fill_between(node_indices, 0, u_std_per_node, color=main_color, alpha=0.15, label='$\sigma$ per Node')
+        ax1.fill_between(node_indices, 0, u_std_per_node, color=main_color, alpha=0.15, label=r'$\sigma$ per Node')
         ax1.set_title(f'Predictive Uncertainty - {label.upper()}', fontsize=13)
         ax1.set_xlabel('Node Index')
         ax1.set_ylabel('Standard Deviation')
@@ -394,7 +381,8 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, node_in
     def get_mag(u): return np.linalg.norm(u, axis=1)
     mag_true = get_mag(u_true)
     mag_pred = get_mag(u_pred_mean)
-    error = np.linalg.norm(u_true - u_pred_mean, axis=1)/mag_true * 100
+    # Nodal RMSE between true and predicted displacement
+    error = np.sqrt(np.mean((u_true - u_pred_mean)**2, axis=-1))
     mag_std = get_mag(u_pred_std) if u_pred_std.ndim > 1 else u_pred_std
 
     marker_coords_true = coords_true[node_indices]
@@ -447,26 +435,26 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, node_in
     im1 = axes[0, 0].tripcolor(tri_true, mag_true, cmap='Blues')
     add_markers_with_labels(axes[0, 0], marker_coords_true, node_indices)
     # axes[0, 0].set_title('True Material Model $\|\mathbf{u_{true}}\|$')
-    add_colorbar(im1, axes[0, 0], "$\|\mathbf{u_{true}}\|$")
+    add_colorbar(im1, axes[0, 0], r"$\|\mathbf{u_{true}}\|$")
 
     # 1,2: Predicted Material
     tri_pred = tri.Triangulation(coords_pred[:, 0], coords_pred[:, 1], cells)
     im2 = axes[0, 1].tripcolor(tri_pred, mag_pred, cmap='Blues')
     add_markers_with_labels(axes[0, 1], marker_coords_pred, node_indices)
     # axes[0, 1].set_title('Predicted Material Model $\|\mathbf{u_{pred}}\|$')
-    add_colorbar(im2, axes[0, 1], "$\|\mathbf{u_{pred}}\|$")
+    add_colorbar(im2, axes[0, 1], r"$\|\mathbf{u_{pred}}\|$")
 
     # 2,1: Nodal error
     im3 = axes[1, 0].tripcolor(tri_pred, error, cmap='inferno')
     add_markers_with_labels(axes[1, 0], marker_coords_pred, node_indices)
     # axes[1, 0].set_title(r'$||\mthbf{u_{true}} - \mathbf{u_{pred}}||$')
-    add_colorbar(im3, axes[1, 0], r"$\% Error$")
+    add_colorbar(im3, axes[1, 0], r"$\mathrm{RMSE}$")
 
     # 2,2: Uncertainty
     im4 = axes[1, 1].tripcolor(tri_pred, mag_std, cmap='magma')
     add_markers_with_labels(axes[1, 1], marker_coords_pred, node_indices)
     # axes[1, 1].set_title(r'Uncertainty ($\sigma_u$)')
-    add_colorbar(im4, axes[1, 1], "$\sigma_{\|\mathbf{u_{pred}}\|}$")
+    add_colorbar(im4, axes[1, 1], r"$\sigma_{\|\mathbf{u_{pred}}\|}$")
 
     # Standardize labels
     for ax in axes.flat:

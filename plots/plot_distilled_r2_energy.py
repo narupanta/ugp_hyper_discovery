@@ -11,6 +11,7 @@ config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from plots.theme import apply_style, save_figure
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material
@@ -61,11 +62,7 @@ def parse_train_load_steps(saved_model_dir):
 
 def main():
     sys.stdout.reconfigure(line_buffering=True)
-    plt.rcParams.update({
-        'font.family': 'serif',
-        'mathtext.fontset': 'cm',
-        'text.usetex': False
-    })
+    apply_style()
 
     parser = argparse.ArgumentParser(description="Plot distilled model and GP energy predictions on validation load steps.")
     parser.add_argument("--distilled_dir", type=str, required=True, help="Path to distillation output directory")
@@ -122,18 +119,21 @@ def main():
     ]:
         if os.path.exists(cand_gt):
             gt_d = np.load(cand_gt)
-            u_fem_gt = gt_d["u"]
-            gt_cells = gt_d["cells"]
-            gt_coords = gt_d["node_coords"]
-            # Compute exact deformation gradient from clean FEM displacements
-            F_list = []
-            coords_elems = gt_coords[gt_cells]
-            for s in range(u_fem_gt.shape[0]):
-                f_s, _ = deformation_gradient_element(coords_elems, u_fem_gt[s][gt_cells])
-                F_list.append(np.array(f_s))
-            F_fem_gt_2x2 = np.stack(F_list, axis=0)
-            print(f"Loaded noiseless FEM ground truth from: {cand_gt}")
-            break
+            cand_cells = gt_d["cells"]
+            # Only use FEM ground truth if element count matches dataset F field
+            if cand_cells.shape[0] == F_all_steps_2x2.shape[1]:
+                u_fem_gt = gt_d["u"]
+                gt_cells = cand_cells
+                gt_coords = gt_d["node_coords"]
+                # Compute exact deformation gradient from clean FEM displacements
+                F_list = []
+                coords_elems = gt_coords[gt_cells]
+                for s in range(u_fem_gt.shape[0]):
+                    f_s, _ = deformation_gradient_element(coords_elems, u_fem_gt[s][gt_cells])
+                    F_list.append(np.array(f_s))
+                F_fem_gt_2x2 = np.stack(F_list, axis=0)
+                print(f"Loaded noiseless FEM ground truth from: {cand_gt}")
+                break
 
     # 2. Determine validation load steps
     train_steps = parse_train_load_steps(saved_model_dir)
@@ -156,7 +156,9 @@ def main():
 
     # 3. Load GP Model
     best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
-    gp_params = GPRawParams(**best_params_dict)
+    valid_gp_fields = set(GPRawParams._fields)
+    filtered_params = {k: v for k, v in best_params_dict.items() if k in valid_gp_fields}
+    gp_params = GPRawParams(**filtered_params)
     I_z = jnp.load(os.path.join(saved_model_dir, "I_z.npy"))
 
     dev_z = I_z[:, :2]
@@ -610,9 +612,9 @@ def main():
         rep_idx_in_val = val_steps.index(rep_step)
 
         # Prefer noiseless FEM displacements for mesh visualization if available
-        if u_fem_gt is not None and rep_step < u_fem_gt.shape[0]:
+        if u_fem_gt is not None and rep_step < u_fem_gt.shape[0] and u_fem_gt.shape[1] == mesh_pos.shape[0]:
             coords_rep = mesh_pos + u_fem_gt[rep_step]
-        elif u_all is not None:
+        elif u_all is not None and u_all.shape[1] == mesh_pos.shape[0]:
             coords_rep = mesh_pos + u_all[rep_step]
         else:
             coords_rep = mesh_pos
@@ -684,11 +686,11 @@ def main():
                 cb_std.ax.tick_params(labelsize=8)
 
             # Row labels
-            axes_dom[0, 0].text(-0.08, 0.5, f"Ground Truth\n({true_model_name})\n$\mathbf{{\Psi_{{true}}}}$", transform=axes_dom[0, 0].transAxes,
+            axes_dom[0, 0].text(-0.08, 0.5, rf"Ground Truth\n({true_model_name})\n$\mathbf{{\Psi_{{true}}}}$", transform=axes_dom[0, 0].transAxes,
                                 fontsize=11, fontweight='bold', va='center', ha='right', rotation=90)
-            axes_dom[1, 0].text(-0.08, 0.5, "Predicted Mean\n$\mathbf{\mu(\Psi)}$", transform=axes_dom[1, 0].transAxes,
+            axes_dom[1, 0].text(-0.08, 0.5, r"Predicted Mean\n$\mathbf{\mu(\Psi)}$", transform=axes_dom[1, 0].transAxes,
                                 fontsize=11, fontweight='bold', va='center', ha='right', rotation=90)
-            axes_dom[2, 0].text(-0.08, 0.5, "Uncertainty (Std)\n$\mathbf{\sigma(\Psi)}$", transform=axes_dom[2, 0].transAxes,
+            axes_dom[2, 0].text(-0.08, 0.5, r"Uncertainty (Std)\n$\mathbf{\sigma(\Psi)}$", transform=axes_dom[2, 0].transAxes,
                                 fontsize=11, fontweight='bold', va='center', ha='right', rotation=90)
 
             title_prefix = f"Distilled Model ({args.material_model.upper()})" if is_dist else "Extracted GP Baseline"
@@ -742,7 +744,7 @@ def main():
                 cb.ax.tick_params(labelsize=8)
 
             geom_name = "holes" if "holes" in dataset_path else ("cross" if "cross" in dataset_path else "block")
-            fig_inv.suptitle(f"Kinematic Invariant Field Distributions ($\mathbf{{\\bar{{I}}_1, \\bar{{I}}_2, J}}$)\nValidation Load Step: {rep_step} | Specimen: {geom_name.upper()}",
+            fig_inv.suptitle(rf"Kinematic Invariant Field Distributions ($\mathbf{{\bar{{I}}_1, \bar{{I}}_2, J}}$)\nValidation Load Step: {rep_step} | Specimen: {geom_name.upper()}",
                              fontsize=13, fontweight='bold', y=0.98)
             plt.tight_layout()
 

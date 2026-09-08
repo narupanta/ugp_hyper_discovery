@@ -9,11 +9,12 @@ from jax import config
 config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
+from plots.theme import apply_style, save_figure
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material
 from core.features import IsotropicFeatureExtractor
-from core.utils import infer_material_model_name
+from core.utils import infer_material_model_name, generate_standard_deformation_modes as generate_standard_modes
 from scipy.spatial import ConvexHull
 
 def to_latex(name):
@@ -31,26 +32,6 @@ def get_comp_color(name):
     elif name.startswith("C4") or name.startswith("C6"):
         return "#CC79A7"
     return "#0072B2"
-
-def generate_standard_modes(num_points=100, max_gamma=2.0):
-    gamma = jnp.linspace(0.0, max_gamma, num_points)
-    
-    F_all = jnp.zeros((6, num_points, 3, 3))
-    def set_F(f11, f22, f33, f12=0.0):
-        arr = jnp.zeros((num_points, 3, 3))
-        arr = arr.at[:, 0, 0].set(f11)
-        arr = arr.at[:, 1, 1].set(f22)
-        arr = arr.at[:, 2, 2].set(f33)
-        arr = arr.at[:, 0, 1].set(f12)
-        return arr
-
-    F_all = F_all.at[0].set(set_F(1 + gamma, 1.0, 1.0))            
-    F_all = F_all.at[1].set(set_F(1 + gamma, 1 + gamma, 1.0))    
-    F_all = F_all.at[2].set(set_F(1 + gamma, 1/(1 + gamma), 1.0)) 
-    F_all = F_all.at[3].set(set_F(1/(1 + gamma), 1.0, 1.0))       
-    F_all = F_all.at[4].set(set_F(1/(1 + gamma), 1/(1 + gamma), 1.0)) 
-    F_all = F_all.at[5].set(set_F(1.0, 1.0, 1.0, f12=gamma))      
-    return F_all, gamma
 
 def get_sensitivities(out_dir, prefix, subdir):
     dfs_tot = []
@@ -95,11 +76,7 @@ def get_sensitivities(out_dir, prefix, subdir):
     return tot_dict, first_dict
 
 def main():
-    plt.rcParams.update({
-        'font.family': 'serif',
-        'mathtext.fontset': 'cm',
-        'text.usetex': False
-    })
+    apply_style()
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, default=None)

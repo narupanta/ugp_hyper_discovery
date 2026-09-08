@@ -248,6 +248,59 @@ def farthest_point_sampling_with_fixed_point(pts, num_samples, fixed_point):
     # Return the coordinates of the sampled points
     return pts_augmented[sampled_indices]
 
+
+def generate_standard_deformation_modes(num_points: int = 100, max_gamma: float = 2.0):
+    """
+    Generates standard hyperelastic deformation modes in 3D:
+      0: Uniaxial Tension
+      1: Equibiaxial Tension
+      2: Pure Shear
+      3: Uniaxial Compression
+      4: Equibiaxial Compression
+      5: Simple Shear
+
+    Returns:
+        F_all: (6, num_points, 3, 3) array of deformation gradient tensors
+        gamma: (num_points,) array of stretch / shear increments
+    """
+    gamma = jnp.linspace(0.0, max_gamma, num_points)
+    
+    F_all = jnp.zeros((6, num_points, 3, 3))
+    def set_F(f11, f22, f33, f12=0.0):
+        arr = jnp.zeros((num_points, 3, 3))
+        arr = arr.at[:, 0, 0].set(f11)
+        arr = arr.at[:, 1, 1].set(f22)
+        arr = arr.at[:, 2, 2].set(f33)
+        arr = arr.at[:, 0, 1].set(f12)
+        return arr
+
+    F_all = F_all.at[0].set(set_F(1 + gamma, 1.0, 1.0))            
+    F_all = F_all.at[1].set(set_F(1 + gamma, 1 + gamma, 1.0))    
+    F_all = F_all.at[2].set(set_F(1 + gamma, 1/(1 + gamma), 1.0)) 
+    F_all = F_all.at[3].set(set_F(1/(1 + gamma), 1.0, 1.0))       
+    F_all = F_all.at[4].set(set_F(1/(1 + gamma), 1/(1 + gamma), 1.0)) 
+    F_all = F_all.at[5].set(set_F(1.0, 1.0, 1.0, f12=gamma))      
+    return F_all, gamma
+
+
+def compute_invariants_np(F):
+    """
+    Computes isochoric invariants (I1_bar, I2_bar) and volumetric ratio J for numpy arrays.
+    F shape: (..., 3, 3)
+    Returns: I1_bar, I2_bar, J
+    """
+    J = np.linalg.det(F)
+    F_T = np.swapaxes(F, -2, -1)
+    C = np.einsum('...ij,...jk->...ik', F_T, F)
+    J_safe = np.clip(J, 1e-8, 1e8)
+    C_bar = C / (J_safe**(2/3))[..., None, None]
+    
+    I1_bar = np.trace(C_bar, axis1=-2, axis2=-1)
+    C_bar_sq = np.einsum('...ij,...jk->...ik', C_bar, C_bar)
+    I2_bar = 0.5 * (I1_bar**2 - np.trace(C_bar_sq, axis1=-2, axis2=-1))
+    return I1_bar, I2_bar, J
+
+
 def infer_material_model_name(path: str) -> str:
     """
     Infers the material model name from the saved_model_dir path or its metadata/config.
@@ -308,8 +361,13 @@ def load_model_config(path: str) -> dict:
     search_dirs = [
         abs_path,
         os.path.dirname(abs_path),
+        os.path.dirname(os.path.dirname(abs_path)),
         os.path.join(abs_path, "extraction"),
-        os.path.join(abs_path, "..")
+        os.path.join(abs_path, "extracted"),
+        os.path.join(os.path.dirname(abs_path), "extracted"),
+        os.path.join(os.path.dirname(abs_path), "extraction"),
+        os.path.join(abs_path, ".."),
+        os.path.join(abs_path, "../.."),
     ]
     
     # Check source_extraction_dir if present in distillation folder
@@ -342,3 +400,31 @@ def load_model_config(path: str) -> dict:
                     pass
 
     raise FileNotFoundError(f"No configuration file (config.json / config.yaml / recipe_config.yaml) found in or around '{path}'.")
+
+
+def load_f3x3_from_distilled(distilled_dir: str):
+    """
+    Robustly locates and loads f3x3.npy from source extraction directory or distilled directory.
+    """
+    source_dirs = []
+    for fname in ["dev_source_extraction_dir.txt", "vol_source_extraction_dir.txt", "aniso_source_extraction_dir.txt", "source_extraction_dir.txt"]:
+        fpath = os.path.join(distilled_dir, fname)
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, 'r') as f:
+                    sdir = f.read().strip()
+                    if sdir and sdir not in source_dirs:
+                        source_dirs.append(sdir)
+            except Exception:
+                pass
+
+    for sdir in source_dirs:
+        for root, dirs, files in os.walk(sdir):
+            if "f3x3.npy" in files:
+                return np.load(os.path.join(root, "f3x3.npy"))
+
+    for root, dirs, files in os.walk(distilled_dir):
+        if "f3x3.npy" in files:
+            return np.load(os.path.join(root, "f3x3.npy"))
+            
+    return None

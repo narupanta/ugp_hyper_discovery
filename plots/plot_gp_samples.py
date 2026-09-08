@@ -4,6 +4,8 @@ import os
 import argparse
 import sys
 
+from plots.theme import apply_style, save_figure
+
 # Try to import material models for true curve
 try:
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -27,6 +29,7 @@ def get_gamma_from_F(F, mode_idx):
     return np.zeros(len(F))
 
 def main():
+    apply_style()
     parser = argparse.ArgumentParser(description="Plot GP samples from exported PyTorch matrices")
     parser.add_argument("--export_dir", type=str, required=True, help="Path to pytorch_export directory containing cov_psi.npy, etc.")
     parser.add_argument("--num_samples", type=int, default=32, help="Number of GP samples to draw")
@@ -135,7 +138,8 @@ def main():
 
     plt.tight_layout()
     save_path = os.path.join(args.export_dir, "gp_energy_samples.pdf")
-    plt.savefig(save_path, dpi=200)
+    save_figure(fig, save_path)
+    plt.close(fig)
     print(f"Plot saved to {save_path}")
 
 if __name__ == "__main__":
