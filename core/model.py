@@ -9,18 +9,27 @@ jax.config.update("jax_enable_x64", True)
 from .kernel import rbf
 from .dataclass import EnergyDist, StressDist, GPParams, GPWeights
 from .features import IsotropicFeatureExtractor, FeatureExtractor
+from .gp_component import (
+    load_component_params,
+    compute_component_weights,
+    sample_component_path,
+    predict_component_mean,
+    predict_component_var,
+    predict_component_joint_cov,
+    compute_component_kl,
+)
 
 
 class SparseHyperelasticityGP:
     """
     Sparse Gaussian Process model for hyperelasticity.
-    Uses pathwise sampling and Matheron's rule to condition on inducing points.
+    Uses pathwise sampling (RFF + Matheron's rule) or Cholesky joint sampling.
     Strictly assumes a zero-mean prior for the strain energy density components.
     All evaluation methods support optional explicit parameter and weight passing
     to maintain functional purity during JAX transformations.
     """
     def __init__(self, raw_params: Any, I_z: jnp.ndarray, min_dev: jnp.ndarray, min_vol: jnp.ndarray,
-                 max_dev: jnp.ndarray, max_vol: jnp.ndarray, sampling_mode: str = "pws", 
+                 max_dev: jnp.ndarray, max_vol: jnp.ndarray, sampling_mode: str = "pathwise", 
                  beta: float = 1.0, L: int = 200, feature_extractor: Optional[FeatureExtractor] = None,
                  min_aniso: Optional[jnp.ndarray] = None, max_aniso: Optional[jnp.ndarray] = None, aniso_z: Optional[jnp.ndarray] = None,
                  covariance_mode: str = "diag", normalize_ell: int = 0,
@@ -40,7 +49,14 @@ class SparseHyperelasticityGP:
             self.min_aniso = jnp.asarray(min_aniso, dtype=jnp.float64)
             self.max_aniso = jnp.asarray(max_aniso, dtype=jnp.float64)
 
-        self.sampling_mode = sampling_mode
+        # Standardize sampling mode: pathwise (formerly pws) vs cholesky (formerly mds)
+        if sampling_mode in ("pathwise", "pws"):
+            self.sampling_mode = "pathwise"
+        elif sampling_mode in ("cholesky", "mds"):
+            self.sampling_mode = "cholesky"
+        else:
+            raise ValueError(f"Unknown sampling mode: {sampling_mode}. Expected 'pathwise' or 'cholesky'.")
+
         self.L = L  # Number of Random Fourier Features for pathwise sampling
         self.beta = beta
         self.covariance_mode = covariance_mode
@@ -68,92 +84,58 @@ class SparseHyperelasticityGP:
     # ---------------------------------------------------------
     def load_params(self, p: Any) -> GPParams:
         """Applies physical constraints (e.g., positivity via softplus/exp) to raw parameters."""
-        def to_f64(x):
-            return jnp.asarray(x, dtype=jnp.float64)
+        to_f64 = lambda x: jnp.asarray(x, dtype=jnp.float64)
 
-        dev_mu = to_f64(jax.nn.softplus(p.raw_dev_u_mean))
-        vol_mu = to_f64(jax.nn.softplus(p.raw_vol_u_mean))
-        
-        if "full" in self.covariance_mode:
-            def get_full_cov(raw):
-                L_raw = jnp.tril(raw, k=-1)
-                L_diag = jnp.diag(jax.nn.softplus(jnp.diag(raw)))
-                L = L_raw + L_diag
-                return L @ L.T
-            dev_var = to_f64(get_full_cov(p.raw_dev_u_var))
-            vol_var = to_f64(get_full_cov(p.raw_vol_u_var))
-        else:
-            dev_var = to_f64(jax.nn.softplus(p.raw_dev_u_var))
-            vol_var = to_f64(jax.nn.softplus(p.raw_vol_u_var))
+        dev_p = load_component_params(
+            raw_ls=p.raw_dev_ls, raw_sig=p.raw_dev_sig,
+            raw_u_mean=p.raw_dev_u_mean, raw_u_var=p.raw_dev_u_var,
+            raw_z=p.raw_dev_z, anchor=jnp.array([3.0, 3.0]),
+            covariance_mode=self.covariance_mode, max_val=self.max_dev,
+            u_var_anchor=self.u_var_anchor, is_dev=True
+        )
 
-        # Anchor points: First inducing point at reference zero energy state with mean 0 and var 1e-8
-        dev_z = to_f64(jax.nn.softplus(p.raw_dev_z)) + to_f64(jnp.array([3.0, 3.0]))
-        vol_z = to_f64(jax.nn.softplus(p.raw_vol_z))
+        vol_p = load_component_params(
+            raw_ls=p.raw_vol_ls, raw_sig=p.raw_vol_sig,
+            raw_u_mean=p.raw_vol_u_mean, raw_u_var=p.raw_vol_u_var,
+            raw_z=p.raw_vol_z, anchor=jnp.array([1.0]),
+            covariance_mode=self.covariance_mode, max_val=self.max_vol,
+            u_var_anchor=self.u_var_anchor, is_dev=False
+        )
 
-        dev_z = dev_z.at[0].set(to_f64(jnp.array([3.0, 3.0])))
-        vol_z = vol_z.at[0].set(to_f64(jnp.array([1.0])))
-
-        dev_u_mean = dev_mu.at[0].set(0.0)
-        vol_u_mean = vol_mu.at[0].set(0.0)
-        if "full" in self.covariance_mode:
-            dev_u_var = dev_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(self.u_var_anchor)
-            vol_u_var = vol_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(self.u_var_anchor)
-        else:
-            dev_u_var  = dev_var.at[0].set(self.u_var_anchor)
-            vol_u_var  = vol_var.at[0].set(self.u_var_anchor)
-        
         kwargs = {}
         if self.is_anisotropic:
-            aniso_mu = to_f64(jax.nn.softplus(p.raw_aniso_u_mean))
-            if "full" in self.covariance_mode:
-                aniso_var = to_f64(get_full_cov(p.raw_aniso_u_var))
-            else:
-                aniso_var = to_f64(jax.nn.softplus(p.raw_aniso_u_var))
-            
-            aniso_z = to_f64(jax.nn.softplus(p.raw_aniso_z))
-            aniso_z = aniso_z.at[0].set(to_f64(jnp.ones(aniso_z.shape[-1])))
-            aniso_u_mean = aniso_mu.at[0].set(0.0)
-            if "full" in self.covariance_mode:
-                aniso_u_var = aniso_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(self.u_var_anchor)
-            else:
-                aniso_u_var = aniso_var.at[0].set(self.u_var_anchor)
-            
-            if "full" not in self.covariance_mode:
-                aniso_ls_val = to_f64(self.max_aniso.mean() * 2 * jax.nn.sigmoid(p.raw_aniso_ls))
-            else:
-                aniso_ls_val = to_f64(jax.nn.softplus(p.raw_aniso_ls))
-
+            dim_aniso = p.raw_aniso_z.shape[-1]
+            aniso_p = load_component_params(
+                raw_ls=p.raw_aniso_ls, raw_sig=p.raw_aniso_sig,
+                raw_u_mean=p.raw_aniso_u_mean, raw_u_var=p.raw_aniso_u_var,
+                raw_z=p.raw_aniso_z, anchor=jnp.ones(dim_aniso),
+                covariance_mode=self.covariance_mode, max_val=self.max_aniso,
+                u_var_anchor=self.u_var_anchor, is_dev=False
+            )
             kwargs = dict(
-                aniso_ls=aniso_ls_val,
-                aniso_sig=to_f64(jnp.exp(p.raw_aniso_sig)),
-                aniso_u_mean=aniso_u_mean,
-                aniso_u_var=aniso_u_var,
-                aniso_z=aniso_z
+                aniso_ls=aniso_p.ls,
+                aniso_sig=aniso_p.sig,
+                aniso_u_mean=aniso_p.u_mean,
+                aniso_u_var=aniso_p.u_var,
+                aniso_z=aniso_p.z
             )
             if getattr(p, "raw_aniso_theta_mean", None) is not None:
                 kwargs["aniso_theta_mean"] = to_f64(jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta_mean) - 0.5))
             if getattr(p, "raw_aniso_theta_var", None) is not None:
                 kwargs["aniso_theta_var"] = to_f64(jax.nn.softplus(p.raw_aniso_theta_var) + 1e-6)
 
-        if "full" not in self.covariance_mode:
-            dev_ls_val = to_f64(self.max_dev.mean() * 2 * jax.nn.sigmoid(p.raw_dev_ls))
-            vol_ls_val = to_f64(self.max_vol * 2 * jax.nn.sigmoid(p.raw_vol_ls))
-        else:
-            dev_ls_val = to_f64(jax.nn.softplus(p.raw_dev_ls))
-            vol_ls_val = to_f64(jax.nn.softplus(p.raw_vol_ls))
-
         return GPParams(
-            dev_ls=dev_ls_val,
-            dev_sig=to_f64(jnp.exp(p.raw_dev_sig)),
-            dev_u_mean=dev_u_mean,
-            dev_u_var=dev_u_var,
-            dev_z=dev_z,
+            dev_ls=dev_p.ls,
+            dev_sig=dev_p.sig,
+            dev_u_mean=dev_p.u_mean,
+            dev_u_var=dev_p.u_var,
+            dev_z=dev_p.z,
 
-            vol_ls=vol_ls_val,
-            vol_sig=to_f64(jnp.exp(p.raw_vol_sig)),
-            vol_u_mean=vol_u_mean,
-            vol_u_var=vol_u_var,
-            vol_z=vol_z,
+            vol_ls=vol_p.ls,
+            vol_sig=vol_p.sig,
+            vol_u_mean=vol_p.u_mean,
+            vol_u_var=vol_p.u_var,
+            vol_z=vol_p.z,
 
             sigma_free_x=to_f64(jnp.exp(p.log_sigma_free_x)),
             sigma_free_y=to_f64(jnp.exp(p.log_sigma_free_y)),
@@ -169,50 +151,31 @@ class SparseHyperelasticityGP:
     def _compute_component_weights(self, z: jnp.ndarray, u_mean: jnp.ndarray, u_var: jnp.ndarray, 
                                    ls: jnp.ndarray, sig: jnp.ndarray) -> Tuple[jnp.ndarray, ...]:
         """Helper to precompute reusable covariance matrices and vectors for GP."""
-        Kzz = rbf(z, z, sig, ls) + self.kzz_jitter * jnp.eye(z.shape[0], dtype=jnp.float64)
-        K_inv = jnp.linalg.solve(Kzz, jnp.eye(z.shape[0], dtype=jnp.float64))
-        
-        # We strictly assume a zero-mean prior, so v_diff is just u_mean - 0
-        U_cov = u_var if "full" in self.covariance_mode else jnp.diag(u_var)
-        
-        if "whitened" in self.covariance_mode:
-            L_z = jnp.linalg.cholesky(Kzz)
-            v_diff = L_z @ u_mean
-            U_cov_true = L_z @ U_cov @ L_z.T
-            
-            M_mat = K_inv @ (Kzz - U_cov_true) @ K_inv.T
-            trace_term = jnp.trace(U_cov)
-            mahalanobis_term = jnp.sum(u_mean ** 2)
-            log_term = - jnp.log(jnp.linalg.det(U_cov))
-        else:
-            v_diff = u_mean
-            U_cov_true = U_cov
-            
-            M_mat = K_inv @ (Kzz - U_cov_true) @ K_inv.T
-            trace_term = jnp.trace(K_inv @ U_cov_true)
-            mahalanobis_term = v_diff.T @ K_inv @ v_diff
-            log_term = jnp.log(jnp.linalg.det(Kzz)) - jnp.log(jnp.linalg.det(U_cov_true))
-        
-        return Kzz, K_inv, v_diff, trace_term, mahalanobis_term, M_mat, log_term
+        w = compute_component_weights(z, u_mean, u_var, ls, sig, 
+                                      covariance_mode=self.covariance_mode, kzz_jitter=self.kzz_jitter)
+        return w.Kzz, w.Kzz_inv, w.v, w.trace_term, w.mahalanobis_term, w.M_mat, w.logterm
 
     def precompute_weights_from_loaded(self, p: GPParams) -> GPWeights:
         """Precomputes weights directly from loaded GPParams."""
-        d_res = self._compute_component_weights(p.dev_z, p.dev_u_mean, p.dev_u_var, p.dev_ls, p.dev_sig)
-        v_res = self._compute_component_weights(p.vol_z, p.vol_u_mean, p.vol_u_var, p.vol_ls, p.vol_sig)
+        d_w = compute_component_weights(p.dev_z, p.dev_u_mean, p.dev_u_var, p.dev_ls, p.dev_sig,
+                                        covariance_mode=self.covariance_mode, kzz_jitter=self.kzz_jitter)
+        v_w = compute_component_weights(p.vol_z, p.vol_u_mean, p.vol_u_var, p.vol_ls, p.vol_sig,
+                                        covariance_mode=self.covariance_mode, kzz_jitter=self.kzz_jitter)
         
         kwargs = {}
         if self.is_anisotropic:
-            a_res = self._compute_component_weights(p.aniso_z, p.aniso_u_mean, p.aniso_u_var, p.aniso_ls, p.aniso_sig)
+            a_w = compute_component_weights(p.aniso_z, p.aniso_u_mean, p.aniso_u_var, p.aniso_ls, p.aniso_sig,
+                                            covariance_mode=self.covariance_mode, kzz_jitter=self.kzz_jitter)
             kwargs = dict(
-                aniso_Kzz=a_res[0], aniso_Kzz_inv=a_res[1], aniso_v=a_res[2], aniso_trace_term=a_res[3], 
-                aniso_mahalanobis_term=a_res[4], aniso_M_mat=a_res[5], aniso_logterm=a_res[6]
+                aniso_Kzz=a_w.Kzz, aniso_Kzz_inv=a_w.Kzz_inv, aniso_v=a_w.v, aniso_trace_term=a_w.trace_term, 
+                aniso_mahalanobis_term=a_w.mahalanobis_term, aniso_M_mat=a_w.M_mat, aniso_logterm=a_w.logterm
             )
 
         return GPWeights(
-            dev_Kzz=d_res[0], dev_Kzz_inv=d_res[1], dev_v=d_res[2], dev_trace_term=d_res[3], 
-            dev_mahalanobis_term=d_res[4], dev_M_mat=d_res[5], dev_logterm=d_res[6],
-            vol_Kzz=v_res[0], vol_Kzz_inv=v_res[1], vol_v=v_res[2], vol_trace_term=v_res[3], 
-            vol_mahalanobis_term=v_res[4], vol_M_mat=v_res[5], vol_logterm=v_res[6],
+            dev_Kzz=d_w.Kzz, dev_Kzz_inv=d_w.Kzz_inv, dev_v=d_w.v, dev_trace_term=d_w.trace_term, 
+            dev_mahalanobis_term=d_w.mahalanobis_term, dev_M_mat=d_w.M_mat, dev_logterm=d_w.logterm,
+            vol_Kzz=v_w.Kzz, vol_Kzz_inv=v_w.Kzz_inv, vol_v=v_w.v, vol_trace_term=v_w.trace_term, 
+            vol_mahalanobis_term=v_w.mahalanobis_term, vol_M_mat=v_w.M_mat, vol_logterm=v_w.logterm,
             **kwargs
         )
 
@@ -230,68 +193,25 @@ class SparseHyperelasticityGP:
         Splits PRNGKey into 12 statistically independent streams to prevent Fourier feature 
         correlation with variational inducing values.
         """
-        k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, k11, k12 = random.split(key, 12)
+        keys = random.split(key, 12)
         
-        # 1. Random Fourier Features for Prior Paths (enforcing 64-bit precision)
-        w_dev_prior = random.normal(k1, (self.L,), dtype=jnp.float64)
-        w_vol_prior = random.normal(k2, (self.L,), dtype=jnp.float64)
-
-        W_dev = random.normal(k3, (2, self.L), dtype=jnp.float64) 
-        b_dev = random.uniform(k4, (self.L,), dtype=jnp.float64) * 2 * jnp.pi
-        W_vol = random.normal(k5, (1, self.L), dtype=jnp.float64) 
-        b_vol = random.uniform(k6, (self.L,), dtype=jnp.float64) * 2 * jnp.pi
-
-        def f_prior_dev(d):
-            phi = jnp.sqrt(2.0 * p.dev_sig**2 / self.L) * jnp.cos(jnp.dot(d, W_dev / p.dev_ls[:, None]) + b_dev)
-            return jnp.dot(phi, w_dev_prior)
-
-        def f_prior_vol(v):
-            phi = jnp.sqrt(2.0 * p.vol_sig**2 / self.L) * jnp.cos(jnp.dot(v, W_vol / p.vol_ls[:, None]) + b_vol)
-            return jnp.dot(phi, w_vol_prior)
-
-        dev_U_cov = p.dev_u_var if "full" in self.covariance_mode else jnp.diag(p.dev_u_var)
-        vol_U_cov = p.vol_u_var if "full" in self.covariance_mode else jnp.diag(p.vol_u_var)
-        
-        # 2. Sample Inducing Values u ~ q(u) using independent PRNG keys
-        u_dev = jax.random.multivariate_normal(k7, p.dev_u_mean, dev_U_cov, dtype=jnp.float64)
-        u_vol = jax.random.multivariate_normal(k8, p.vol_u_mean, vol_U_cov, dtype=jnp.float64)
-        
-        if "whitened" in self.covariance_mode:
-            u_dev = jnp.linalg.cholesky(w.dev_Kzz) @ u_dev
-            u_vol = jnp.linalg.cholesky(w.vol_Kzz) @ u_vol
-
-        # 3. Correction Vectors (Matheron's Rule)
-        v_dev_corr = jnp.linalg.solve(w.dev_Kzz, u_dev - vmap(f_prior_dev)(p.dev_z))
-        v_vol_corr = jnp.linalg.solve(w.vol_Kzz, u_vol - vmap(f_prior_vol)(p.vol_z))
-
-        def path_dev(dev_feats):
-            k_dz = rbf(dev_feats, p.dev_z, p.dev_sig, p.dev_ls)
-            return f_prior_dev(dev_feats) + jnp.dot(k_dz, v_dev_corr)
-
-        def path_vol(vol_feats):
-            k_vz = rbf(vol_feats, p.vol_z, p.vol_sig, p.vol_ls)
-            return f_prior_vol(vol_feats) + jnp.dot(k_vz, v_vol_corr)
+        path_dev = sample_component_path(
+            k_prior_w=keys[0], k_W=keys[2], k_b=keys[3], k_u=keys[6],
+            z=p.dev_z, u_mean=p.dev_u_mean, u_var=p.dev_u_var, ls=p.dev_ls, sig=p.dev_sig,
+            Kzz=w.dev_Kzz, L=self.L, covariance_mode=self.covariance_mode
+        )
+        path_vol = sample_component_path(
+            k_prior_w=keys[1], k_W=keys[4], k_b=keys[5], k_u=keys[7],
+            z=p.vol_z, u_mean=p.vol_u_mean, u_var=p.vol_u_var, ls=p.vol_ls, sig=p.vol_sig,
+            Kzz=w.vol_Kzz, L=self.L, covariance_mode=self.covariance_mode
+        )
 
         if self.is_anisotropic:
-            w_aniso_prior = random.normal(k9, (self.L,), dtype=jnp.float64)
-            W_aniso = random.normal(k10, (1, self.L), dtype=jnp.float64) 
-            b_aniso = random.uniform(k11, (self.L,), dtype=jnp.float64) * 2 * jnp.pi
-
-            def f_prior_aniso(v):
-                phi = jnp.sqrt(2.0 * p.aniso_sig**2 / self.L) * jnp.cos(jnp.dot(v, W_aniso / p.aniso_ls[:, None]) + b_aniso)
-                return jnp.dot(phi, w_aniso_prior)
-
-            aniso_U_cov = p.aniso_u_var if "full" in self.covariance_mode else jnp.diag(p.aniso_u_var)
-            u_aniso = jax.random.multivariate_normal(k12, p.aniso_u_mean, aniso_U_cov, dtype=jnp.float64)
-            
-            if "whitened" in self.covariance_mode:
-                u_aniso = jnp.linalg.cholesky(w.aniso_Kzz) @ u_aniso
-            v_aniso_corr = jnp.linalg.solve(w.aniso_Kzz, u_aniso - vmap(f_prior_aniso)(p.aniso_z))
-
-            def path_aniso(aniso_feats):
-                k_az = rbf(aniso_feats, p.aniso_z, p.aniso_sig, p.aniso_ls)
-                return f_prior_aniso(aniso_feats) + jnp.dot(k_az, v_aniso_corr)
-            
+            path_aniso = sample_component_path(
+                k_prior_w=keys[8], k_W=keys[9], k_b=keys[10], k_u=keys[11],
+                z=p.aniso_z, u_mean=p.aniso_u_mean, u_var=p.aniso_u_var, ls=p.aniso_ls, sig=p.aniso_sig,
+                Kzz=w.aniso_Kzz, L=self.L, covariance_mode=self.covariance_mode
+            )
             return path_dev, path_vol, path_aniso
 
         return path_dev, path_vol
@@ -340,76 +260,67 @@ class SparseHyperelasticityGP:
     # ---------------------------------------------------------
     def psi(self, f_mesh: jnp.ndarray, key: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         """Calculates Energy across a mesh for a single realization."""
-        if self.sampling_mode == "mds":
-            return self.psi_mds(f_mesh, key, params=params, weights=weights)
-        elif self.sampling_mode == "pws":
-            return self.psi_pws(f_mesh, key, params=params, weights=weights)
+        if self.sampling_mode in ("cholesky", "mds"):
+            return self.psi_cholesky(f_mesh, key, params=params, weights=weights)
+        elif self.sampling_mode in ("pathwise", "pws"):
+            return self.psi_pathwise(f_mesh, key, params=params, weights=weights)
         raise ValueError(f"Unknown sampling mode: {self.sampling_mode}")
 
     def piola(self, f_mesh: jnp.ndarray, key: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         """Calculates Piola Stress field across a mesh for a single realization."""
-        if self.sampling_mode == "mds":
-            return self.piola_mds(f_mesh, key, params=params, weights=weights)
-        elif self.sampling_mode == "pws":
-            return self.piola_pws(f_mesh, key, params=params, weights=weights)
+        if self.sampling_mode in ("cholesky", "mds"):
+            return self.piola_cholesky(f_mesh, key, params=params, weights=weights)
+        elif self.sampling_mode in ("pathwise", "pws"):
+            return self.piola_pathwise(f_mesh, key, params=params, weights=weights)
         raise ValueError(f"Unknown sampling mode: {self.sampling_mode}")
 
     def psi_pws(self, f: jnp.ndarray, key: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
+        """Pathwise energy prediction (alias: psi_pathwise)."""
         path_psi = self.get_path_psi_fn(key, params=params, weights=weights)
         if f.ndim == 3:
             return jax.vmap(path_psi)(f)
         return path_psi(f)
 
+    psi_pathwise = psi_pws
+
     def piola_pws(self, f: jnp.ndarray, key: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
+        """Pathwise Piola stress prediction (alias: piola_pathwise)."""
         path_psi = self.get_path_psi_fn(key, params=params, weights=weights)
         piola_fn = grad(path_psi)
         if f.ndim == 3:
             return jax.vmap(piola_fn)(f)
         return piola_fn(f)
 
+    piola_pathwise = piola_pws
+
     def kl_divergence(self, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         """Computes the KL divergence for ELBO training."""
         p, w = self._resolve_state(params, weights)
-        def component_kl(ma, log_t, tr, M):
-            return 0.5 * (log_t - M + tr + ma)
         
-        dev_kl = component_kl(w.dev_mahalanobis_term, w.dev_logterm, 
-                              w.dev_trace_term, p.dev_z.shape[0])
-        vol_kl = component_kl(w.vol_mahalanobis_term, w.vol_logterm, 
-                              w.vol_trace_term, p.vol_z.shape[0])
+        dev_kl = compute_component_kl(w.dev_mahalanobis_term, w.dev_logterm, w.dev_trace_term, p.dev_z.shape[0])
+        vol_kl = compute_component_kl(w.vol_mahalanobis_term, w.vol_logterm, w.vol_trace_term, p.vol_z.shape[0])
         total_kl = dev_kl + vol_kl
+
         if self.is_anisotropic:
-            aniso_kl = component_kl(w.aniso_mahalanobis_term, w.aniso_logterm,
-                                    w.aniso_trace_term, p.aniso_z.shape[0])
+            aniso_kl = compute_component_kl(w.aniso_mahalanobis_term, w.aniso_logterm, w.aniso_trace_term, p.aniso_z.shape[0])
             total_kl += aniso_kl
-            
-            if getattr(p, "aniso_theta_var", None) is not None:
-                # Variational Fiber Angle: We explicitly remove the KL penalty for the angle 
-                # so the optimizer can freely collapse the variance to 0 when it finds the true angle basin!
-                pass
             
         return total_kl * self.beta
 
     # ---------------------------------------------------------
-    # 5. Analytical GP Moments (Mean & Covariance for MDS)
+    # 5. Analytical GP Moments (Mean & Covariance for Cholesky / Analytics)
     # ---------------------------------------------------------
     def dev_gp_mean(self, d: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
-        k_dz = rbf(d, p.dev_z, p.dev_sig, p.dev_ls)
-        gp_term = k_dz @ w.dev_Kzz_inv @ w.dev_v
-        return gp_term  # Zero mean prior
+        return predict_component_mean(d, p.dev_z, p.dev_sig, p.dev_ls, w.dev_Kzz_inv, w.dev_v)
     
     def vol_gp_mean(self, v: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
-        k_vz = rbf(v, p.vol_z, p.vol_sig, p.vol_ls)
-        gp_term = k_vz @ w.vol_Kzz_inv @ w.vol_v
-        return gp_term
+        return predict_component_mean(v, p.vol_z, p.vol_sig, p.vol_ls, w.vol_Kzz_inv, w.vol_v)
 
     def aniso_gp_mean(self, a: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
-        k_az = rbf(a, p.aniso_z, p.aniso_sig, p.aniso_ls)
-        gp_term = k_az @ w.aniso_Kzz_inv @ w.aniso_v
-        return gp_term
+        return predict_component_mean(a, p.aniso_z, p.aniso_sig, p.aniso_ls, w.aniso_Kzz_inv, w.aniso_v)
 
     def psi_gp_mean(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
@@ -420,10 +331,9 @@ class SparseHyperelasticityGP:
         dev, vol = feats[0], feats[1]
         gp_mean = self.dev_gp_mean(dev, params=p, weights=w) + self.vol_gp_mean(vol, params=p, weights=w)
         if self.is_anisotropic:
-            aniso = feats[2]
-            gp_mean += self.aniso_gp_mean(aniso, params=p, weights=w)
-        res = gp_mean.squeeze()
-        return res if not is_single else jnp.reshape(res, ())
+            gp_mean += self.aniso_gp_mean(feats[2], params=p, weights=w)
+        res = gp_mean.reshape(f.shape[0])
+        return res if not is_single else res[0]
 
     def psi_gp_cov(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         """Computes marginal energy variance using O(N) memory without assembling N x N Gram matrices."""
@@ -432,20 +342,13 @@ class SparseHyperelasticityGP:
         if is_single:
             f = f[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f)
-        dev, vol = feats[0], feats[1]
         
-        k_dz = rbf(dev, p.dev_z, p.dev_sig, p.dev_ls)
-        var_dev = jnp.maximum(p.dev_sig**2 - jnp.sum((k_dz @ w.dev_M_mat) * k_dz, axis=-1), 1e-8)
-
-        k_vz = rbf(vol, p.vol_z, p.vol_sig, p.vol_ls)
-        var_vol = jnp.maximum(p.vol_sig**2 - jnp.sum((k_vz @ w.vol_M_mat) * k_vz, axis=-1), 1e-8)
+        var_dev = predict_component_var(feats[0], p.dev_z, p.dev_sig, p.dev_ls, w.dev_M_mat)
+        var_vol = predict_component_var(feats[1], p.vol_z, p.vol_sig, p.vol_ls, w.vol_M_mat)
         res = var_dev + var_vol
         if self.is_anisotropic:
-            aniso = feats[2]
-            k_az = rbf(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls)
-            var_aniso = jnp.maximum(p.aniso_sig**2 - jnp.sum((k_az @ w.aniso_M_mat) * k_az, axis=-1), 1e-8)
-            res += var_aniso
-            
+            res += predict_component_var(feats[2], p.aniso_z, p.aniso_sig, p.aniso_ls, w.aniso_M_mat)
+        res = res.reshape(f.shape[0])
         return res if not is_single else res[0]
 
     def psi_joint_cov(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
@@ -455,23 +358,12 @@ class SparseHyperelasticityGP:
             f = f[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f)
         dev, vol = feats[0], feats[1]
-        k_dz = rbf(dev, p.dev_z, p.dev_sig, p.dev_ls)
-        k_dd = rbf(dev, dev, p.dev_sig, p.dev_ls)
-        cov_mat_dev = k_dd - k_dz @ w.dev_M_mat @ k_dz.T
-
-        k_vz = rbf(vol, p.vol_z, p.vol_sig, p.vol_ls)
-        k_vv = rbf(vol, vol, p.vol_sig, p.vol_ls)
-        cov_mat_vol = k_vv - k_vz @ w.vol_M_mat @ k_vz.T
         
-        cov_full = cov_mat_dev + cov_mat_vol
+        cov_full = (predict_component_joint_cov(dev, dev, p.dev_z, p.dev_sig, p.dev_ls, w.dev_M_mat) +
+                    predict_component_joint_cov(vol, vol, p.vol_z, p.vol_sig, p.vol_ls, w.vol_M_mat))
         if self.is_anisotropic:
-            aniso = feats[2]
-            k_az = rbf(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls)
-            k_aa = rbf(aniso, aniso, p.aniso_sig, p.aniso_ls)
-            cov_mat_aniso = k_aa - k_az @ w.aniso_M_mat @ k_az.T
-            cov_full += cov_mat_aniso
+            cov_full += predict_component_joint_cov(feats[2], feats[2], p.aniso_z, p.aniso_sig, p.aniso_ls, w.aniso_M_mat)
             
-        cov_full = 0.5 * (cov_full + cov_full.T) # Guarantee symmetry
         return cov_full
 
     def dev_psi_joint_cov(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
@@ -479,112 +371,58 @@ class SparseHyperelasticityGP:
         if f.ndim == 2:
             f = f[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f)
-        dev = feats[0]
-        k_dz = rbf(dev, p.dev_z, p.dev_sig, p.dev_ls)
-        k_dd = rbf(dev, dev, p.dev_sig, p.dev_ls)
-        cov_mat_dev = k_dd - k_dz @ w.dev_M_mat @ k_dz.T
-        return 0.5 * (cov_mat_dev + cov_mat_dev.T)
+        return predict_component_joint_cov(feats[0], feats[0], p.dev_z, p.dev_sig, p.dev_ls, w.dev_M_mat)
 
     def vol_psi_joint_cov(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
         if f.ndim == 2:
             f = f[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f)
-        vol = feats[1]
-        k_vz = rbf(vol, p.vol_z, p.vol_sig, p.vol_ls)
-        k_vv = rbf(vol, vol, p.vol_sig, p.vol_ls)
-        cov_mat_vol = k_vv - k_vz @ w.vol_M_mat @ k_vz.T
-        return 0.5 * (cov_mat_vol + cov_mat_vol.T)
+        return predict_component_joint_cov(feats[1], feats[1], p.vol_z, p.vol_sig, p.vol_ls, w.vol_M_mat)
 
     def aniso_psi_joint_cov(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
         if f.ndim == 2:
             f = f[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f)
-        aniso = feats[2]
-        k_az = rbf(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls)
-        k_aa = rbf(aniso, aniso, p.aniso_sig, p.aniso_ls)
-        cov_mat_aniso = k_aa - k_az @ w.aniso_M_mat @ k_az.T
-        return 0.5 * (cov_mat_aniso + cov_mat_aniso.T)
-
+        return predict_component_joint_cov(feats[2], feats[2], p.aniso_z, p.aniso_sig, p.aniso_ls, w.aniso_M_mat)
 
     def piola_gp_cov_pair(self, f1: jnp.ndarray, f2: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         """Computes double-differentiation cross-covariance between two deformation gradient tensors."""
         p, w = self._resolve_state(params, weights)
 
         def psi_cov_single(fa, fb):
+            feats_a = self.feature_extractor.extract(fa)
+            feats_b = self.feature_extractor.extract(fb)
+            
+            cov_dev = predict_component_joint_cov(feats_a[0][None, :], feats_b[0][None, :], p.dev_z, p.dev_sig, p.dev_ls, w.dev_M_mat)
+            cov_vol = predict_component_joint_cov(feats_a[1][None, :], feats_b[1][None, :], p.vol_z, p.vol_sig, p.vol_ls, w.vol_M_mat)
+            total = cov_dev + cov_vol
             if self.is_anisotropic:
-                dev1, vol1, aniso1 = self.feature_extractor.extract(fa)
-                dev2, vol2, aniso2 = self.feature_extractor.extract(fb)
-                
-                k_d1z = rbf(dev1[None, :], p.dev_z, p.dev_sig, p.dev_ls)
-                k_dz2 = rbf(p.dev_z, dev2[None, :], p.dev_sig, p.dev_ls)
-                k_d1d2 = rbf(dev1[None, :], dev2[None, :], p.dev_sig, p.dev_ls)
-                cov_dev = k_d1d2 - k_d1z @ w.dev_M_mat @ k_dz2
-                
-                k_v1z = rbf(vol1[None, :], p.vol_z, p.vol_sig, p.vol_ls)
-                k_vz2 = rbf(p.vol_z, vol2[None, :], p.vol_sig, p.vol_ls)
-                k_v1v2 = rbf(vol1[None, :], vol2[None, :], p.vol_sig, p.vol_ls)
-                cov_vol = k_v1v2 - k_v1z @ w.vol_M_mat @ k_vz2
-
-                k_a1z = rbf(aniso1[None, :], p.aniso_z, p.aniso_sig, p.aniso_ls)
-                k_az2 = rbf(p.aniso_z, aniso2[None, :], p.aniso_sig, p.aniso_ls)
-                k_a1a2 = rbf(aniso1[None, :], aniso2[None, :], p.aniso_sig, p.aniso_ls)
-                cov_aniso = k_a1a2 - k_a1z @ w.aniso_M_mat @ k_az2
-
-                return (cov_dev + cov_vol + cov_aniso).squeeze()
-            else:
-                dev1, vol1 = self.feature_extractor.extract(fa)
-                dev2, vol2 = self.feature_extractor.extract(fb)
-                
-                k_d1z = rbf(dev1[None, :], p.dev_z, p.dev_sig, p.dev_ls)
-                k_dz2 = rbf(p.dev_z, dev2[None, :], p.dev_sig, p.dev_ls)
-                k_d1d2 = rbf(dev1[None, :], dev2[None, :], p.dev_sig, p.dev_ls)
-                cov_dev = k_d1d2 - k_d1z @ w.dev_M_mat @ k_dz2
-                
-                k_v1z = rbf(vol1[None, :], p.vol_z, p.vol_sig, p.vol_ls)
-                k_vz2 = rbf(p.vol_z, vol2[None, :], p.vol_sig, p.vol_ls)
-                k_v1v2 = rbf(vol1[None, :], vol2[None, :], p.vol_sig, p.vol_ls)
-                cov_vol = k_v1v2 - k_v1z @ w.vol_M_mat @ k_vz2
-                
-                return (cov_dev + cov_vol).squeeze()
+                cov_aniso = predict_component_joint_cov(feats_a[2][None, :], feats_b[2][None, :], p.aniso_z, p.aniso_sig, p.aniso_ls, w.aniso_M_mat)
+                total += cov_aniso
+            return total.squeeze()
 
         hessian_cov = jax.jacfwd(jax.jacrev(psi_cov_single, argnums=0), argnums=1)
         return hessian_cov(f1, f2)
 
     def piola_gp_var(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
-        """
-        Computes the variance of the Piola Stress components using 
-        double differentiation of the predictive covariance at f.
-        """
+        """Computes the variance of the Piola Stress components using double differentiation."""
         return self.piola_gp_cov_pair(f, f, params=params, weights=weights)
 
     def psi_det(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
-        p, w = self._resolve_state(params, weights)
-        if self.is_anisotropic:
-            dev, vol, aniso = self.feature_extractor.extract(f)
-            return (self.dev_gp_mean(dev[None, :], params=p, weights=w).reshape() + 
-                    self.vol_gp_mean(vol[None, :], params=p, weights=w).reshape() + 
-                    self.aniso_gp_mean(aniso[None, :], params=p, weights=w).reshape())
-        else:
-            dev, vol = self.feature_extractor.extract(f)
-            return self.dev_gp_mean(dev[None, :], params=p, weights=w).reshape() + self.vol_gp_mean(vol[None, :], params=p, weights=w).reshape()
+        """Deterministic strain energy density (GP mean)."""
+        return self.psi_gp_mean(f, params=params, weights=weights)
     
     def piola_det(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
+        """Deterministic Piola stress via automatic differentiation of deterministic energy."""
         p, w = self._resolve_state(params, weights)
         def single_psi_det(f_single):
-            if self.is_anisotropic:
-                dev, vol, aniso = self.feature_extractor.extract(f_single)
-                return (self.dev_gp_mean(dev[None, :], params=p, weights=w).reshape() + 
-                        self.vol_gp_mean(vol[None, :], params=p, weights=w).reshape() + 
-                        self.aniso_gp_mean(aniso[None, :], params=p, weights=w).reshape())
-            else:
-                dev, vol = self.feature_extractor.extract(f_single)
-                return self.dev_gp_mean(dev[None, :], params=p, weights=w).reshape() + self.vol_gp_mean(vol[None, :], params=p, weights=w).reshape()
-        piola_det_fn = jax.grad(single_psi_det)
-        return piola_det_fn(f)
+            return self.psi_gp_mean(f_single, params=p, weights=w)
+        return jax.grad(single_psi_det)(f)
 
     def psi_dist(self, f_mesh: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> EnergyDist:
+        """Evaluates predictive energy distribution (mean and marginal variance)."""
         p, w = self._resolve_state(params, weights)
         f_mesh = jnp.asarray(f_mesh, dtype=jnp.float64)
         posterior_mean = self.psi_gp_mean(f_mesh, params=p, weights=w)
@@ -598,12 +436,11 @@ class SparseHyperelasticityGP:
             f_mesh = f_mesh[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f_mesh)
         dev = feats[0]
-        mean = self.dev_gp_mean(dev, params=p, weights=w)
-        k_dz = rbf(dev, p.dev_z, p.dev_sig, p.dev_ls)
-        var_dev = jnp.maximum(p.dev_sig**2 - jnp.sum((k_dz @ w.dev_M_mat) * k_dz, axis=-1), 1e-8)
+        mean = self.dev_gp_mean(dev, params=p, weights=w).reshape(f_mesh.shape[0])
+        var_dev = predict_component_var(dev, p.dev_z, p.dev_sig, p.dev_ls, w.dev_M_mat).reshape(f_mesh.shape[0])
         if is_single:
-            return EnergyDist(mean.reshape(), var_dev[0])
-        return EnergyDist(mean.squeeze(), var_dev)
+            return EnergyDist(mean[0], var_dev[0])
+        return EnergyDist(mean, var_dev)
         
     def vol_psi_dist(self, f_mesh: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> EnergyDist:
         p, w = self._resolve_state(params, weights)
@@ -612,28 +449,27 @@ class SparseHyperelasticityGP:
             f_mesh = f_mesh[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f_mesh)
         vol = feats[1]
-        mean = self.vol_gp_mean(vol, params=p, weights=w)
-        k_vz = rbf(vol, p.vol_z, p.vol_sig, p.vol_ls)
-        var_vol = jnp.maximum(p.vol_sig**2 - jnp.sum((k_vz @ w.vol_M_mat) * k_vz, axis=-1), 1e-8)
+        mean = self.vol_gp_mean(vol, params=p, weights=w).reshape(f_mesh.shape[0])
+        var_vol = predict_component_var(vol, p.vol_z, p.vol_sig, p.vol_ls, w.vol_M_mat).reshape(f_mesh.shape[0])
         if is_single:
-            return EnergyDist(mean.reshape(), var_vol[0])
-        return EnergyDist(mean.squeeze(), var_vol)
+            return EnergyDist(mean[0], var_vol[0])
+        return EnergyDist(mean, var_vol)
 
     def aniso_psi_dist(self, f_mesh: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> EnergyDist:
         if not self.is_anisotropic:
-            return EnergyDist(jnp.zeros(f_mesh.shape[0]), jnp.zeros(f_mesh.shape[0]))
+            zeros = jnp.zeros(f_mesh.shape[0] if f_mesh.ndim > 2 else ())
+            return EnergyDist(zeros, zeros)
         p, w = self._resolve_state(params, weights)
         is_single = (f_mesh.ndim == 2)
         if is_single:
             f_mesh = f_mesh[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f_mesh)
         aniso = feats[2]
-        mean = self.aniso_gp_mean(aniso, params=p, weights=w)
-        k_az = rbf(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls)
-        var_aniso = jnp.maximum(p.aniso_sig**2 - jnp.sum((k_az @ w.aniso_M_mat) * k_az, axis=-1), 1e-8)
+        mean = self.aniso_gp_mean(aniso, params=p, weights=w).reshape(f_mesh.shape[0])
+        var_aniso = predict_component_var(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls, w.aniso_M_mat).reshape(f_mesh.shape[0])
         if is_single:
-            return EnergyDist(mean.reshape(), var_aniso[0])
-        return EnergyDist(mean.squeeze(), var_aniso)
+            return EnergyDist(mean[0], var_aniso[0])
+        return EnergyDist(mean, var_aniso)
 
     def piola_dist(self, f_mesh: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> StressDist:
         """
@@ -647,15 +483,7 @@ class SparseHyperelasticityGP:
             f_mesh = f_mesh[None, ...]
         
         def single_psi_mean(f):
-            if self.is_anisotropic:
-                dev, vol, aniso = self.feature_extractor.extract(f)
-                return (self.dev_gp_mean(dev[None, :], params=p, weights=w) + 
-                        self.vol_gp_mean(vol[None, :], params=p, weights=w) + 
-                        self.aniso_gp_mean(aniso[None, :], params=p, weights=w)).reshape()
-            else:
-                dev, vol = self.feature_extractor.extract(f)
-                return (self.dev_gp_mean(dev[None, :], params=p, weights=w) + 
-                        self.vol_gp_mean(vol[None, :], params=p, weights=w)).reshape()
+            return self.psi_gp_mean(f, params=p, weights=w)
 
         piola_mean_fn = jax.vmap(jax.grad(single_psi_mean))
         piola_means = piola_mean_fn(f_mesh)
@@ -670,6 +498,7 @@ class SparseHyperelasticityGP:
         return StressDist(piola_means, piola_vars)
     
     def psi_mds(self, f_mesh: jnp.ndarray, key: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
+        """Cholesky / joint normal energy sampling across mesh (alias: psi_cholesky)."""
         p, w = self._resolve_state(params, weights)
         is_single = (f_mesh.ndim == 2)
         if is_single:
@@ -679,10 +508,12 @@ class SparseHyperelasticityGP:
         psi = jax.random.multivariate_normal(key, dist.mean, jnp.diag(dist.var), dtype=jnp.float64)
         return psi if not is_single else psi[0]
 
+    psi_cholesky = psi_mds
+
     def piola_mds(self, f_mesh: jnp.ndarray, key: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         """
-        Samples the ENTIRE correlated Piola stress field across a mesh.
-        Dynamically handles both (N, 2, 2) and promoted (N, 3, 3) deformation gradients.
+        Samples the ENTIRE correlated Piola stress field across a mesh via Cholesky / joint Gaussian.
+        Alias: piola_cholesky.
         """
         p, w = self._resolve_state(params, weights)
         f_mesh = jnp.asarray(f_mesh, dtype=jnp.float64)
@@ -705,3 +536,5 @@ class SparseHyperelasticityGP:
         sample_flat = jax.random.multivariate_normal(key, dist_mean, K_joint, dtype=jnp.float64)
         res = sample_flat.reshape(N, d1, d2)
         return res if not is_single else res[0]
+
+    piola_cholesky = piola_mds

@@ -87,31 +87,4 @@ class GPWeights(NamedTuple) :
     aniso_logterm: jnp.ndarray = None
 
 
-class SyntheticData(NamedTuple) :
-    load_array: jnp.ndarray
-    u_array: jnp.ndarray
-    coords: jnp.ndarray
-    cells: jnp.ndarray
-    node_type: jnp.ndarray
-    dev_inv_array: jnp.ndarray
-    vol_inv_array: jnp.ndarray
-    invariants_array: jnp.ndarray
-    disp_noise_level: float
-    load_noise_level: float
-
-class TrainingSetup(NamedTuple) :
-    dataset_dir: str
-    material_model: str
-    save_path: str
-    training_mode: str
-    n_dev_ip: int
-    n_vol_ip: int
-    true_material_parameters: jnp.ndarray
-
-
-class PrecomputedVFMData(NamedTuple) :
-    f_neu: jnp.ndarray
-    node_type: jnp.ndarray
-    F: jnp.ndarray
-    dNdX: jnp.ndarray
-    dA: jnp.ndarray
+from core.gp_component import ComponentRawParams, ComponentParams, ComponentWeights

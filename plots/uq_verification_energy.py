@@ -21,28 +21,13 @@ from core.datasetclass import BenchmarkDataset
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
-
-import matplotlib.pyplot as plt
-import numpy as np
-
 from sklearn.metrics import r2_score
+
+from plots.theme import apply_style, save_figure
 
 
 def plot_combined_validation(learned_gp, true_model, save_path, step):
-    plt.rcParams.update({
-        "mathtext.fontset": "stix",
-        "font.family": "serif",
-        "font.serif": ["STIXGeneral", "Times New Roman", "DejaVu Serif"],
-        "font.size": 16,                # Slightly reduced for wider layout
-        "axes.titlesize": 18,           # Adjusted for smaller subplots
-        "axes.labelsize": 16,
-        "legend.fontsize": 16,
-        "xtick.labelsize": 16,
-        "ytick.labelsize": 16,
-        "figure.dpi": 600,
-        "savefig.dpi": 600,
-        "text.usetex": False
-    })
+    apply_style()
     
     num_points = 512
     num_samples = 32
@@ -109,7 +94,7 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
         ax_psi.fill_between(gamma, psi_dist_mean[i] - 1.96*jnp.sqrt(psi_dist_var[i]), 
                            psi_dist_mean[i] + 1.96*jnp.sqrt(psi_dist_var[i]), color="blue", alpha=0.1)
         
-        ax_psi.set_title(f"{name}\n$\Psi$", pad=10)
+        ax_psi.set_title(rf"{name}" + "\n" + r"$\Psi$", pad=10)
         ax_psi.text(0.05, 0.85, f"Cov: {c_psi:.1f}%", transform=ax_psi.transAxes, fontsize=16, 
                     fontweight='bold', bbox=dict(facecolor='white', alpha=0.8, edgecolor='blue'))
 
@@ -157,170 +142,9 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
     plt.savefig(save_file, bbox_inches='tight')
     plt.close()
 
-# def plot_combined_validation(learned_gp, true_model, save_path, step):
-#     plt.rcParams.update({
-#     "mathtext.fontset": "stix",
-    
-#     # 2. Set the main font to STIX or Times New Roman
-#     "font.family": "serif",
-#     "font.serif": ["STIXGeneral", "Times New Roman", "DejaVu Serif"],
-#     "font.size": 14,                # Base font size
-#     "axes.titlesize": 22,           # Subplot titles
-#     "axes.labelsize": 20,           # X and Y labels
-#     "legend.fontsize": 16,          # Legend text
-#     "xtick.labelsize": 13,          # Axis tick numbers
-#     "ytick.labelsize": 13,
-#     "figure.dpi": 600,              # High resolution for the screen and save
-#     "savefig.dpi": 600,             # Ensures saved file is high quality
-#     "text.usetex": True            # Set to True only if you have a full LaTeX install
-#     })
-#     num_points = 512
-#     num_samples = 20
-#     max_gamma = 1.0
-#     gamma = jnp.linspace(0.0, max_gamma, num_points)
-    
-#     # --- 1. Deformation Gradients & Mode Setup ---
-#     def set_F(f11, f22, f33, f12=0.0):
-#         arr = jnp.zeros((num_points, 3, 3))
-#         arr = arr.at[:, 0, 0].set(f11); arr = arr.at[:, 1, 1].set(f22)
-#         arr = arr.at[:, 2, 2].set(f33); arr = arr.at[:, 0, 1].set(f12)
-#         return arr
-
-#     # Defining the standard deformation modes
-#     F_all = jnp.stack([
-#         set_F(1 + gamma, 1.0, 1.0),                   # Uniaxial Tension
-#         set_F(1 + gamma, 1 + gamma, 1.0),             # Equibiaxial Tension
-#         set_F(1 + gamma, 1/(1 + gamma), 1.0),         # Pure Shear
-#         set_F(1/(1 + gamma), 1.0, 1.0),               # Uniaxial Compression
-#         set_F(1/(1 + gamma), 1/(1/(1 + gamma)), 1.0),# Equibiaxial Compression
-#         set_F(1.0, 1.0, 1.0, f12=gamma)               # Simple Shear
-#     ])
-
-#     mode_names = ["Uniaxial Tension", "Equibiaxial Tension", "Pure Shear", 
-#                   "Uniaxial Compression", "Equibiaxial Compression", "Simple Shear"]
-
-#     # --- 2. Vectorized Computations ---
-#     psi_vmap = jax.vmap(jax.vmap(learned_gp.psi, in_axes=(0, None)), in_axes=(0, None))
-#     piola_vmap = jax.vmap(jax.vmap(learned_gp.piola, in_axes=(0, None)), in_axes=(0, None))
-
-#     psi_true = jax.vmap(jax.vmap(true_model.psi))(F_all)
-#     P_true = jax.vmap(jax.vmap(true_model.P))(F_all)
-
-#     # Extraction for GP Stats
-#     psi_means, psi_vars, p_means, p_vars = [], [], [], []
-#     for m in range(len(mode_names)):
-#         psi_d = learned_gp.psi_dist(F_all[m])
-#         p_d = learned_gp.piola_dist(F_all[m])
-#         psi_means.append(psi_d.mean); psi_vars.append(psi_d.var)
-#         p_means.append(p_d.mean); p_vars.append(p_d.var)
-
-#     keys = jax.random.split(jax.random.PRNGKey(step), num_samples)
-#     psi_samples = jax.vmap(psi_vmap, in_axes=(None, 0))(F_all, keys)
-#     P_samples = jax.vmap(piola_vmap, in_axes=(None, 0))(F_all, keys)
-
-#     # Helper function for coverage calculation
-#     def calc_coverage_pct(true, mean, var):
-#         std = jnp.sqrt(var)
-#         upper = mean + 1.96 * std
-#         lower = mean - 1.96 * std
-#         is_inside = jnp.logical_and(true >= lower, true <= upper)
-#         return jnp.mean(is_inside) * 100
-
-#     # --- 3. Figure 1: Energy Density (Psi) ---
-#     fig1, axes1 = plt.subplots(2, 3, figsize=(16, 10))
-#     # fig1.suptitle(r"SEDF Distribution Extraction ($\Psi$)", fontsize=28, fontweight='bold')
-#     cov_psis = []
-#     for i, name in enumerate(mode_names):
-#         ax = axes1[i // 3, i % 3]
-#         ax.set_box_aspect(1)
-        
-#         # Calculate coverage for this specific mode
-#         cov_psi = calc_coverage_pct(psi_true[i], psi_means[i], psi_vars[i])
-#         cov_psis.append(cov_psi)
-
-#         ax.plot(gamma, psi_true[i], 'k--', lw=1.5, label="True", zorder=5)
-#         ax.plot(gamma, psi_samples[:, i, :].T, color="lightblue", lw=0.6, alpha=0.15, zorder=1)
-#         ax.plot(gamma, psi_means[i], color="blue", lw=1.8, label="GP Mean", zorder=3)
-#         ax.fill_between(gamma, psi_means[i] - 1.96*jnp.sqrt(psi_vars[i] + 1e-8), 
-#                         psi_means[i] + 1.96*jnp.sqrt(psi_vars[i] + 1e-8), color="blue", alpha=0.1)
-        
-#         ax.set_title(name)
-#         ax.set_xlabel(r"γ"); ax.set_ylabel(r"Ψ")
-#         ax.grid(True, alpha=0.2, ls=':'); ax.set_xlim(0, max_gamma)
-        
-#         # Add Coverage Text Box
-#         ax.text(0.05, 0.92, f"Coverage: {cov_psi:.1f}%", transform=ax.transAxes, 
-#                 fontsize=12, fontweight='bold', bbox=dict(facecolor='white', alpha=0.7, edgecolor='blue'))
-
-#         if i == 0: ax.legend(fontsize=14)
-#     # np.array(cov_psis).mean()
-#     fig1.suptitle(r"SEDF Distribution Extraction (Ψ)" + f" Coverage: {np.array(cov_psis).mean():.1f}%", 
-#                   fontsize=22)
-
-#     fig1.tight_layout(rect=[0, 0.03, 1, 0.95])
-#     fig1.savefig(os.path.join(save_path, f"val_psi_step_{step}.pdf"), dpi=300)
-
-#     # --- 4. Figure 2: Piola Stress (P) ---
-#     fig2, axes2 = plt.subplots(2, 3, figsize=(16, 10))
-#     # fig2.suptitle(r"Piola Stress Distribution ($P_{ij}$)", fontsize=28, fontweight='bold')
-#     cov_ps = []
-#     for i, name in enumerate(mode_names):
-#         ax = axes2[i // 3, i % 3]
-#         ax.set_box_aspect(1)
-        
-#         # Component indexing logic
-#         idx = (1, 1) if name == "Pure Shear" else (0, 1) if name == "Simple Shear" else (0, 0)
-#         label_P = r"$P_{22}$" if name == "Pure Shear" else r"$P_{12}$" if name == "Simple Shear" else r"$P_{11}$"
-
-#         p_t = P_true[i, :, idx[0], idx[1]]
-#         p_m = p_means[i][:, idx[0], idx[1]]
-#         p_v = p_vars[i][:, idx[0], idx[1]]
-#         p_s = jnp.sqrt(p_v)
-#         p_samp = P_samples[:, i, :, idx[0], idx[1]]
-
-#         # Calculate coverage for this specific stress component
-#         cov_p = calc_coverage_pct(p_t, p_m, p_v)
-#         cov_ps.append(cov_p)
-
-#         ax.plot(gamma, p_t, 'k--', lw=1.5, label="True", zorder=5)
-#         ax.plot(gamma, p_samp.T, color="salmon", lw=0.6, alpha=0.15, zorder=1)
-#         ax.plot(gamma, p_m, color="red", lw=1.8, label="GP Mean", zorder=3)
-#         ax.fill_between(gamma, p_m - 1.96*p_s, p_m + 1.96*p_s, color="red", alpha=0.1)
-        
-#         ax.set_title(name)
-#         ax.set_xlabel(r"γ"); ax.set_ylabel(label_P)
-#         ax.grid(True, alpha=0.2, ls=':'); ax.set_xlim(0, max_gamma)
-        
-#         # Add Coverage Text Box
-#         ax.text(0.05, 0.92, f"Coverage: {cov_p:.1f}%", transform=ax.transAxes, 
-#                 fontsize=12, fontweight='bold', bbox=dict(facecolor='white', alpha=0.7, edgecolor='red'))
-        
-#         if i == 0: ax.legend(fontsize=14)
-#     fig2.suptitle(r"Piola Stress Distribution ($P_{ij}$)"  + f" Coverage: {np.array(cov_ps).mean():.1f}%", fontsize=22)
-
-#     fig2.tight_layout(rect=[0, 0.03, 1, 0.95])
-#     fig2.savefig(os.path.join(save_path, f"val_stress_step_{step}.pdf"), dpi=300)
-    
-#     plt.close('all')
-import os
-import jax
-import jax.numpy as jnp
-import matplotlib.pyplot as plt
 
 def plot_full_piola_validation(learned_gp, true_model, save_path, step):
-    plt.rcParams.update({
-    "font.family": "serif",
-    "font.serif": ["Times New Roman", "DejaVu Serif"], # Falls back to DejaVu if Times isn't found
-    "font.size": 12,                # Base font size
-    "axes.titlesize": 18,           # Subplot titles
-    "axes.labelsize": 12,           # X and Y labels
-    "legend.fontsize": 10,          # Legend text
-    "xtick.labelsize": 10,          # Axis tick numbers
-    "ytick.labelsize": 10,
-    "figure.dpi": 600,              # High resolution for the screen and save
-    "savefig.dpi": 600,             # Ensures saved file is high quality
-    "text.usetex": False            # Set to True only if you have a full LaTeX install
-    })
+    apply_style()
     num_points = 512
     max_gamma = 1.0
     gamma = jnp.linspace(0.0, max_gamma, num_points)
@@ -415,29 +239,11 @@ def plot_full_piola_validation(learned_gp, true_model, save_path, step):
     fig.savefig(save_fn, dpi=200)
     plt.close(fig)
 
-import matplotlib.pyplot as plt
-import numpy as np
-import os
-from sklearn.metrics import r2_score
-
 def plot_energy_r2_coverage(e_true, e_pred_mean, e_pred_std, save_path=None):
     """
     Plots Predicted vs True values for scalar Energy with 95% Confidence Intervals.
     """
-    plt.rcParams.update({
-        "mathtext.fontset": "stix",
-        "font.family": "serif",
-        "font.serif": ["STIXGeneral", "Times New Roman", "DejaVu Serif"],
-        "font.size": 16,                # Slightly reduced for wider layout
-        "axes.titlesize": 18,           # Adjusted for smaller subplots
-        "axes.labelsize": 16,
-        "legend.fontsize": 16,
-        "xtick.labelsize": 14,
-        "ytick.labelsize": 13,
-        "figure.dpi": 600,
-        "savefig.dpi": 600,
-        "text.usetex": False
-    })
+    apply_style()
     fig, ax = plt.subplots(figsize=(8, 7))
     
     # Ensure inputs are flattened for scalar plotting
@@ -467,8 +273,8 @@ def plot_energy_r2_coverage(e_true, e_pred_mean, e_pred_std, save_path=None):
     
     # Formatting
     ax.set_title(f'Energy Prediction Accuracy\nCoverage: {coverage_pct:.2f}% | $R^2$: {r2:.4f}', fontsize=14)
-    ax.set_xlabel('True Energy ($\Psi_{true}$)', fontsize=12)
-    ax.set_ylabel('Predicted Energy ($\Psi_{pred}$)', fontsize=12)
+    ax.set_xlabel(r'True Energy ($\Psi_{true}$)', fontsize=12)
+    ax.set_ylabel(r'Predicted Energy ($\Psi_{pred}$)', fontsize=12)
     ax.grid(True, linestyle=':', alpha=0.6)
     ax.legend(loc='upper left')
 
@@ -492,19 +298,7 @@ def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path):
     Plots standard loading paths with background training data (hollow circles)
     and specific red cross markers for inducing point locations.
     """
-    plt.rcParams.update({
-    "font.family": "serif",
-    "font.serif": ["Times New Roman", "DejaVu Serif"], # Falls back to DejaVu if Times isn't found
-    "font.size": 14,                # Base font size
-    "axes.titlesize": 22,           # Subplot titles
-    "axes.labelsize": 20,           # X and Y labels
-    "legend.fontsize": 16,          # Legend text
-    "xtick.labelsize": 13,          # Axis tick numbers
-    "ytick.labelsize": 13,
-    "figure.dpi": 600,              # High resolution for the screen and save
-    "savefig.dpi": 600,             # Ensures saved file is high quality
-    "text.usetex": False            # Set to True only if you have a full LaTeX install
-    })
+    apply_style()
     # --- Setup Figure: 3 subplots for Invariant relationships ---
     fig2, axes2 = plt.subplots(1, 3, figsize=(12, 5))
     num_points = 100

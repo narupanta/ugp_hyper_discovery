@@ -63,6 +63,27 @@ def get_material_from_dir(dir_path: str, **kwargs) -> "BaseMaterialModel":
     Instantiate a material model by loading the configuration from a saved model directory.
     """
     cfg = load_model_config(dir_path)
+    if "material_model_name" not in cfg or cfg.get("material_model", "").lower() in ["gmr", "gmr_aniso"]:
+        if "saved_model_dir" in cfg and os.path.isdir(cfg["saved_model_dir"]):
+            try:
+                src_cfg = load_model_config(cfg["saved_model_dir"])
+                if "material_model_name" in src_cfg:
+                    return get_material_from_config(src_cfg, **kwargs)
+            except Exception:
+                pass
+        # Check parent or experiment directory config.yaml
+        abs_p = os.path.abspath(dir_path)
+        for cand_dir in [os.path.dirname(abs_p), os.path.dirname(os.path.dirname(abs_p))]:
+            cand_yaml = os.path.join(cand_dir, "config.yaml")
+            if os.path.exists(cand_yaml):
+                try:
+                    import yaml
+                    with open(cand_yaml, "r") as f:
+                        p_cfg = yaml.safe_load(f)
+                    if p_cfg and "material_model_name" in p_cfg:
+                        return get_material_from_config(p_cfg, **kwargs)
+                except Exception:
+                    pass
     return get_material_from_config(cfg, **kwargs)
 
 

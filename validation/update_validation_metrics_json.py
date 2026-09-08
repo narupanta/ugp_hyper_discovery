@@ -10,8 +10,31 @@ VOL_PARAM_NAMES = ["D1", "D2", "D3"]
 ANISO_PARAM_NAMES = ["C42", "C43", "C44", "C62", "C63", "C64"]
 
 def compute_displacement_metrics(distilled_dir, subfolder, step_indices=[9]):
-    file_path = os.path.join(distilled_dir, subfolder, "fem_distilled_samples.npz")
-    if not os.path.exists(file_path):
+    candidates = [
+        os.path.join(distilled_dir, subfolder, "fem_distilled_samples.npz"),
+        os.path.join(distilled_dir, "..", subfolder, "fem_distilled_samples.npz"),
+        os.path.join(distilled_dir, "..", "fem_validation", subfolder, "fem_distilled_samples.npz"),
+    ]
+    if subfolder in ["fem_validation", "block"]:
+        candidates.extend([
+            os.path.join(distilled_dir, "..", "fem_validation", "block", "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "..", "fem_validation", "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "fem_validation", "block", "fem_distilled_samples.npz"),
+        ])
+    elif subfolder in ["fem_validation_holes", "holes"]:
+        candidates.extend([
+            os.path.join(distilled_dir, "..", "fem_validation", "holes", "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "..", "fem_validation_holes", "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "fem_validation", "holes", "fem_distilled_samples.npz"),
+        ])
+
+    file_path = None
+    for cand in candidates:
+        if os.path.exists(cand):
+            file_path = cand
+            break
+
+    if not file_path:
         return None
 
     data = np.load(file_path, allow_pickle=True)
@@ -64,10 +87,38 @@ def compute_displacement_metrics(distilled_dir, subfolder, step_indices=[9]):
             "coverage": cov
         }
 
+    # Domain-wide average errors across nodes and evaluation steps
+    u_pred_mean_flat = np.mean(u_pred_flat, axis=0)  # (S * num_nodes, 2)
+    nodal_rmse = np.sqrt(np.mean((u_true_flat - u_pred_mean_flat) ** 2, axis=-1))
+    nodal_l2 = np.linalg.norm(u_true_flat - u_pred_mean_flat, axis=-1)
+
+    mean_domain_rmse = float(np.mean(nodal_rmse))
+    mean_domain_error = float(np.mean(nodal_l2))
+    vector_rmse = float(np.sqrt(np.mean((u_true_flat - u_pred_mean_flat) ** 2)))
+
+    # Final evaluation step domain error
+    u_pred_final_mean = np.mean(u_pred_steps[:, -1], axis=0)
+    u_true_final = u_true_steps[-1]
+    final_step_domain_rmse = float(np.mean(np.sqrt(np.mean((u_true_final - u_pred_final_mean) ** 2, axis=-1))))
+    final_step_domain_error = float(np.mean(np.linalg.norm(u_true_final - u_pred_final_mean, axis=-1)))
+
+    # Empirical Coverage calculated across x and y first, and then finding percentage from set of x and y together
+    ux_low, ux_high = np.quantile(ux_pred_samples, [0.025, 0.975], axis=0)
+    uy_low, uy_high = np.quantile(uy_pred_samples, [0.025, 0.975], axis=0)
+    inside_x = (ux_true >= ux_low) & (ux_true <= ux_high)
+    inside_y = (uy_true >= uy_low) & (uy_true <= uy_high)
+    coverage_xy = float(np.mean(np.concatenate([inside_x, inside_y])) * 100.0)
+
     return {
         "ux": get_comp_stats(ux_true, ux_pred_samples),
         "uy": get_comp_stats(uy_true, uy_pred_samples),
-        "norm": get_comp_stats(umag_true, umag_pred_samples)
+        "norm": get_comp_stats(umag_true, umag_pred_samples),
+        "coverage_xy": coverage_xy,
+        "mean_domain_rmse": mean_domain_rmse,
+        "mean_domain_error": mean_domain_error,
+        "vector_rmse": vector_rmse,
+        "final_step_domain_rmse": final_step_domain_rmse,
+        "final_step_domain_error": final_step_domain_error
     }
 
 def extract_model_structure(distilled_dir):
@@ -101,8 +152,8 @@ def extract_model_structure(distilled_dir):
 
     return model_structure
 
-def update_metrics(distilled_dir, step_idx=9):
-    # Locate validation_metrics_*.json or create validation_metrics.json
+def update_metrics(distilled_dir, step_idx=9, train_steps=None):
+    val_steps = step_idx
     metric_files = glob.glob(os.path.join(distilled_dir, "validation_metrics_*.json"))
     if metric_files:
         val_json_path = metric_files[0]
@@ -141,9 +192,29 @@ def update_metrics(distilled_dir, step_idx=9):
                     "coverage": c_data.get("coverage_gp")
                 }
 
+    # Determine train load steps from args, recipe_config.yaml, or config.yaml
+    if train_steps is None:
+        recipe_path = os.path.join(distilled_dir, "recipe_config.yaml")
+        if os.path.exists(recipe_path):
+            try:
+                import yaml
+                with open(recipe_path, "r") as f:
+                    r_cfg = yaml.safe_load(f)
+                    train_steps = r_cfg.get("train_load_steps_indices")
+            except Exception:
+                pass
+
     # 2. Displacement Field metrics (Block and Holes)
     disp_block = compute_displacement_metrics(distilled_dir, "fem_validation", step_indices=val_steps)
     disp_holes = compute_displacement_metrics(distilled_dir, "fem_validation_holes", step_indices=val_steps)
+
+    disp_block_train = compute_displacement_metrics(distilled_dir, "fem_validation", step_indices=train_steps) if train_steps else None
+    disp_holes_train = compute_displacement_metrics(distilled_dir, "fem_validation_holes", step_indices=train_steps) if train_steps else None
+
+    if disp_block and disp_block_train:
+        disp_block["train_steps"] = disp_block_train
+    if disp_holes and disp_holes_train:
+        disp_holes["train_steps"] = disp_holes_train
 
     # 3. Discovered Model Structure (only survived parameters with 95ci)
     model_struct = extract_model_structure(distilled_dir)
@@ -201,8 +272,29 @@ def update_metrics(distilled_dir, step_idx=9):
 
     # 4.3 FEM Validation Time
     def parse_fem_time(folder_name):
-        fem_dir = os.path.join(distilled_dir, folder_name)
-        if not os.path.exists(fem_dir): return None
+        candidates = [
+            os.path.join(distilled_dir, folder_name),
+            os.path.join(distilled_dir, "..", "fem_validation", folder_name),
+            os.path.join(distilled_dir, "..", "fem_validation"),
+            os.path.join(distilled_dir, "..", folder_name),
+        ]
+        if folder_name in ["fem_validation", "block"]:
+            candidates.extend([
+                os.path.join(distilled_dir, "..", "fem_validation", "block"),
+                os.path.join(distilled_dir, "fem_validation", "block"),
+            ])
+        elif folder_name in ["fem_validation_holes", "holes"]:
+            candidates.extend([
+                os.path.join(distilled_dir, "..", "fem_validation", "holes"),
+                os.path.join(distilled_dir, "fem_validation", "holes"),
+            ])
+
+        fem_dir = None
+        for cand in candidates:
+            if os.path.exists(cand):
+                fem_dir = cand
+                break
+        if not fem_dir or not os.path.exists(fem_dir): return None
         npz_file = os.path.join(fem_dir, "fem_distilled_samples.npz")
         if os.path.exists(npz_file):
             d = np.load(npz_file, allow_pickle=True)
@@ -244,13 +336,21 @@ def update_metrics(distilled_dir, step_idx=9):
     }
 
     # Build master unified dictionary
+    disp_dict = {
+        "block": disp_block,
+        "holes": disp_holes
+    }
+    if train_steps:
+        disp_dict["train"] = {
+            "block": disp_block_train,
+            "holes": disp_holes_train,
+            "steps": train_steps
+        }
+
     unified_dict = {
         "time_taken": time_taken,
         "sef": sef_data,
-        "disp": {
-            "block": disp_block,
-            "holes": disp_holes
-        },
+        "disp": disp_dict,
         "model_structure": model_struct
     }
 
@@ -270,6 +370,7 @@ if __name__ == "__main__":
     parser.add_argument("--distilled_dir", type=str, required=True)
     parser.add_argument("--step_idx", type=int, nargs="*", default=[9])
     parser.add_argument("--val_load_steps", type=int, nargs="*", default=None)
+    parser.add_argument("--train_load_steps", type=int, nargs="*", default=None)
     args = parser.parse_args()
     val_steps = args.val_load_steps if args.val_load_steps is not None else args.step_idx
-    update_metrics(args.distilled_dir, val_steps)
+    update_metrics(args.distilled_dir, val_steps, train_steps=args.train_load_steps)

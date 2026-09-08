@@ -209,6 +209,7 @@ class HyperelasticGPTrainer:
             plot_model = SparseHyperelasticityGP(
                 raw_params=m_params, I_z=self.I_z, min_dev=self.min_dev, min_vol=self.min_vol,
                 max_dev=self.max_dev, max_vol=self.max_vol, beta=self.model.beta,
+                sampling_mode=getattr(self.model, 'sampling_mode', 'pathwise'),
                 feature_extractor=self.model.feature_extractor,
                 min_aniso=getattr(self.model, 'min_aniso', None),
                 max_aniso=getattr(self.model, 'max_aniso', None),
@@ -223,6 +224,7 @@ class HyperelasticGPTrainer:
         learned_gp = SparseHyperelasticityGP(
             raw_params=self.best_params, I_z=self.I_z, min_dev=self.min_dev, min_vol=self.min_vol,
             max_dev=self.max_dev, max_vol=self.max_vol, beta=self.model.beta,
+            sampling_mode=getattr(self.model, 'sampling_mode', 'pathwise'),
             feature_extractor=self.model.feature_extractor,
             min_aniso=getattr(self.model, 'min_aniso', None),
             max_aniso=getattr(self.model, 'max_aniso', None),

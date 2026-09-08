@@ -6,11 +6,11 @@ import os
 import argparse
 import sys
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from plots.theme import apply_style, save_figure
+
 def main():
-    plt.rcParams.update({
-        'font.family': 'serif',
-        'mathtext.fontset': 'cm'
-    })
+    apply_style()
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--distilled_dir", type=str, required=True)
@@ -206,7 +206,7 @@ def main():
                             ax.set_yticklabels([])
             plt.tight_layout()
             pairplot_path = os.path.join(out_dir, f"parameter_correlation_{args.material_model}_{suffix}.pdf")
-            fig.savefig(pairplot_path, dpi=200, bbox_inches='tight')
+            save_figure(fig, pairplot_path)
             plt.close()
             print(f"Saved parameter correlation pairplot to {pairplot_path}")
         else:
@@ -297,7 +297,7 @@ def main():
         plt.tight_layout()
         
         violin_path = os.path.join(out_dir, f"parameter_violin_{args.material_model}.pdf")
-        plt.savefig(violin_path, dpi=200, bbox_inches='tight')
+        save_figure(plt.gcf(), violin_path)
         plt.close()
         print(f"Saved parameter violin plot to {violin_path}")
     except Exception as e:

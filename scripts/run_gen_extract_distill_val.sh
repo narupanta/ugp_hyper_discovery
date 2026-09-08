@@ -435,6 +435,7 @@ for SEED in $SEEDS_LIST; do
                     python3 plots/plot_deformation_sensitivity.py --distilled_dir "$SHARED_OUT_DIR" --component "$COMP" --distill_target "$DIST_TARGET" 2>/dev/null || true
                 fi
             done
+            python3 plots/plot_combined_invariant_sensitivity.py --distilled_dir "$SHARED_OUT_DIR" 2>/dev/null || true
         else
             python3 distillation/distill_uqmodeldisc.py \
                 --saved_model_dir "$SAVED_DIR" \

@@ -1320,6 +1320,9 @@ def main():
         subprocess.run(["python3", "plots/plot_invariant_sensitivity.py"] + args_tail, check=True)
         subprocess.run(["python3", "plots/plot_invariant_sensitivity_3d_pairs.py"] + args_tail, check=True)
         subprocess.run(["python3", "plots/plot_deformation_sensitivity.py"] + args_tail, check=True)
+        
+        # Combined invariant sensitivity (dev vs I1,I2; vol vs J)
+        subprocess.run(["python3", "plots/plot_combined_invariant_sensitivity.py", "--distilled_dir", out_dir], check=False)
 
     except Exception as e:
         print(f"Error running invariant sensitivity plots: {e}")

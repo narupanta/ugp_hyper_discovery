@@ -131,7 +131,7 @@ def generate_bc_visualization():
     
     sc = ax2.scatter(X_def, Y_def, c=umag, cmap='plasma', s=2.5, alpha=0.85, zorder=1)
     cbar = plt.colorbar(sc, ax=ax2, fraction=0.046, pad=0.04)
-    cbar.set_label('Total Displacement Magnitude $\|u\|$', fontsize=12, fontweight='bold', labelpad=10)
+    cbar.set_label(r'Total Displacement Magnitude $\|u\|$', fontsize=12, fontweight='bold', labelpad=10)
     
     # Overlay deformed boundaries in prominent distinct colors
     ax2.scatter(X_def[is_free_perimeter], Y_def[is_free_perimeter], c='#2E7D32', s=8, alpha=0.7, zorder=3, label='Free External Border')

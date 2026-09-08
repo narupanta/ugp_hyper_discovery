@@ -14,6 +14,13 @@ import jax.random as jr
 jax.config.update("jax_enable_x64", True)
 
 from core.utils import *
+from core.fem_engine import (
+    get_geometry,
+    create_default_bc_config,
+    HyperElasticityProblem,
+    solve_adaptive_fem,
+    compute_all_invariants
+)
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPParams, GPRawParams
 from core.material_models import get_material
@@ -211,6 +218,7 @@ def parse_args():
     parser.add_argument('--total_workers', type=int, default=1, help="Total number of parallel workers")
     parser.add_argument('--sample_offset', type=int, default=0, help="Starting index in candidate samples pool")
     parser.add_argument('--output_suffix', type=str, default="", help="Optional suffix for worker output file")
+    parser.add_argument('--output_dir', type=str, default=None, help="Direct output directory for FEM validation")
 
     return parser.parse_args()
 if __name__ == "__main__" :
@@ -241,7 +249,10 @@ if __name__ == "__main__" :
 
     print(f"Loaded model configuration: model={material_model_name}, disp_noise={disp_noise}, load_noise={load_noise}, target_load={target_load}, asym={asym_factor}")
 
-    save_path = Path(args.distilled_dir) / args.subfolder
+    if args.output_dir:
+        save_path = Path(args.output_dir)
+    else:
+        save_path = Path(args.distilled_dir) / args.subfolder
     save_path.mkdir(parents=True, exist_ok=True)
     # get I_obs_all.npy
 
@@ -292,37 +303,6 @@ if __name__ == "__main__" :
 
     def piola_stress_2d(F_2d, p, a0=None, a1=None):
         return jax.grad(eval_hyperelastic_psi, argnums=0)(F_2d, p, a0, a1)
-
-    class HyperElasticity(Problem):
-        def __init__(self, a0=None, a1=None, **kwargs):
-            self.a0 = a0
-            self.a1 = a1
-            super().__init__(**kwargs)
-
-        def custom_init(self):
-            self.fe = self.fes[0]
-            self.internal_vars = [jnp.zeros((self.num_cells, self.fes[0].num_quads, 19), dtype=jnp.float64)]
-
-        def set_params(self, params):
-            self.internal_vars = [jnp.tile(params[None, None, :], (self.num_cells, self.fes[0].num_quads, 1))]
-
-        def get_surface_maps(self):
-            def surface_map_top(u, x, load):
-                return jnp.array([0., -load[0]])
-            def surface_map_right(u, x, load):
-                if geometry_flag == "holes":
-                    return jnp.array([load[0], 0.0])
-                else:
-                    return jnp.array([-load[0], 0.0])
-            return [surface_map_right, surface_map_top]
-
-        def get_tensor_map(self):
-            a0_fixed = self.a0
-            a1_fixed = self.a1
-            def first_PK_stress(u_grad, p):
-                F = u_grad + jnp.eye(self.dim)
-                return piola_stress_2d(F, p, a0_fixed, a1_fixed)
-            return first_PK_stress
 
     geometry_flag = args.geometry
 
@@ -388,36 +368,16 @@ if __name__ == "__main__" :
 
     mesh = Mesh(node_coords, cells)
 
-    # Define boundary locations.
-    def left(point):
-        return jnp.isclose(point[0], 0., atol=1e-6)
-    def bottom(point):
-        return jnp.isclose(point[1], 0., atol=1e-6)
-    def right(point):
-        return jnp.isclose(point[0], 1., atol=1e-6)
-    def top(point):
-        return jnp.isclose(point[1], 1.0, atol=1e-6)
+    # Boundary Condition Setup
+    geom = get_geometry(geometry_flag)
+    bc_config = create_default_bc_config(geometry_name=geometry_flag, mode="force", pred_dict=geom.get_boundary_predicates())
+    dirichlet_bc_info = bc_config.get_dirichlet_info()
+    surface_maps = bc_config.get_surface_maps()
+    location_fns = [nbc.location_fn for nbc in bc_config.neumann_bcs]
 
-    zero_dbc = lambda point : 0
-    top_dbc = lambda point : 0.1
-
-    if geometry_flag == "holes":
-        dirichlet_bc_info = [
-            [bottom, bottom] , 
-            [0, 1],
-            [zero_dbc, zero_dbc]]
-    else:
-        dirichlet_bc_info = [
-            [bottom, left] , 
-            [1, 0],
-            [zero_dbc, zero_dbc]]
-        
-        # If node_type was not loaded from dataset, rebuild it for block
-        if "prep_dataset_path" not in locals() or prep_dataset_path is None:
-            node_type[jax.vmap(left)(node_coords)] = 1
-            node_type[jax.vmap(bottom)(node_coords)] = 2
-            node_type[jax.vmap(right)(node_coords)] = 3
-            node_type[jax.vmap(top)(node_coords)] = 4
+    # If node_type was not loaded from dataset or is 1D legacy, rebuild standard 5-channel node_type
+    if "prep_dataset_path" not in locals() or prep_dataset_path is None or (isinstance(node_type, np.ndarray) and node_type.ndim == 1):
+        node_type = bc_config.create_node_type_array(node_coords)
 
     if args.output_suffix:
         file_name = f"fem_distilled_samples_{args.output_suffix}.npz"
@@ -502,15 +462,16 @@ if __name__ == "__main__" :
             p_arr[:p_len] = p_seq[:p_len]
             return jnp.array(p_arr)
 
-        problem_true = HyperElasticity(
+        problem_true = HyperElasticityProblem(
             mesh=mesh,
             vec=2,
             dim=2,
             ele_type=ele_type,
             dirichlet_bc_info=dirichlet_bc_info,
-            location_fns=[right, top],
-            a0=a0,
-            a1=a1
+            location_fns=location_fns,
+            surface_maps=surface_maps,
+            num_internal_params=19,
+            piola_func=lambda F, p: piola_stress_2d(F[:2, :2] if F.shape == (3, 3) else F, p, a0, a1)
         )
         true_dev = list(getattr(true_material_model, "dev_params", []))
         true_vol = list(getattr(true_material_model, "vol_params", []))
@@ -542,35 +503,13 @@ if __name__ == "__main__" :
             noisy_load_right_base = noisy_load_top_base * asym_factor
         loads_noisy = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
 
-        def solve_fem(problem, petsc_options, loads):
-            u_list = []
-            u = jnp.zeros_like(problem.mesh[0].points)
-            for i, load in enumerate(loads):
-                shape_right = (len(problem.boundary_inds_list[0]), problem.fes[0].num_face_quads, 1)
-                shape_top = (len(problem.boundary_inds_list[1]), problem.fes[0].num_face_quads, 1)
-
-                problem.internal_vars_surfaces = [
-                    [
-                        jnp.full(fill_value=load[0], shape=shape_right),
-                    ],
-                    [
-                        jnp.full(fill_value=load[1], shape=shape_top)
-                    ]
-                ]
-                u_ = solver(problem, solver_options={'petsc_solver': petsc_options,
-                                                        'initial_guess': u})
-                u = u_[0]
-                u_list.append(u)
-            u_array = jnp.stack(u_list, axis=0)  
-            return u_array
-
         gt_dir = os.path.join(save_path, "gt")
         gt_file = os.path.join(gt_dir, "u_gt.npz")
         if os.path.exists(gt_file):
             u_true = np.load(gt_file)["u"]
         else:
             os.makedirs(gt_dir, exist_ok=True)
-            u_true = solve_fem(problem_true, petsc_options, loads_noisy)
+            u_true = solve_adaptive_fem(problem_true, bc_config, loads_noisy, petsc_options)
             np.savez_compressed(gt_file, u=u_true, cells=cells, node_coords=node_coords, node_type=node_type)
 
         u_pred_samples = []
@@ -584,15 +523,16 @@ if __name__ == "__main__" :
         success_count = 0
 
         # Instantiate problem_pred ONCE outside the sample loop
-        problem_pred = HyperElasticity(
+        problem_pred = HyperElasticityProblem(
             mesh=mesh,
             vec=2,
             dim=2,
             ele_type=ele_type,
             dirichlet_bc_info=dirichlet_bc_info,
-            location_fns=[right, top],
-            a0=a0,
-            a1=a1
+            location_fns=location_fns,
+            surface_maps=surface_maps,
+            num_internal_params=19,
+            piola_func=lambda F, p: piola_stress_2d(F[:2, :2] if F.shape == (3, 3) else F, p, a0, a1)
         )
         
         while success_count < n_sample and sample_idx < len(selected_samples):
@@ -605,7 +545,7 @@ if __name__ == "__main__" :
             
             try:
                 print(f"Sample {num_existing + success_count + 1}/{target_total_samples}: Attempting realization {sample_idx}/{len(selected_samples)}...")
-                u_pred = solve_fem(problem_pred, petsc_options, loads_noisy)
+                u_pred = solve_adaptive_fem(problem_pred, bc_config, loads_noisy, petsc_options)
                 success = True 
             except Exception as e:
                 print(f"Simulation failed on realization {sample_idx}: {e}")
