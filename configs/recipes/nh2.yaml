@@ -18,14 +18,16 @@ geometry_val: holes
 mesh_size: 0.08
 # 2. UGP Extraction (Training) Config
 number_of_mci_sampling: 8
-num_rff: 1600
-train_load_steps_indices: [1,2,3,4,5]
+num_rff: 800
+train_load_steps_indices: [1, 3, 5, 7]
+val_load_steps_indices: [4, 6]
+test_load_steps_indices: [8, 9]
 n_ip: 5
-beta: 10.0
+beta_list: [1.0, 5.0, 10.0, 50.0]
 is_fixed_reaction_force_noise: 1
 is_fixed_inducing_points: 1
 is_include_prior_mean: 0
-extraction_n_iterations: 300
+extraction_n_iterations: 10
 extraction_learning_rate: 0.01
 covariance_mode: diag
 normalize_ell: 0
@@ -45,6 +47,5 @@ sobol_samples_factor: 4096
 
 # 4. Validation Config
 run_validation: 1
-val_load_steps_indices: [7,8,9]
 seeds: [1,2,3,4,5]
 val_number_samples: 1024

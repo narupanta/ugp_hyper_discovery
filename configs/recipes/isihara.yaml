@@ -18,15 +18,15 @@ geometry_val: holes
 mesh_size: 0.08
 # 2. UGP Extraction (Training) Config
 number_of_mci_sampling: 8
-num_rff: 1600
+num_rff: 800
 train_load_steps_indices: [1,4,7]
 n_ip: 5
-beta: 50.0
+beta: 1.0
 is_fixed_reaction_force_noise: 1
 is_fixed_inducing_points: 1
 is_include_prior_mean: 0
 
-extraction_n_iterations: 50000
+extraction_n_iterations: 10
 extraction_learning_rate: 0.01
 covariance_mode: diag
 normalize_ell: 0
