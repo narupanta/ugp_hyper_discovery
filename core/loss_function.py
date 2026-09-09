@@ -87,12 +87,21 @@ def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.n
         free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2) - (n_steps * n_freedofs_x) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
         free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2) - (n_steps * n_freedofs_y) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
 
-    # Global virtual fields log-likelihood
+    # Split global virtual field residuals into X and Y equations:
+    Mx = n_vfs // 2
+    My = n_vfs - Mx
+    global_x_loss = global_loss[:, :Mx]
+    global_y_loss = global_loss[:, Mx:]
+
+    # Global virtual fields log-likelihood (separate X and Y equations)
     if normalize_ell == 1:
-        n_global_total = n_steps * n_vfs
-        global_log_likelihood = - (1.0 / (2 * (sigma_global**2))) * (jnp.sum(global_loss**2) / n_global_total) - 0.5 * jnp.log(2 * jnp.pi * (sigma_global**2))
+        n_global_total_x = n_steps * Mx
+        n_global_total_y = n_steps * My
+        global_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * (jnp.sum(global_x_loss**2) / n_global_total_x) - 0.5 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
+        global_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * (jnp.sum(global_y_loss**2) / n_global_total_y) - 0.5 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
     else:
-        global_log_likelihood = - (1.0 / (2 * (sigma_global**2))) * jnp.sum(global_loss**2) - (n_steps * n_vfs) / 2.0 * jnp.log(2 * jnp.pi * (sigma_global**2))
+        global_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(global_x_loss**2) - (n_steps * Mx) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
+        global_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(global_y_loss**2) - (n_steps * My) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
 
     sum_nodal_loss = jnp.sum(free_x_loss**2) + jnp.sum(free_y_loss**2)
     sum_global_loss = jnp.sum(global_loss**2)
@@ -102,11 +111,11 @@ def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.n
         expected_log_likelihood = free_x_log_likelihood + free_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
         return expected_log_likelihood, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_nodal_loss, sum_fix_loss)
     elif vfm_mode == "global_vf":
-        expected_log_likelihood = global_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
-        return expected_log_likelihood, (global_log_likelihood, jnp.array(0.0, dtype=jnp.float64), fix_x_log_likelihood, fix_y_log_likelihood, sum_global_loss, sum_fix_loss)
+        expected_log_likelihood = global_x_log_likelihood + global_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
+        return expected_log_likelihood, (global_x_log_likelihood, global_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_global_loss, sum_fix_loss)
     elif vfm_mode == "mix":
-        expected_log_likelihood = global_log_likelihood + free_x_log_likelihood + free_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
-        return expected_log_likelihood, (global_log_likelihood, free_x_log_likelihood + free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_global_loss, sum_nodal_loss)
+        expected_log_likelihood = global_x_log_likelihood + global_y_log_likelihood + free_x_log_likelihood + free_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
+        return expected_log_likelihood, (global_x_log_likelihood + free_x_log_likelihood, global_y_log_likelihood + free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_global_loss, sum_nodal_loss)
     else:
         raise ValueError(f"Unknown vfm_mode: {vfm_mode}. Expected 'linear_triangle', 'global_vf', or 'mix'.")
 

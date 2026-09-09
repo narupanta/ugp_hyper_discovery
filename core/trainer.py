@@ -7,7 +7,14 @@ import jax.numpy as jnp
 import jax.random as jr
 import optax
 from tqdm import tqdm
-from core.plotter import plot_loss_analysis, plot_parameters_hist, plot_combined_validation, plot_energy_decomposition_validation, plot_training_r2
+from core.plotter import (
+    plot_loss_analysis,
+    plot_vfm_loss_analysis,
+    plot_parameters_hist,
+    plot_combined_validation,
+    plot_energy_decomposition_validation,
+    plot_training_r2
+)
 from core.model import SparseHyperelasticityGP
 
 # Enforce mandatory 64-bit precision standard for hyperelastic computations
@@ -70,7 +77,10 @@ class HyperelasticGPTrainer:
         self.train_block = train_block
 
         self.log_file_path = os.path.join(save_path, "optimization_log.txt")
-        self.loss_components_hist = {"total_loss": [],"log_like": [], "kl": [], "phy": []}
+        self.loss_components_hist = {
+            "total_loss": [], "log_like": [], "kl": [], "phy": [], "phy2": [],
+            "free_x": [], "free_y": [], "fix_x": [], "fix_y": []
+        }
         self.params_hist = {
             "dev_gp_sigma_scaling": [], "vol_gp_sigma_scaling": [],
             "dev_gp_lengthscales": [], "vol_gp_lengthscales": [], 
@@ -107,6 +117,11 @@ class HyperelasticGPTrainer:
         self.loss_components_hist["log_like"].append(float(log_like_loss))
         self.loss_components_hist["kl"].append(float(kl_loss))
         self.loss_components_hist["phy"].append(float(phy_loss))
+        self.loss_components_hist["phy2"].append(float(phys_loss2))
+        self.loss_components_hist["free_x"].append(float(free_x_log_likelihood))
+        self.loss_components_hist["free_y"].append(float(free_y_log_likelihood))
+        self.loss_components_hist["fix_x"].append(float(fix_x_log_likelihood))
+        self.loss_components_hist["fix_y"].append(float(fix_y_log_likelihood))
         
         self.params_hist["dev_gp_sigma_scaling"].append(cur_params.dev_sig)
         self.params_hist["vol_gp_sigma_scaling"].append(cur_params.vol_sig)
@@ -225,6 +240,8 @@ class HyperelasticGPTrainer:
 
         plot_loss_analysis(self.loss_components_hist, self.params_hist, self.steps_history, self.save_path)
         plot_parameters_hist(self.params_hist, self.steps_history, self.save_path)
+        if getattr(self, "vfm_mode", "linear_triangle") in ["global_vf", "mix"]:
+            plot_vfm_loss_analysis(self.loss_components_hist, self.params_hist, self.steps_history, self.save_path, self.vfm_mode)
         
         learned_gp = SparseHyperelasticityGP(
             raw_params=self.best_params, I_z=self.I_z, min_dev=self.min_dev, min_vol=self.min_vol,

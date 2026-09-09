@@ -45,10 +45,18 @@ def plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_pa
     axs[2].set_title("KL Divergence")
 
     # Physics Residual & Physics Noise Scale
-    axs[3].plot(steps_history, loss_components_hist["phy"], color='#d62728', label="Residual")
+    has_phy2 = "phy2" in loss_components_hist and len(loss_components_hist["phy2"]) > 0 and loss_components_hist["phy2"][0] is not None
+    label_phy = r"Residual (Global VF $\sum \mathcal{R}^2$)" if has_phy2 else "Residual"
+    axs[3].plot(steps_history, loss_components_hist["phy"], color='#d62728', lw=2, label=label_phy)
+    if has_phy2:
+        axs[3].plot(steps_history, loss_components_hist["phy2"], color='#9467bd', lw=1.5, linestyle='--', label=r"Residual (Nodal $\sum \mathbf{R}^2$)")
+
     ax3_twin = axs[3].twinx()
-    ax3_twin.plot(steps_history, params_hist["sigma_free_x"], linestyle='--', label=r"$\sigma_{\mathrm{free}, x}$")
-    ax3_twin.plot(steps_history, params_hist["sigma_free_y"], linestyle='--', label=r"$\sigma_{\mathrm{free}, y}$")
+    ax3_twin.plot(steps_history, params_hist["sigma_free_x"], linestyle='--', color='#1f77b4', label=r"$\sigma_{\mathrm{free}, x}$")
+    ax3_twin.plot(steps_history, params_hist["sigma_free_y"], linestyle='--', color='#ff7f0e', label=r"$\sigma_{\mathrm{free}, y}$")
+    if "sigma_global" in params_hist and len(params_hist["sigma_global"]) > 0 and params_hist["sigma_global"][0] is not None:
+        ax3_twin.plot(steps_history, params_hist["sigma_global"], linestyle=':', color='#2ca02c', label=r"$\sigma_{\mathrm{global}}$")
+
     axs[3].set_title("Physics (Resid vs Noise)")
     axs[3].set_yscale('log')
     ax3_twin.set_yscale('log')
@@ -57,6 +65,75 @@ def plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_pa
 
     plt.tight_layout()
     save_figure(fig, os.path.join(save_path, "loss_and_physics.pdf"))
+    plt.close(fig)
+
+
+def plot_vfm_loss_analysis(loss_components_hist, params_hist, steps_history, save_path, vfm_mode="global_vf"):
+    """
+    Plots specialized multi-panel breakdown of Virtual Fields Method (VFM) loss components:
+    1. Physical residuals (Global VF residual vs Nodal residual)
+    2. Equilibrium Log-Likelihoods (X vs Y direction)
+    3. Physics Noise Parameter Evolution (sigma_free_x vs sigma_free_y)
+    4. Reaction force residuals & noise
+    """
+    apply_style()
+    fig, axs = plt.subplots(1, 4, figsize=(22, 5))
+    fig.suptitle(f"VFM Mode: {vfm_mode.upper()} — Loss Components & Parameter Evolution", fontsize=15)
+
+    # Panel 1: Physical Residuals (phy and optionally phy2)
+    has_phy2 = "phy2" in loss_components_hist and len(loss_components_hist["phy2"]) > 0 and loss_components_hist["phy2"][0] is not None
+    if vfm_mode == "global_vf":
+        axs[0].plot(steps_history, loss_components_hist["phy"], color='#d62728', lw=2, label=r"Global VF Residual $\sum \mathcal{R}_{\mathrm{global}}^2$")
+    elif vfm_mode == "mix":
+        axs[0].plot(steps_history, loss_components_hist["phy"], color='#d62728', lw=2, label=r"Global VF Residual $\sum \mathcal{R}_{\mathrm{global}}^2$")
+        if has_phy2:
+            axs[0].plot(steps_history, loss_components_hist["phy2"], color='#9467bd', lw=1.5, linestyle='--', label=r"Nodal Residual $\sum \mathbf{R}_{\mathrm{nodal}}^2$")
+    else:
+        axs[0].plot(steps_history, loss_components_hist["phy"], color='#d62728', lw=2, label=r"Nodal Residual $\sum \mathbf{R}_{\mathrm{nodal}}^2$")
+    axs[0].set_title("VFM Equilibrium Residuals")
+    axs[0].set_yscale('log')
+    axs[0].set_xlabel("Iteration Step")
+    axs[0].legend()
+    axs[0].grid(True, alpha=0.25)
+
+    # Panel 2: Directional Equilibrium Log-Likelihoods (X vs Y)
+    if "free_x" in loss_components_hist and len(loss_components_hist["free_x"]) > 0:
+        axs[1].plot(steps_history, loss_components_hist["free_x"], color='#1f77b4', lw=1.8, label=r"Equilibrium Fit $X$")
+    if "free_y" in loss_components_hist and len(loss_components_hist["free_y"]) > 0:
+        axs[1].plot(steps_history, loss_components_hist["free_y"], color='#ff7f0e', lw=1.8, label=r"Equilibrium Fit $Y$")
+    axs[1].set_title(r"Directional Equilibrium Fit ($X$ vs $Y$)")
+    axs[1].set_xlabel("Iteration Step")
+    axs[1].legend()
+    axs[1].grid(True, alpha=0.25)
+
+    # Panel 3: Physics Noise Parameters (sigma_free_x and sigma_free_y)
+    axs[2].plot(steps_history, params_hist["sigma_free_x"], color='#1f77b4', lw=2, label=r"$\sigma_{\mathrm{free}, x}$")
+    axs[2].plot(steps_history, params_hist["sigma_free_y"], color='#ff7f0e', lw=2, label=r"$\sigma_{\mathrm{free}, y}$")
+    if "sigma_global" in params_hist and len(params_hist["sigma_global"]) > 0 and params_hist["sigma_global"][0] is not None:
+        axs[2].plot(steps_history, params_hist["sigma_global"], color='#2ca02c', lw=1.5, linestyle=':', label=r"$\sigma_{\mathrm{global}}$")
+    axs[2].set_title(r"Physics Noise Scales ($\sigma_{\mathrm{free}}$)")
+    axs[2].set_yscale('log')
+    axs[2].set_xlabel("Iteration Step")
+    axs[2].legend()
+    axs[2].grid(True, alpha=0.25)
+
+    # Panel 4: Reaction Force Equilibrium & Noise
+    if "fix_x" in loss_components_hist and len(loss_components_hist["fix_x"]) > 0:
+        axs[3].plot(steps_history, loss_components_hist["fix_x"], color='#2ca02c', lw=1.5, label=r"Reaction Fit $X$")
+    if "fix_y" in loss_components_hist and len(loss_components_hist["fix_y"]) > 0:
+        axs[3].plot(steps_history, loss_components_hist["fix_y"], color='#8c564b', lw=1.5, label=r"Reaction Fit $Y$")
+    ax3_twin = axs[3].twinx()
+    ax3_twin.plot(steps_history, params_hist["sigma_fix_x"], color='#2ca02c', linestyle=':', label=r"$\sigma_{\mathrm{fix}, x}$")
+    ax3_twin.plot(steps_history, params_hist["sigma_fix_y"], color='#8c564b', linestyle=':', label=r"$\sigma_{\mathrm{fix}, y}$")
+    axs[3].set_title(r"Boundary Reactions & Noise")
+    ax3_twin.set_yscale('log')
+    axs[3].set_xlabel("Iteration Step")
+    axs[3].legend(loc='upper left')
+    ax3_twin.legend(loc='upper right')
+    axs[3].grid(True, alpha=0.25)
+
+    plt.tight_layout()
+    save_figure(fig, os.path.join(save_path, "vfm_loss_and_parameters.pdf"))
     plt.close(fig)
 
 

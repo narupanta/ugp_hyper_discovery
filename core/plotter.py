@@ -7,6 +7,7 @@ This module re-exports them to preserve full backwards compatibility.
 
 from plots.training import (
     plot_loss_analysis,
+    plot_vfm_loss_analysis,
     plot_parameters_hist,
     plot_inducing_points,
     plot_combined_validation,
@@ -20,6 +21,7 @@ from plots.training import (
 
 __all__ = [
     "plot_loss_analysis",
+    "plot_vfm_loss_analysis",
     "plot_parameters_hist",
     "plot_inducing_points",
     "plot_combined_validation",

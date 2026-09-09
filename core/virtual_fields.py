@@ -45,7 +45,8 @@ def build_kinematic_virtual_fields(
     free_x = (~is_fix_x).astype(np.float64)
     free_y = (~is_fix_y).astype(np.float64)
     
-    V_raw = []
+    Vx_raw = []
+    Vy_raw = []
     # Generate polynomial monomials x^p y^q for degree p + q <= order
     for deg in range(order + 1):
         for p in range(deg + 1):
@@ -54,29 +55,33 @@ def build_kinematic_virtual_fields(
             vx = poly * free_x
             vy = poly * free_y
             
-            # Virtual field with displacement only in x
             if np.linalg.norm(vx) > 1e-12:
-                field_x = np.stack([vx, np.zeros_like(x)], axis=-1).reshape(-1)
-                V_raw.append(field_x)
-                
-            # Virtual field with displacement only in y
+                Vx_raw.append(vx)
             if np.linalg.norm(vy) > 1e-12:
-                field_y = np.stack([np.zeros_like(x), vy], axis=-1).reshape(-1)
-                V_raw.append(field_y)
+                Vy_raw.append(vy)
                 
-    if len(V_raw) == 0:
+    if len(Vx_raw) == 0 or len(Vy_raw) == 0:
         raise ValueError("No admissible virtual fields could be constructed with given boundary conditions.")
         
-    V_mat = np.array(V_raw)  # (M_raw, 2 * N_nodes)
+    # Orthonormalize X and Y bases separately on their respective free DOFs
+    Qx, Rx = np.linalg.qr(np.array(Vx_raw).T)
+    Qy, Ry = np.linalg.qr(np.array(Vy_raw).T)
     
-    # Orthonormalize via QR decomposition
-    Q, R = np.linalg.qr(V_mat.T)  # Q is (2 * N_nodes, rank), orthonormal columns
-    tol = 1e-10 * np.max(np.abs(np.diag(R)))
-    rank = int(np.sum(np.abs(np.diag(R)) > tol))
-    Q = Q[:, :rank]
+    tol_x = 1e-10 * np.max(np.abs(np.diag(Rx)))
+    tol_y = 1e-10 * np.max(np.abs(np.diag(Ry)))
+    rank_x = int(np.sum(np.abs(np.diag(Rx)) > tol_x))
+    rank_y = int(np.sum(np.abs(np.diag(Ry)) > tol_y))
     
-    # Reshape back to (M, N_nodes, 2)
-    V_basis = Q.T.reshape(rank, len(x), 2)
+    Qx = Qx[:, :rank_x]
+    Qy = Qy[:, :rank_y]
+    
+    # Construct Vx_basis where y-component is strictly 0: (rank_x, N_nodes, 2)
+    # Construct Vy_basis where x-component is strictly 0: (rank_y, N_nodes, 2)
+    Vx_basis = np.stack([Qx.T, np.zeros((rank_x, len(x)))], axis=-1)
+    Vy_basis = np.stack([np.zeros((rank_y, len(x))), Qy.T], axis=-1)
+    
+    # Concatenate into (M, N_nodes, 2) where first rank_x are X and remaining rank_y are Y
+    V_basis = np.concatenate([Vx_basis, Vy_basis], axis=0)
     return jnp.array(V_basis, dtype=jnp.float64)
 
 
