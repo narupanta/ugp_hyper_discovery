@@ -34,6 +34,7 @@ class GPRawParams(NamedTuple):
     raw_aniso_z: jnp.ndarray = None
     raw_aniso_theta_mean: jnp.ndarray = None
     raw_aniso_theta_var: jnp.ndarray = None
+    log_sigma_global: jnp.ndarray = None
 
 class GPParams(NamedTuple) :
     dev_ls: jnp.ndarray = None
@@ -52,6 +53,7 @@ class GPParams(NamedTuple) :
     sigma_free_y: jnp.ndarray = None
     sigma_fix_x: jnp.ndarray = None
     sigma_fix_y: jnp.ndarray = None
+    sigma_global: jnp.ndarray = None
 
     aniso_ls: jnp.ndarray = None
     aniso_sig: jnp.ndarray = None

@@ -208,6 +208,8 @@ COVARIANCE_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')
 NORMALIZE_ELL=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('normalize_ell', 0))" 2>/dev/null || echo "0")
 U_VAR_ANCHOR=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('u_var_anchor', '1e-12'))" 2>/dev/null || echo "1e-12")
 KZZ_JITTER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('kzz_jitter', '1e-8'))" 2>/dev/null || echo "1e-8")
+VFM_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vfm_mode', 'linear_triangle'))" 2>/dev/null || echo "linear_triangle")
+VF_ORDER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vf_order', 2))" 2>/dev/null || echo "2")
 
 # Distillation params
 DIST_MODEL=$(get_cfg "['distilled_material_model']")
@@ -345,6 +347,8 @@ for SEED in $SEEDS_LIST; do
             --normalize_ell "$NORMALIZE_ELL" \
             --u_var_anchor "$U_VAR_ANCHOR" \
             --kzz_jitter "$KZZ_JITTER" \
+            --vfm_mode "$VFM_MODE" \
+            --vf_order "$VF_ORDER" \
             --seed "$SEED" \
             --batch_dir "$EXTRACT_DIR" \
             $MAT_EXTRA_ARGS

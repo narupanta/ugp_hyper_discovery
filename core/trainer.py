@@ -15,13 +15,14 @@ jax.config.update("jax_enable_x64", True)
 
 
 class HyperelasticGPTrainer:
-    def __init__(self, model: SparseHyperelasticityGP, initial_params, loss_fn, opt_state, optimizer, save_path, true_mat_model, I_z, I_all, min_dev, min_vol, max_dev, max_vol, freeze_fn=None, seed=None):
+    def __init__(self, model: SparseHyperelasticityGP, initial_params, loss_fn, opt_state, optimizer, save_path, true_mat_model, I_z, I_all, min_dev, min_vol, max_dev, max_vol, freeze_fn=None, seed=None, vfm_mode: str = "linear_triangle"):
         self.model = model
         self.params = initial_params
         self.opt_state = opt_state
         self.optimizer = optimizer
         self.save_path = save_path
         self.true_mat_model = true_mat_model
+        self.vfm_mode = vfm_mode
         
         import json
         with open(f"{self.save_path}/metadata.json", "w") as f:
@@ -29,7 +30,8 @@ class HyperelasticGPTrainer:
                 "covariance_mode": getattr(self.model, "covariance_mode", "diag"),
                 "pos_var_mean": 1,
                 "augmented_var_dist": 1,
-                "normalize_ell": getattr(self.model, "normalize_ell", 0)
+                "normalize_ell": getattr(self.model, "normalize_ell", 0),
+                "vfm_mode": vfm_mode
             }
             if seed is not None:
                 meta["seed"] = seed
@@ -75,7 +77,8 @@ class HyperelasticGPTrainer:
             "dev_u_mean": [], "dev_u_var": [], "vol_u_mean": [], "vol_u_var": [], "dev_z": [], "vol_z": [],
             "aniso_gp_sigma_scaling": [], "aniso_gp_lengthscales": [],
             "aniso_u_mean": [], "aniso_u_var": [], "aniso_z": [], "aniso_theta_mean": [], "aniso_theta_var": [],
-            "sigma_free_x": [], "sigma_free_y": [], "sigma_fix_x": [], "sigma_fix_y": []
+            "sigma_free_x": [], "sigma_free_y": [], "sigma_fix_x": [], "sigma_fix_y": [],
+            "sigma_global": []
         }
         self.steps_history = []
         self.best_loss = float('inf')
@@ -119,6 +122,8 @@ class HyperelasticGPTrainer:
         self.params_hist["sigma_free_y"].append(cur_params.sigma_free_y)
         self.params_hist["sigma_fix_x"].append(cur_params.sigma_fix_x)
         self.params_hist["sigma_fix_y"].append(cur_params.sigma_fix_y)
+        if getattr(cur_params, "sigma_global", None) is not None:
+            self.params_hist["sigma_global"].append(cur_params.sigma_global)
         
         if hasattr(cur_params, "aniso_sig"):
             self.params_hist["aniso_gp_sigma_scaling"].append(cur_params.aniso_sig)

@@ -159,6 +159,7 @@ class SparseHyperelasticityGP:
             sigma_free_y=to_f64(jnp.exp(p.log_sigma_free_y)),
             sigma_fix_x=to_f64(jnp.exp(p.log_sigma_fix_x)),
             sigma_fix_y=to_f64(jnp.exp(p.log_sigma_fix_y)),
+            sigma_global=to_f64(jnp.exp(p.log_sigma_global)) if getattr(p, "log_sigma_global", None) is not None else None,
             
             **kwargs
         )

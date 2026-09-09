@@ -77,6 +77,11 @@ def parse_args():
     parser.add_argument('--normalize_ell', type=int, default=0, choices=[0, 1], help="Whether to normalize expected log-likelihood by degrees of freedom to prevent uncertainty collapse (1) or use unnormalized sum (0)")
     parser.add_argument('--u_var_anchor', type=float, default=1e-12, help="Anchor point variance (default 1e-12)")
     parser.add_argument('--kzz_jitter', type=float, default=1e-8, help="Numerical jitter added to Kzz diagonal (default 1e-8)")
+    parser.add_argument('--vfm_mode', type=str, default="linear_triangle",
+                        choices=["linear_triangle", "global_vf", "mix"],
+                        help="VFM loss mode: 'linear_triangle', 'global_vf', or 'mix'")
+    parser.add_argument('--vf_order', type=int, default=2,
+                        help="Polynomial order for kinematically admissible virtual fields basis (default: 2)")
 
     return parser.parse_args()
 
@@ -223,6 +228,7 @@ if __name__ == "__main__" :
     f2x2 = prep_data["F"][train_load_steps_indices]
     cells = prep_data["cells"]
     node_type = np.asarray(prep_data["node_type"])
+    mesh_pos = np.asarray(prep_data["mesh_pos"])
     print(f"[DATASET] Dataset successfully loaded: {cells.shape[0]} elements, {node_type.shape[0]} nodes, {prep_data['F'].shape[0]} total load steps.") 
 
     # Data use in VFM
@@ -415,6 +421,7 @@ if __name__ == "__main__" :
                 log_sigma_free_y=jnp.log(jnp.array(1.0)),
                 log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 0]),
                 log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1]),
+                log_sigma_global=jnp.log(jnp.array(1.0)),
                 **aniso_kwargs
             )
         else :
@@ -440,6 +447,7 @@ if __name__ == "__main__" :
                 log_sigma_free_y=jnp.log(jnp.array(1.0)),
                 log_sigma_fix_x=jax.random.normal(k3, (load_noise_std_steps.shape[0],)),
                 log_sigma_fix_y=jax.random.normal(k4, (load_noise_std_steps.shape[0],)),
+                log_sigma_global=jnp.log(jnp.array(1.0)),
                 **aniso_kwargs
             )
     
@@ -471,6 +479,13 @@ if __name__ == "__main__" :
 
 
 
+    V_basis = None
+    if args.vfm_mode in ["global_vf", "mix"]:
+        from core.virtual_fields import build_kinematic_virtual_fields
+        print(f"Building kinematically admissible virtual fields (order={args.vf_order}, mode={args.vfm_mode})...")
+        V_basis = build_kinematic_virtual_fields(mesh_pos, node_type, order=args.vf_order)
+        print(f"Constructed {V_basis.shape[0]} orthonormal virtual fields.")
+
     def loss_fn(p, k):
         k_theta, k_loss = jax.random.split(k)
         if args.model_mode in ["aniso_unk_fiber", "aniso_unk_fiber_neg"]:
@@ -498,7 +513,11 @@ if __name__ == "__main__" :
             )
         else:
             local_model = model
-        return total_stochastic_loss(p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA, k_loss, number_of_mci_sampling, args.normalize_ell)
+        return total_stochastic_loss(
+            p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA,
+            k_loss, number_of_mci_sampling, args.normalize_ell,
+            vfm_mode=args.vfm_mode, V_basis=V_basis
+        )
 
     if args.final_learning_rate is not None and args.final_learning_rate != learning_rate:
         schedule = optax.cosine_decay_schedule(
@@ -527,7 +546,8 @@ if __name__ == "__main__" :
         max_dev=max_dev,
         max_vol=max_vol,
         freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode),
-        seed=args.seed
+        seed=args.seed,
+        vfm_mode=args.vfm_mode
     )
 
     log_info_str = f"{train_load_steps_indices}, {material_model_name}"
@@ -617,10 +637,12 @@ if __name__ == "__main__" :
         "disp_noise": float(args.disp_noise),
         "load_noise": float(args.load_noise),
         "fiber_direction": pred_deg,
+        "vfm_mode": args.vfm_mode,
         "sigma_free_x": float(phys_params.sigma_free_x),
         "sigma_free_y": float(phys_params.sigma_free_y),
         "sigma_fix_x": np.array(phys_params.sigma_fix_x).tolist(),
         "sigma_fix_y": np.array(phys_params.sigma_fix_y).tolist(),
+        "sigma_global": float(phys_params.sigma_global) if phys_params.sigma_global is not None else None,
     }
     
     with open(os.path.join(save_path, "extraction_metrics.json"), "w") as f:

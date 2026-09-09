@@ -12,10 +12,12 @@ from .model import SparseHyperelasticityGP
 
 def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, cells: jnp.ndarray, 
                           n_nodes: int, f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, dNdX: jnp.ndarray, 
-                          dA: jnp.ndarray, key: jnp.ndarray, n_s: int, normalize_ell: int = 0) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+                          dA: jnp.ndarray, key: jnp.ndarray, n_s: int, normalize_ell: int = 0,
+                          vfm_mode: str = "linear_triangle", V_basis: jnp.ndarray = None) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
     """
     Computes the variational stochastic VFM loss and KL divergence ELBO objective.
     Strictly preserves functional purity without mutating stateful class instance attributes.
+    Supports vfm_mode: 'linear_triangle', 'global_vf', or 'mix'.
     """
     params = model.load_params(p)
     gpweight = model.precompute_weights_from_loaded(params)
@@ -32,9 +34,9 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
     piola2x2_cells = piola_sampling(f3x3, subkey)
 
     # vmapped_ell maps over Monte Carlo samples
-    vmapped_ell = jax.vmap(ell, in_axes=(None, None, None, None, None, None, None, 0, None, None, None))
+    vmapped_ell = jax.vmap(ell, in_axes=(None, None, None, None, None, None, None, 0, None, None, None, None, None))
     ell_, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_free_loss, sum_fix_loss) = vmapped_ell(
-        params, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA, normalize_ell
+        params, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA, normalize_ell, vfm_mode, V_basis
     )
     
     kl_div = model.kl_divergence(params=params, weights=gpweight)
@@ -46,42 +48,72 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
 
 def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.ndarray, n_nodes: int, 
         f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, piola2x2_cells: jnp.ndarray, dNdX: jnp.ndarray, dA: jnp.ndarray,
-        normalize_ell: int = 0):
+        normalize_ell: int = 0, vfm_mode: str = "linear_triangle", V_basis: jnp.ndarray = None):
     sigma_free_x = jnp.maximum(p.sigma_free_x, 1e-6)
     sigma_free_y = jnp.maximum(p.sigma_free_y, 1e-6)
     sigma_fix_x = jnp.maximum(sigma_fix_x, 1e-3)
     sigma_fix_y = jnp.maximum(sigma_fix_y, 1e-3)
 
+    sigma_global = getattr(p, "sigma_global", None)
+    if sigma_global is None:
+        sigma_global = 0.5 * (sigma_free_x + sigma_free_y)
+    sigma_global = jnp.maximum(sigma_global, 1e-6)
+
     # vmap over load steps for the VFM loss
-    free_x_loss, free_y_loss, fix_x_loss, fix_y_loss = jax.vmap(vfm_loss, in_axes=(None, None, 0, None, 0, None, None))(
-        cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA
-    )
+    free_x_loss, free_y_loss, fix_x_loss, fix_y_loss, global_loss = jax.vmap(
+        vfm_loss, in_axes=(None, None, 0, None, 0, None, None, None)
+    )(cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA, V_basis)
 
     n_steps = free_x_loss.shape[0]
     n_freedofs_x = free_x_loss.shape[1]
     n_freedofs_y = free_y_loss.shape[1]
+    n_vfs = global_loss.shape[1]
 
+    # Reaction force log-likelihoods (boundary traction equilibrium)
+    if normalize_ell == 1:
+        fix_x_log_likelihood = (1.0 / n_steps) * jnp.sum(- (1.0 / (2 * (sigma_fix_x**2))) * (fix_x_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_x**2)))
+        fix_y_log_likelihood = (1.0 / n_steps) * jnp.sum(- (1.0 / (2 * (sigma_fix_y**2))) * (fix_y_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_y**2)))
+    else:
+        fix_x_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_x**2))) * (fix_x_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_x**2)))
+        fix_y_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_y**2))) * (fix_y_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_y**2)))
+
+    # Nodal residuals log-likelihood (free DOFs)
     if normalize_ell == 1:
         n_free_total_x = n_steps * n_freedofs_x
         n_free_total_y = n_steps * n_freedofs_y
         free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * (jnp.sum(free_x_loss**2) / n_free_total_x) - 0.5 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
         free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * (jnp.sum(free_y_loss**2) / n_free_total_y) - 0.5 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
-        
-        fix_x_log_likelihood = (1.0 / n_steps) * jnp.sum(- (1.0 / (2 * (sigma_fix_x**2))) * (fix_x_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_x**2)))
-        fix_y_log_likelihood = (1.0 / n_steps) * jnp.sum(- (1.0 / (2 * (sigma_fix_y**2))) * (fix_y_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_y**2)))
     else:
         free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2) - (n_steps * n_freedofs_x) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
         free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2) - (n_steps * n_freedofs_y) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
-        
-        fix_x_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_x**2))) * (fix_x_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_x**2)))
-        fix_y_log_likelihood = jnp.sum(- (1.0 / (2 * (sigma_fix_y**2))) * (fix_y_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_y**2)))
 
-    expected_log_likelihood = free_x_log_likelihood + free_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
-    return expected_log_likelihood, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, jnp.sum(free_x_loss**2) + jnp.sum(free_y_loss**2), jnp.sum(fix_x_loss**2) + jnp.sum(fix_y_loss**2))
+    # Global virtual fields log-likelihood
+    if normalize_ell == 1:
+        n_global_total = n_steps * n_vfs
+        global_log_likelihood = - (1.0 / (2 * (sigma_global**2))) * (jnp.sum(global_loss**2) / n_global_total) - 0.5 * jnp.log(2 * jnp.pi * (sigma_global**2))
+    else:
+        global_log_likelihood = - (1.0 / (2 * (sigma_global**2))) * jnp.sum(global_loss**2) - (n_steps * n_vfs) / 2.0 * jnp.log(2 * jnp.pi * (sigma_global**2))
+
+    sum_nodal_loss = jnp.sum(free_x_loss**2) + jnp.sum(free_y_loss**2)
+    sum_global_loss = jnp.sum(global_loss**2)
+    sum_fix_loss = jnp.sum(fix_x_loss**2) + jnp.sum(fix_y_loss**2)
+
+    if vfm_mode == "linear_triangle":
+        expected_log_likelihood = free_x_log_likelihood + free_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
+        return expected_log_likelihood, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_nodal_loss, sum_fix_loss)
+    elif vfm_mode == "global_vf":
+        expected_log_likelihood = global_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
+        return expected_log_likelihood, (global_log_likelihood, jnp.array(0.0, dtype=jnp.float64), fix_x_log_likelihood, fix_y_log_likelihood, sum_global_loss, sum_fix_loss)
+    elif vfm_mode == "mix":
+        expected_log_likelihood = global_log_likelihood + free_x_log_likelihood + free_y_log_likelihood + (fix_x_log_likelihood + fix_y_log_likelihood)
+        return expected_log_likelihood, (global_log_likelihood, free_x_log_likelihood + free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_global_loss, sum_nodal_loss)
+    else:
+        raise ValueError(f"Unknown vfm_mode: {vfm_mode}. Expected 'linear_triangle', 'global_vf', or 'mix'.")
 
 
 def vfm_loss(cells: jnp.ndarray, n_nodes: int, f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, 
-             piola2x2: jnp.ndarray, dNdx: jnp.ndarray, dA: jnp.ndarray):
+             piola2x2: jnp.ndarray, dNdx: jnp.ndarray, dA: jnp.ndarray,
+             V_basis: jnp.ndarray = None):
     # internal element nodal forces: (C,3,2)
     f_int_cell = jnp.einsum("cij, cnj -> cin", piola2x2, dNdx) * dA[:, None, None]
     f_int_cell = jnp.swapaxes(f_int_cell, 1, 2)  # (C,3,2)
@@ -101,7 +133,12 @@ def vfm_loss(cells: jnp.ndarray, n_nodes: int, f_neu_nodes: jnp.ndarray, node_ty
     fix_x_loss = jnp.sum(R_nodes[is_fix_x, 0]) + jnp.sum(f_neu_nodes[~is_fix_x, 0])
     fix_y_loss = jnp.sum(R_nodes[is_fix_y, 1]) + jnp.sum(f_neu_nodes[~is_fix_y, 1])
 
-    return free_x_loss, free_y_loss, fix_x_loss, fix_y_loss
+    if V_basis is not None:
+        global_loss = jnp.einsum("mid,id->m", V_basis, R_nodes)
+    else:
+        global_loss = jnp.zeros((1,), dtype=jnp.float64)
+
+    return free_x_loss, free_y_loss, fix_x_loss, fix_y_loss, global_loss
 
 
 def neumann_cell_force(coords_el: jnp.ndarray, onehot_types_el: jnp.ndarray, t3: float, t4: float):
