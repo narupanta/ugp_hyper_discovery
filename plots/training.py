@@ -821,17 +821,18 @@ class ExtractionR2Metrics(tuple):
     """
     3-tuple (r2, rmse, coverage) ensuring backwards compatibility for callers
     expecting a 3-tuple return value, while exposing .train_metrics, .val_metrics,
-    and .by_component for detailed evaluation.
+    .test_metrics, and .by_component for detailed evaluation.
     """
-    def __new__(cls, r2, rmse, coverage, train_metrics=None, val_metrics=None, by_component=None):
+    def __new__(cls, r2, rmse, coverage, train_metrics=None, val_metrics=None, test_metrics=None, by_component=None):
         return super().__new__(cls, (r2, rmse, coverage))
 
-    def __init__(self, r2, rmse, coverage, train_metrics=None, val_metrics=None, by_component=None):
+    def __init__(self, r2, rmse, coverage, train_metrics=None, val_metrics=None, test_metrics=None, by_component=None):
         self.r2 = r2
         self.rmse = rmse
         self.coverage = coverage
         self.train_metrics = train_metrics or {}
         self.val_metrics = val_metrics or {}
+        self.test_metrics = test_metrics or {}
         self.by_component = by_component or {}
 
 
@@ -848,20 +849,24 @@ def _format_step_indices(steps):
         return f"{steps[0]}...{steps[-1]}"
 
 
-def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_steps=None, val_steps=None):
-    """Plots parity and computes R2/RMSE/Coverage metrics across training and validation steps."""
+def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_steps=None, val_steps=None, test_steps=None):
+    """Plots parity and computes R2/RMSE/Coverage metrics across training, validation (calibration), and test (extrapolation) steps."""
     apply_style()
-    print("Generating Training & Validation Data R2 Plot...")
+    print("Generating Training, Validation & Test Data R2 Plot...")
     num_steps = F_train_full.shape[0]
 
-    # Resolve train_steps and val_steps from config files if omitted
-    if (val_steps is None or train_steps is None) and save_path:
+    # Resolve train_steps, val_steps, and test_steps from config files if omitted
+    if (val_steps is None or train_steps is None or test_steps is None) and save_path:
         for cfg_file in ["recipe_config.yaml", "config.yaml", "config.json"]:
             cfg_path = os.path.join(save_path, cfg_file)
+            if not os.path.exists(cfg_path):
+                parent_cfg = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(save_path))), cfg_file)
+                if os.path.exists(parent_cfg):
+                    cfg_path = parent_cfg
             if os.path.exists(cfg_path):
                 try:
                     with open(cfg_path, "r") as f:
-                        if cfg_file.endswith(".json"):
+                        if cfg_path.endswith(".json"):
                             cfg = json.load(f)
                         else:
                             cfg = yaml.safe_load(f)
@@ -870,10 +875,20 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
                                 val_steps = cfg["val_load_steps_indices"]
                             if train_steps is None and "train_load_steps_indices" in cfg:
                                 train_steps = cfg["train_load_steps_indices"]
-                        if val_steps is not None and train_steps is not None:
+                            if test_steps is None and "test_load_steps_indices" in cfg:
+                                test_steps = cfg["test_load_steps_indices"]
+                        if val_steps is not None and train_steps is not None and test_steps is not None:
                             break
                 except Exception:
                     pass
+
+    if test_steps is not None:
+        if isinstance(test_steps, (int, float)):
+            test_steps = [int(test_steps)]
+        else:
+            test_steps = [int(s) for s in test_steps if int(s) < num_steps]
+    else:
+        test_steps = []
 
     if val_steps is not None:
         if isinstance(val_steps, (int, float)):
@@ -883,22 +898,22 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
     else:
         val_steps = []
 
+    test_set = set(test_steps)
+    val_set = set(val_steps) - test_set
+
     if train_steps is not None and len(train_steps) > 0:
         train_steps_list = [int(s) for s in train_steps if int(s) < num_steps]
-        start_step = min(train_steps_list)
-        if len(val_steps) == 0 and max(train_steps_list) < num_steps - 1:
-            val_steps = list(range(max(train_steps_list) + 1, num_steps))
+        train_set = set(train_steps_list) - val_set - test_set
     else:
-        start_step = 0
+        train_set = set(range(num_steps)) - val_set - test_set
 
-    val_set = set(val_steps)
+    train_steps_clean = [s for s in range(num_steps) if s in train_set]
     val_steps_clean = [s for s in range(num_steps) if s in val_set]
-    train_steps_clean = [s for s in range(start_step, num_steps) if s not in val_set]
-    if len(train_steps_clean) == 0:
-        train_steps_clean = [s for s in range(num_steps) if s not in val_set]
+    test_steps_clean = [s for s in range(num_steps) if s in test_set]
 
     train_steps_str = _format_step_indices(train_steps_clean)
     val_steps_str = _format_step_indices(val_steps_clean)
+    test_steps_str = _format_step_indices(test_steps_clean)
 
     has_aniso = (hasattr(learned_gp, 'is_anisotropic') and learned_gp.is_anisotropic) and hasattr(true_model, 'psi_aniso')
 
@@ -931,6 +946,7 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
     comp_metrics = {}
     ret_train = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
     ret_val = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
+    ret_test = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
     ret_overall = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
 
     def compute_metrics(y_t_list, y_m_list, y_s_list):
@@ -955,12 +971,14 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
 
         train_true, train_mean, train_std = [], [], []
         val_true, val_mean, val_std = [], [], []
+        test_true, test_mean, test_std = [], [], []
 
         has_train_lbl = False
         has_val_lbl = False
+        has_test_lbl = False
 
         for step in range(num_steps):
-            if step not in train_steps_clean and step not in val_steps_clean:
+            if step not in train_set and step not in val_set and step not in test_set:
                 continue
 
             F_step = F_train_full[step]
@@ -969,15 +987,24 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
             mean_psi = dist.mean
             std_psi = jnp.sqrt(dist.var)
 
-            if step in val_set:
+            if step in test_set:
+                test_true.append(true_psi)
+                test_mean.append(mean_psi)
+                test_std.append(std_psi)
+                lbl = f"Test Steps ({test_steps_str})" if not has_test_lbl else ""
+                has_test_lbl = True
+                ax.errorbar(true_psi, mean_psi, yerr=1.96 * std_psi, fmt='o',
+                            color='#d62728', ecolor='#e45756', alpha=0.40,
+                            markersize=3.5, elinewidth=0.85, label=lbl)
+            elif step in val_set:
                 val_true.append(true_psi)
                 val_mean.append(mean_psi)
                 val_std.append(std_psi)
-                lbl = f"Val Steps ({val_steps_str})" if not has_val_lbl else ""
+                lbl = f"Val/Calib Steps ({val_steps_str})" if not has_val_lbl else ""
                 has_val_lbl = True
                 ax.errorbar(true_psi, mean_psi, yerr=1.96 * std_psi, fmt='o',
-                            color='#d62728', ecolor='#e45756', alpha=0.35,
-                            markersize=3, elinewidth=0.8, label=lbl)
+                            color='#1f77b4', ecolor='#4ba3e3', alpha=0.35,
+                            markersize=3.2, elinewidth=0.8, label=lbl)
             else:
                 train_true.append(true_psi)
                 train_mean.append(mean_psi)
@@ -986,14 +1013,19 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
                 has_train_lbl = True
                 ax.errorbar(true_psi, mean_psi, yerr=1.96 * std_psi, fmt='o',
                             color='gray', ecolor='#b0b0b0', alpha=0.25,
-                            markersize=3, elinewidth=0.8, label=lbl)
+                            markersize=3.0, elinewidth=0.8, label=lbl)
 
         r2_tr, rmse_tr, cov_tr = compute_metrics(train_true, train_mean, train_std)
         r2_v, rmse_v, cov_v = compute_metrics(val_true, val_mean, val_std)
-        r2_tot, rmse_tot, cov_tot = compute_metrics(train_true + val_true, train_mean + val_mean, train_std + val_std)
+        r2_te, rmse_te, cov_te = compute_metrics(test_true, test_mean, test_std)
+        r2_tot, rmse_tot, cov_tot = compute_metrics(
+            train_true + val_true + test_true,
+            train_mean + val_mean + test_mean,
+            train_std + val_std + test_std
+        )
 
-        all_pts_true = train_true + val_true
-        all_pts_mean = train_mean + val_mean
+        all_pts_true = train_true + val_true + test_true
+        all_pts_mean = train_mean + val_mean + test_mean
         if len(all_pts_true) > 0:
             cat_true = jnp.concatenate(all_pts_true)
             cat_mean = jnp.concatenate(all_pts_mean)
@@ -1004,7 +1036,7 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
 
         box_lines = []
         if len(train_true) > 0:
-            box_lines.append(f"Train (Steps {train_steps_str}):")
+            box_lines.append(f"Train ({train_steps_str}):")
             box_lines.append(f"  $R^2$: {r2_tr:.4f}")
             box_lines.append(f"  RMSE: {rmse_tr:.4f}")
             box_lines.append(f"  EC: {cov_tr:.1f}%")
@@ -1012,14 +1044,22 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
         if len(val_true) > 0:
             if len(box_lines) > 0:
                 box_lines.append("")
-            box_lines.append(f"Val (Steps {val_steps_str}):")
+            box_lines.append(f"Val ({val_steps_str}):")
             box_lines.append(f"  $R^2$: {r2_v:.4f}")
             box_lines.append(f"  RMSE: {rmse_v:.4f}")
             box_lines.append(f"  EC: {cov_v:.1f}%")
 
+        if len(test_true) > 0:
+            if len(box_lines) > 0:
+                box_lines.append("")
+            box_lines.append(f"Test ({test_steps_str}):")
+            box_lines.append(f"  $R^2$: {r2_te:.4f}")
+            box_lines.append(f"  RMSE: {rmse_te:.4f}")
+            box_lines.append(f"  EC: {cov_te:.1f}%")
+
         box_text = "\n".join(box_lines)
         ax.text(0.05, 0.95, box_text, transform=ax.transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='#cccccc'), fontsize=10.5)
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='#cccccc'), fontsize=9.0)
 
         ax.set_xlabel(f"True {comp_label}", fontsize=11)
         ax.set_ylabel(f"Predicted GP Mean {comp_label}", fontsize=11)
@@ -1030,11 +1070,13 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
         comp_metrics[comp_name] = {
             "train": {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr},
             "val": {"r2": r2_v, "rmse": rmse_v, "ec": cov_v},
+            "test": {"r2": r2_te, "rmse": rmse_te, "ec": cov_te},
             "overall": {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot}
         }
         if comp_name == "Total Energy":
             ret_train = {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr, "steps": train_steps_clean}
             ret_val = {"r2": r2_v, "rmse": rmse_v, "ec": cov_v, "steps": val_steps_clean}
+            ret_test = {"r2": r2_te, "rmse": rmse_te, "ec": cov_te, "steps": test_steps_clean}
             ret_overall = {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot, "steps": list(range(num_steps))}
 
     plt.tight_layout()
@@ -1048,7 +1090,7 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
 
     return ExtractionR2Metrics(
         primary_r2, primary_rmse, primary_cov,
-        train_metrics=ret_train, val_metrics=ret_val, by_component=comp_metrics
+        train_metrics=ret_train, val_metrics=ret_val, test_metrics=ret_test, by_component=comp_metrics
     )
 
 
@@ -1158,27 +1200,6 @@ def plot_domain_invariants(
         for k, v in calc_true.items():
             true_invariants[k] = np.asarray(v)
 
-    # Compute or retrieve raw un-filtered invariants if filtering was applied
-    raw_invariants = {}
-    has_filtered = ("raw_I1_bar" in prep_data and prep_data["raw_I1_bar"] is not None) or (
-        "u_raw" in prep_data and prep_data["u_raw"] is not None
-    )
-    if "raw_I1_bar" in prep_data and prep_data["raw_I1_bar"] is not None:
-        raw_invariants["I1_bar"] = np.asarray(prep_data["raw_I1_bar"][step_idx])
-        raw_invariants["I2_bar"] = np.asarray(prep_data["raw_I2_bar"][step_idx])
-        raw_invariants["J"] = np.asarray(prep_data["raw_J"][step_idx])
-        if "raw_I4_bar" in prep_data and prep_data["raw_I4_bar"] is not None:
-            raw_invariants["I4_bar"] = np.asarray(prep_data["raw_I4_bar"][step_idx])
-        if "raw_I6_bar" in prep_data and prep_data["raw_I6_bar"] is not None:
-            raw_invariants["I6_bar"] = np.asarray(prep_data["raw_I6_bar"][step_idx])
-        if "raw_I8_bar" in prep_data and prep_data["raw_I8_bar"] is not None:
-            raw_invariants["I8_bar"] = np.asarray(prep_data["raw_I8_bar"][step_idx])
-    elif "F_raw" in prep_data and prep_data["F_raw"] is not None:
-        F_raw_step = prep_data["F_raw"][step_idx]
-        calc_raw = compute_all_invariants(F_raw_step, a0=a0, a1=a1)
-        for k, v in calc_raw.items():
-            raw_invariants[k] = np.asarray(v)
-
     # Determine list of invariants to plot
     inv_keys = ["I1_bar", "I2_bar", "J"]
     if is_aniso:
@@ -1213,84 +1234,46 @@ def plot_domain_invariants(
 
     # =========================================================================
     # 1. Plot Invariant Fields on Domain
-    # If filtering is active: shows Row 0 (Raw Noisy) vs Row 1 (Filtered Smoothed)
     # =========================================================================
     apply_style()
     n_items = len(inv_keys)
 
-    if has_filtered and all(k in raw_invariants for k in inv_keys):
-        # 2-Row Layout: Raw Noisy vs Filtered Smoothed
-        fig, axes = plt.subplots(2, n_items, figsize=(4.8 * n_items, 8.8), squeeze=False)
-        fig.suptitle(
-            f"Preprocessed Invariant Fields on Domain (Step {step_idx})\n"
-            f"Top: Raw Noisy ($u_{{\\mathrm{{raw}}}}$) | Bottom: Filtered Smoothed ($u_{{\\mathrm{{filt}}}}$)",
-            fontsize=13, y=0.99
-        )
-        for col_idx, key in enumerate(inv_keys):
-            raw_v = raw_invariants[key]
-            filt_v = obs_invariants[key]
-            cmap = cmaps_map.get(key, "viridis")
-            vmin = min(float(np.min(raw_v)), float(np.min(filt_v)))
-            vmax = max(float(np.max(raw_v)), float(np.max(filt_v)))
-
-            # Row 0: Raw Noisy
-            ax_r = axes[0, col_idx]
-            tpc_r = ax_r.tripcolor(triangulation, facecolors=raw_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
-            cbar_r = fig.colorbar(tpc_r, ax=ax_r, fraction=0.046, pad=0.04)
-            cbar_r.ax.tick_params(labelsize=8)
-            ax_r.set_aspect('equal')
-            ax_r.set_title(f"Raw Noisy {short_titles_map.get(key, key)}", fontsize=10.5, pad=5)
-            ax_r.set_xlabel("X [mm]", fontsize=9)
-            ax_r.set_ylabel("Y [mm]", fontsize=9)
-            ax_r.tick_params(labelsize=8)
-
-            # Row 1: Filtered Smoothed
-            ax_f = axes[1, col_idx]
-            tpc_f = ax_f.tripcolor(triangulation, facecolors=filt_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
-            cbar_f = fig.colorbar(tpc_f, ax=ax_f, fraction=0.046, pad=0.04)
-            cbar_f.ax.tick_params(labelsize=8)
-            ax_f.set_aspect('equal')
-            ax_f.set_title(f"Filtered Smoothed {short_titles_map.get(key, key)}", fontsize=10.5, pad=5)
-            ax_f.set_xlabel("X [mm]", fontsize=9)
-            ax_f.set_ylabel("Y [mm]", fontsize=9)
-            ax_f.tick_params(labelsize=8)
+    # Standard Layout: 1-row (iso) or 2-row (aniso) of observed fields
+    if n_items == 3:
+        nrows, ncols = 1, 3
+        figsize = (15.5, 4.8)
+    elif n_items == 4:
+        nrows, ncols = 2, 2
+        figsize = (11.0, 9.2)
+    elif n_items <= 6:
+        nrows, ncols = 2, 3
+        figsize = (15.5, 9.2)
     else:
-        # Standard Layout: 1-row (iso) or 2-row (aniso) of observed fields
-        if n_items == 3:
-            nrows, ncols = 1, 3
-            figsize = (15.5, 4.8)
-        elif n_items == 4:
-            nrows, ncols = 2, 2
-            figsize = (11.0, 9.2)
-        elif n_items <= 6:
-            nrows, ncols = 2, 3
-            figsize = (15.5, 9.2)
-        else:
-            ncols = 3
-            nrows = (n_items + 2) // 3
-            figsize = (5.2 * ncols, 4.6 * nrows)
+        ncols = 3
+        nrows = (n_items + 2) // 3
+        figsize = (5.2 * ncols, 4.6 * nrows)
 
-        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
-        fig.suptitle(f"Observed Strain Invariant Fields on Domain (Noisy $u_{{\\mathrm{{obs}}}}$, Step {step_idx})", fontsize=13.5, y=0.98)
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    fig.suptitle(f"Observed Strain Invariant Fields on Domain (Noisy $u_{{\\mathrm{{obs}}}}$, Step {step_idx})", fontsize=13.5, y=0.98)
 
-        for idx, key in enumerate(inv_keys):
-            r, c = divmod(idx, ncols)
-            ax = axes[r, c]
-            val = obs_invariants[key]
-            cmap = cmaps_map.get(key, "viridis")
+    for idx, key in enumerate(inv_keys):
+        r, c = divmod(idx, ncols)
+        ax = axes[r, c]
+        val = obs_invariants[key]
+        cmap = cmaps_map.get(key, "viridis")
 
-            tpc = ax.tripcolor(triangulation, facecolors=val, cmap=cmap, edgecolors='k', linewidth=0.15)
-            cbar = fig.colorbar(tpc, ax=ax, fraction=0.046, pad=0.04)
-            cbar.ax.tick_params(labelsize=8.5)
-            ax.set_aspect('equal')
-            ax.set_title(titles_map.get(key, key), fontsize=10.5, pad=6)
-            ax.set_xlabel("X [mm]", fontsize=9.5)
-            ax.set_ylabel("Y [mm]", fontsize=9.5)
-            ax.tick_params(labelsize=8.5)
+        tpc = ax.tripcolor(triangulation, facecolors=val, cmap=cmap, edgecolors='k', linewidth=0.15)
+        cbar = fig.colorbar(tpc, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.tick_params(labelsize=8.5)
+        ax.set_aspect('equal')
+        ax.set_title(titles_map.get(key, key), fontsize=10.5, pad=6)
+        ax.set_xlabel("X [mm]", fontsize=9.5)
+        ax.set_ylabel("Y [mm]", fontsize=9.5)
+        ax.tick_params(labelsize=8.5)
 
-        for idx in range(n_items, nrows * ncols):
-            r, c = divmod(idx, ncols)
-            axes[r, c].set_visible(False)
+    for idx in range(n_items, nrows * ncols):
+        r, c = divmod(idx, ncols)
+        axes[r, c].set_visible(False)
 
     plt.tight_layout()
     out_pdf = os.path.join(save_path, "domain_invariants.pdf")
@@ -1301,94 +1284,44 @@ def plot_domain_invariants(
 
     # =========================================================================
     # 2. Side-by-Side Noise Comparison Plot
-    # If Ground Truth is available:
-    #   - 3 rows if filtered: True -> Raw Noisy -> Filtered Smoothed
-    #   - 2 rows if not filtered: True -> Observed Noisy
+    # 2 rows if Ground Truth is available: True Clean -> Observed Noisy
     # =========================================================================
     has_clean = all(k in true_invariants for k in inv_keys)
     if save_comparison and has_clean:
-        if has_filtered and all(k in raw_invariants for k in inv_keys):
-            # 3-row comparison: True -> Raw Noisy -> Filtered
-            fig_c, axes_c = plt.subplots(3, n_items, figsize=(4.8 * n_items, 12.8), squeeze=False)
-            fig_c.suptitle(
-                f"Noise & Filtering Impact on Domain Invariant Smoothness (Step {step_idx})\n"
-                f"Row 1: Ground Truth ($u_{{\\mathrm{{true}}}}$) | Row 2: Raw Noisy ($u_{{\\mathrm{{raw}}}}$) | Row 3: Filtered Smoothed ($u_{{\\mathrm{{filt}}}}$)",
-                fontsize=13, y=0.99
-            )
+        # 2-row comparison: True vs Observed
+        fig_c, axes_c = plt.subplots(2, n_items, figsize=(4.8 * n_items, 8.8), squeeze=False)
+        fig_c.suptitle(
+            f"Noise Impact on Invariant Field Smoothness (Step {step_idx})\n"
+            f"Top: Ground Truth ($u_{{\\mathrm{{true}}}}$) | Bottom: Observed with Measurement Noise ($u_{{\\mathrm{{obs}}}}$)",
+            fontsize=13, y=0.99
+        )
 
-            for col_idx, key in enumerate(inv_keys):
-                true_v = true_invariants[key]
-                raw_v = raw_invariants[key]
-                filt_v = obs_invariants[key]
-                cmap = cmaps_map.get(key, "viridis")
+        for col_idx, key in enumerate(inv_keys):
+            true_v = true_invariants[key]
+            obs_v = obs_invariants[key]
+            cmap = cmaps_map.get(key, "viridis")
 
-                vmin = min(float(np.min(true_v)), float(np.min(raw_v)), float(np.min(filt_v)))
-                vmax = max(float(np.max(true_v)), float(np.max(raw_v)), float(np.max(filt_v)))
-                raw_mae = float(np.mean(np.abs(raw_v - true_v)))
-                filt_mae = float(np.mean(np.abs(filt_v - true_v)))
+            vmin = min(float(np.min(true_v)), float(np.min(obs_v)))
+            vmax = max(float(np.max(true_v)), float(np.max(obs_v)))
+            mae = float(np.mean(np.abs(obs_v - true_v)))
 
-                # Row 0: True Clean
-                ax_t = axes_c[0, col_idx]
-                tpc_t = ax_t.tripcolor(triangulation, facecolors=true_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
-                fig_c.colorbar(tpc_t, ax=ax_t, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
-                ax_t.set_aspect('equal')
-                ax_t.set_title(f"True {short_titles_map.get(key, key)} (Clean, Smooth)", fontsize=10.5, pad=5)
-                ax_t.set_xlabel("X [mm]", fontsize=9); ax_t.set_ylabel("Y [mm]", fontsize=9)
-                ax_t.tick_params(labelsize=8)
+            # Row 0: True Clean
+            ax_t = axes_c[0, col_idx]
+            tpc_t = ax_t.tripcolor(triangulation, facecolors=true_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
+            fig_c.colorbar(tpc_t, ax=ax_t, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
+            ax_t.set_aspect('equal')
+            ax_t.set_title(f"True {short_titles_map.get(key, key)} (Clean, Smooth)", fontsize=10.5, pad=5)
+            ax_t.set_xlabel("X [mm]", fontsize=9); ax_t.set_ylabel("Y [mm]", fontsize=9)
+            ax_t.tick_params(labelsize=8)
 
-                # Row 1: Raw Noisy
-                ax_r = axes_c[1, col_idx]
-                tpc_r = ax_r.tripcolor(triangulation, facecolors=raw_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
-                fig_c.colorbar(tpc_r, ax=ax_r, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
-                ax_r.set_aspect('equal')
-                ax_r.set_title(f"Raw Noisy {short_titles_map.get(key, key)} (MAE: {raw_mae:.2e})", fontsize=10.5, pad=5)
-                ax_r.set_xlabel("X [mm]", fontsize=9); ax_r.set_ylabel("Y [mm]", fontsize=9)
-                ax_r.tick_params(labelsize=8)
-
-                # Row 2: Filtered Smoothed
-                ax_f = axes_c[2, col_idx]
-                tpc_f = ax_f.tripcolor(triangulation, facecolors=filt_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
-                fig_c.colorbar(tpc_f, ax=ax_f, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
-                ax_f.set_aspect('equal')
-                ax_f.set_title(f"Filtered {short_titles_map.get(key, key)} (MAE: {filt_mae:.2e})", fontsize=10.5, pad=5)
-                ax_f.set_xlabel("X [mm]", fontsize=9); ax_f.set_ylabel("Y [mm]", fontsize=9)
-                ax_f.tick_params(labelsize=8)
-
-        else:
-            # 2-row comparison: True vs Observed
-            fig_c, axes_c = plt.subplots(2, n_items, figsize=(4.8 * n_items, 8.8), squeeze=False)
-            fig_c.suptitle(
-                f"Noise Impact on Invariant Field Smoothness (Step {step_idx})\n"
-                f"Top: Ground Truth ($u_{{\\mathrm{{true}}}}$) | Bottom: Observed with Measurement Noise ($u_{{\\mathrm{{obs}}}}$)",
-                fontsize=13, y=0.99
-            )
-
-            for col_idx, key in enumerate(inv_keys):
-                true_v = true_invariants[key]
-                obs_v = obs_invariants[key]
-                cmap = cmaps_map.get(key, "viridis")
-
-                vmin = min(float(np.min(true_v)), float(np.min(obs_v)))
-                vmax = max(float(np.max(true_v)), float(np.max(obs_v)))
-                mae = float(np.mean(np.abs(obs_v - true_v)))
-
-                # Row 0: True Clean
-                ax_t = axes_c[0, col_idx]
-                tpc_t = ax_t.tripcolor(triangulation, facecolors=true_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
-                fig_c.colorbar(tpc_t, ax=ax_t, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
-                ax_t.set_aspect('equal')
-                ax_t.set_title(f"True {short_titles_map.get(key, key)} (Clean, Smooth)", fontsize=10.5, pad=5)
-                ax_t.set_xlabel("X [mm]", fontsize=9); ax_t.set_ylabel("Y [mm]", fontsize=9)
-                ax_t.tick_params(labelsize=8)
-
-                # Row 1: Observed Noisy
-                ax_o = axes_c[1, col_idx]
-                tpc_o = ax_o.tripcolor(triangulation, facecolors=obs_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
-                fig_c.colorbar(tpc_o, ax=ax_o, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
-                ax_o.set_aspect('equal')
-                ax_o.set_title(f"Observed {short_titles_map.get(key, key)} (Noisy, MAE: {mae:.2e})", fontsize=10.5, pad=5)
-                ax_o.set_xlabel("X [mm]", fontsize=9); ax_o.set_ylabel("Y [mm]", fontsize=9)
-                ax_o.tick_params(labelsize=8)
+            # Row 1: Observed Noisy
+            ax_o = axes_c[1, col_idx]
+            tpc_o = ax_o.tripcolor(triangulation, facecolors=obs_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
+            fig_c.colorbar(tpc_o, ax=ax_o, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
+            ax_o.set_aspect('equal')
+            ax_o.set_title(f"Observed {short_titles_map.get(key, key)} (Noisy, MAE: {mae:.2e})", fontsize=10.5, pad=5)
+            ax_o.set_xlabel("X [mm]", fontsize=9); ax_o.set_ylabel("Y [mm]", fontsize=9)
+            ax_o.tick_params(labelsize=8)
 
         plt.tight_layout()
         out_comp_pdf = os.path.join(save_path, "domain_invariants_noise_comparison.pdf")

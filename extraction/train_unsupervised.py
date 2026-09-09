@@ -26,7 +26,6 @@ from core.trainer import HyperelasticGPTrainer
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 from core.datasetclass import TractionDataset, DatasetFactory
 from core.loss_function import total_stochastic_loss
-from core.filters import filter_dataset_kinematics
 from core.plotter import (
     plot_loss_analysis,
     plot_parameters_hist, plot_inducing_points, plot_combined_validation, plot_training_r2,
@@ -61,6 +60,7 @@ def parse_args():
     # Handling the List [1, 5, 9] to cover the 10 steps range
     parser.add_argument('--train_load_steps_indices', type=int, nargs='+', default=[1, 5, 9])
     parser.add_argument('--val_load_steps_indices', type=int, nargs='+', default=None, help="Validation load steps indices for R2 evaluation")
+    parser.add_argument('--test_load_steps_indices', type=int, nargs='+', default=None, help="Test load steps indices for extrapolation evaluation")
     parser.add_argument('--n_iterations', type=int, default=1000)
     parser.add_argument('--learning_rate', type=float, default=0.01, help="Learning rate for Adam optimizer")
     parser.add_argument('--final_learning_rate', type=float, default=None, help="Final learning rate for cosine decay. If not set or equal to learning_rate, uses constant lr.")
@@ -84,17 +84,6 @@ def parse_args():
                         help="VFM loss mode: 'linear_triangle', 'global_vf', or 'mix'")
     parser.add_argument('--vf_order', type=int, default=2,
                         help="Polynomial order for kinematically admissible virtual fields basis (default: 2)")
-
-    # Noise Filtering & Preprocessing
-    parser.add_argument('--filter_noise', type=int, default=0,
-                        help="Set to 1 to enable displacement noise filtering preprocessing")
-    parser.add_argument('--filter_method', type=str, default="laplacian", choices=["laplacian", "gaussian"],
-                        help="Filtering method: 'laplacian' or 'gaussian'")
-    parser.add_argument('--filter_alpha', type=float, default=0.5,
-                        help="Laplacian relaxation parameter in (0, 1]")
-    parser.add_argument('--filter_passes', type=int, default=3,
-                        help="Number of Laplacian smoothing passes")
-
     return parser.parse_args()
 
 def sigma_fix_to_log_sigma_fix(sigma_fix) :
@@ -237,15 +226,6 @@ if __name__ == "__main__" :
     
     dataset = DatasetFactory.create("dataset/precomputed_vfm", data_path=prep_dataset_path)
     prep_data = dataset.get_data()
-
-    # Optional Preprocessing: Filter displacement measurement noise
-    if args.filter_noise == 1 or config_dict.get("filter_noise", 0) == 1:
-        method = config_dict.get("filter_method", args.filter_method)
-        alpha = float(config_dict.get("filter_alpha", args.filter_alpha))
-        passes = int(config_dict.get("filter_passes", args.filter_passes))
-        prep_data = filter_dataset_kinematics(
-            prep_data, method=method, alpha=alpha, passes=passes, verbose=True
-        )
 
     f2x2 = prep_data["F"][train_load_steps_indices]
     cells = prep_data["cells"]
@@ -627,14 +607,19 @@ if __name__ == "__main__" :
     F_train_full_3x3 = jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
     
     val_load_steps_indices = args.val_load_steps_indices
-    if val_load_steps_indices is None:
+    test_load_steps_indices = args.test_load_steps_indices
+    if val_load_steps_indices is None or test_load_steps_indices is None:
         for cand in [os.path.join(save_path, "recipe_config.yaml"), os.path.join(save_path, "config.yaml")]:
             if os.path.exists(cand):
                 try:
                     with open(cand, "r") as f:
                         yd = yaml.safe_load(f)
-                        if yd and "val_load_steps_indices" in yd:
-                            val_load_steps_indices = yd["val_load_steps_indices"]
+                        if yd:
+                            if val_load_steps_indices is None and "val_load_steps_indices" in yd:
+                                val_load_steps_indices = yd["val_load_steps_indices"]
+                            if test_load_steps_indices is None and "test_load_steps_indices" in yd:
+                                test_load_steps_indices = yd["test_load_steps_indices"]
+                        if val_load_steps_indices is not None and test_load_steps_indices is not None:
                             break
                 except Exception:
                     pass
@@ -642,7 +627,8 @@ if __name__ == "__main__" :
     r2_res = plot_training_r2(
         learned_gp, true_mat_model, F_train_full_3x3, save_path,
         train_steps=train_load_steps_indices,
-        val_steps=val_load_steps_indices
+        val_steps=val_load_steps_indices,
+        test_steps=test_load_steps_indices
     )
     r2, rmse, coverage = r2_res[0], r2_res[1], r2_res[2]
 
@@ -685,8 +671,12 @@ if __name__ == "__main__" :
         "r2_val": r2_res.val_metrics.get("r2"),
         "rmse_val": r2_res.val_metrics.get("rmse"),
         "ec_val": r2_res.val_metrics.get("ec"),
+        "r2_test": r2_res.test_metrics.get("r2"),
+        "rmse_test": r2_res.test_metrics.get("rmse"),
+        "ec_test": r2_res.test_metrics.get("ec"),
         "train_steps": r2_res.train_metrics.get("steps", train_load_steps_indices),
         "val_steps": r2_res.val_metrics.get("steps", val_load_steps_indices),
+        "test_steps": r2_res.test_metrics.get("steps", test_load_steps_indices),
         "elbo": float(trainer.loss_components_hist["total_loss"][-1]) if trainer.loss_components_hist["total_loss"] else None,
         "ell": float(trainer.loss_components_hist["log_like"][-1]) if trainer.loss_components_hist["log_like"] else None,
         "kl": float(trainer.loss_components_hist["kl"][-1]) if trainer.loss_components_hist["kl"] else None,

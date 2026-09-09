@@ -15,7 +15,8 @@ from core.material_models import get_material_from_dir
 from core.plotter import (
     plot_combined_validation,
     plot_energy_decomposition_validation,
-    plot_training_r2
+    plot_training_r2,
+    plot_domain_invariants
 )
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 from core.utils import infer_material_model_name, fto3x3
@@ -125,6 +126,24 @@ def main():
         print(f"Train Parity Metrics: R2={r2:.4f}, RMSE={rmse:.4f}, EC={coverage:.1f}%")
         if r2_res.val_metrics and r2_res.val_metrics.get("r2") is not None:
             print(f"Val Parity Metrics: R2={r2_res.val_metrics['r2']:.4f}, RMSE={r2_res.val_metrics['rmse']:.4f}, EC={r2_res.val_metrics['ec']:.1f}%")
+
+        # 4. Domain Invariants Plot (Noise-added observed data)
+        print("Generating domain invariants plot (observed data)...")
+        try:
+            m_mode = "anisotropic" if aniso_z is not None else "isotropic"
+            plot_domain_invariants(
+                prep_data=prep_data,
+                save_path=saved_model_dir,
+                step_idx=-1,
+                model_mode=m_mode,
+                a0=getattr(true_model, "a0", None),
+                a1=getattr(true_model, "a1", None),
+                make_png=True,
+                save_comparison=True
+            )
+            print("Domain invariants plot successfully generated.")
+        except Exception as e:
+            print(f"Warning: Failed to generate domain invariants plot: {e}")
 
     print(f"🎉 Successfully regenerated all extraction plots in: {saved_model_dir}")
 

@@ -164,7 +164,7 @@ else
     TOP_LOAD=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('target_load_true_top', 1.5))")
     ASYM=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('asym_factor', 0.95))")
     N_IP=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('n_ip', 5))")
-    BETA=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('beta', 100.0))")
+    BETA=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('beta', d.get('beta_list', [1.0])[0] if isinstance(d.get('beta_list'), (list, tuple)) else 1.0))" 2>/dev/null || echo "1.0")
     MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('model_mode', 'isotropic'))")
     GEOM_TRAIN=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('geometry_train', d.get('geometry', 'block')))")
 
@@ -194,7 +194,8 @@ MESH_SIZE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); pri
 # Extraction params
 MCI_SAMPLING=$(get_cfg "['number_of_mci_sampling']")
 N_IP=$(get_cfg "['n_ip']")
-BETA=$(get_cfg "['beta']")
+BETAS_LIST=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); b=d.get('beta_list', d.get('betas', d.get('beta', 1.0))); print(*b) if isinstance(b, (list, tuple)) else print(b)" 2>/dev/null || echo "1.0")
+BETA=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('beta', d.get('beta_list', [1.0])[0] if isinstance(d.get('beta_list'), (list, tuple)) else 1.0))" 2>/dev/null || echo "1.0")
 NUM_RFF=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('num_rff', 800))" 2>/dev/null || echo "800")
 FIXED_NOISE=$(get_cfg "['is_fixed_reaction_force_noise']")
 FIXED_IP=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('is_fixed_inducing_points', 1))" 2>/dev/null || echo "1")
@@ -210,10 +211,6 @@ U_VAR_ANCHOR=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); 
 KZZ_JITTER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('kzz_jitter', '1e-8'))" 2>/dev/null || echo "1e-8")
 VFM_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vfm_mode', 'linear_triangle'))" 2>/dev/null || echo "linear_triangle")
 VF_ORDER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vf_order', 2))" 2>/dev/null || echo "2")
-FILTER_NOISE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('filter_noise', 0))" 2>/dev/null || echo "0")
-FILTER_METHOD=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('filter_method', 'laplacian'))" 2>/dev/null || echo "laplacian")
-FILTER_ALPHA=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('filter_alpha', 0.5))" 2>/dev/null || echo "0.5")
-FILTER_PASSES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('filter_passes', 3))" 2>/dev/null || echo "3")
 
 # Distillation params
 DIST_MODEL=$(get_cfg "['distilled_material_model']")
@@ -236,6 +233,12 @@ fi
 # Validation params
 VAL_SAMPLES=$(get_cfg "['val_number_samples']")
 VAL_LOAD_STEPS_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(*(d.get('val_load_steps_indices', [9])))")
+TEST_LOAD_STEPS_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(*(d.get('test_load_steps_indices', [])))" 2>/dev/null || echo "")
+TEST_LOAD_STEPS_ARG=""
+if [ -n "$TEST_LOAD_STEPS_INDICES" ]; then
+    TEST_LOAD_STEPS_ARG="--test_load_steps_indices $TEST_LOAD_STEPS_INDICES"
+fi
+FEM_VAL_STEPS="${TEST_LOAD_STEPS_INDICES:-$VAL_LOAD_STEPS_INDICES}"
 VAL_WORKERS=2
 if [ -n "$VAL_WORKERS_OVERRIDE" ]; then
     VAL_WORKERS="$VAL_WORKERS_OVERRIDE"
@@ -324,42 +327,91 @@ for SEED in $SEEDS_LIST; do
     # --- STEP 2: EXTRACTION ---
     if [ "$RUN_EXT" = true ]; then
         echo "--- Step 2: UGP Extraction (Seed: $SEED) ---"
-        mkdir -p "$EXTRACT_DIR"
         TRAIN_DATASET_PATH="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${GEOMETRY_TRAIN}_${SEED}.npz"
-        python3 extraction/train_unsupervised.py \
-            --dataset_path "$TRAIN_DATASET_PATH" \
-            --material_model_name "$MODEL" \
-            --number_of_mci_sampling "$MCI_SAMPLING" \
-            --train_load_steps_indices $TRAIN_INDICES \
-            --val_load_steps_indices $VAL_LOAD_STEPS_INDICES \
-            --n_ip "$N_IP" \
-            --beta "$BETA" \
-            --num_rff "$NUM_RFF" \
-            --is_fixed_reaction_force_noise "$FIXED_NOISE" \
-            --is_fixed_inducing_points "$FIXED_IP" \
-            --n_iterations "$EXT_ITERS" \
-            --geometry "$GEOMETRY_TRAIN" \
-            --disp_noise "$D_NOISE" \
-            --load_noise "$L_NOISE" \
-            --target_load_true_top "$TOP_LOAD" \
-            --asym_factor "$ASYM" \
-            --learning_rate "$EXT_LR" \
-            --final_learning_rate "$EXT_FINAL_LR" \
-            --cap_compression "$CAP_COMPRESSION" \
-            --model_mode "$MODEL_MODE" \
-            --covariance_mode "$COVARIANCE_MODE" \
-            --normalize_ell "$NORMALIZE_ELL" \
-            --u_var_anchor "$U_VAR_ANCHOR" \
-            --kzz_jitter "$KZZ_JITTER" \
-            --vfm_mode "$VFM_MODE" \
-            --vf_order "$VF_ORDER" \
-            --filter_noise "$FILTER_NOISE" \
-            --filter_method "$FILTER_METHOD" \
-            --filter_alpha "$FILTER_ALPHA" \
-            --filter_passes "$FILTER_PASSES" \
-            --seed "$SEED" \
-            --batch_dir "$EXTRACT_DIR" \
-            $MAT_EXTRA_ARGS
+        
+        NUM_BETAS=$(echo "$BETAS_LIST" | wc -w)
+        if [ "$NUM_BETAS" -gt 1 ]; then
+            echo "🔬 Multi-Beta Training active ($NUM_BETAS candidates: $BETAS_LIST)"
+            CANDIDATES_DIR="$SEED_DIR/extracted_candidates"
+            mkdir -p "$CANDIDATES_DIR"
+
+            for BETA_VAL in $BETAS_LIST; do
+                CANDIDATE_OUT="$CANDIDATES_DIR/beta_${BETA_VAL}"
+                echo "  ▶ Training candidate model with beta = $BETA_VAL -> $CANDIDATE_OUT"
+                mkdir -p "$CANDIDATE_OUT"
+                python3 extraction/train_unsupervised.py \
+                    --dataset_path "$TRAIN_DATASET_PATH" \
+                    --material_model_name "$MODEL" \
+                    --number_of_mci_sampling "$MCI_SAMPLING" \
+                    --train_load_steps_indices $TRAIN_INDICES \
+                    --val_load_steps_indices $VAL_LOAD_STEPS_INDICES \
+                    $TEST_LOAD_STEPS_ARG \
+                    --n_ip "$N_IP" \
+                    --beta "$BETA_VAL" \
+                    --num_rff "$NUM_RFF" \
+                    --is_fixed_reaction_force_noise "$FIXED_NOISE" \
+                    --is_fixed_inducing_points "$FIXED_IP" \
+                    --n_iterations "$EXT_ITERS" \
+                    --geometry "$GEOMETRY_TRAIN" \
+                    --disp_noise "$D_NOISE" \
+                    --load_noise "$L_NOISE" \
+                    --target_load_true_top "$TOP_LOAD" \
+                    --asym_factor "$ASYM" \
+                    --learning_rate "$EXT_LR" \
+                    --final_learning_rate "$EXT_FINAL_LR" \
+                    --cap_compression "$CAP_COMPRESSION" \
+                    --model_mode "$MODEL_MODE" \
+                    --covariance_mode "$COVARIANCE_MODE" \
+                    --normalize_ell "$NORMALIZE_ELL" \
+                    --u_var_anchor "$U_VAR_ANCHOR" \
+                    --kzz_jitter "$KZZ_JITTER" \
+                    --vfm_mode "$VFM_MODE" \
+                    --vf_order "$VF_ORDER" \
+                    --seed "$SEED" \
+                    --batch_dir "$CANDIDATE_OUT" \
+                    $MAT_EXTRA_ARGS
+            done
+
+            echo "📊 Evaluating candidate models and selecting best-calibrated beta..."
+            python3 extraction/select_best_beta.py \
+                --candidates_dir "$CANDIDATES_DIR" \
+                --output_dir "$EXTRACT_DIR" \
+                --target_ec 95.0
+        else
+            echo "  ▶ Single Beta Training (beta = $BETA) -> $EXTRACT_DIR"
+            mkdir -p "$EXTRACT_DIR"
+            python3 extraction/train_unsupervised.py \
+                --dataset_path "$TRAIN_DATASET_PATH" \
+                --material_model_name "$MODEL" \
+                --number_of_mci_sampling "$MCI_SAMPLING" \
+                --train_load_steps_indices $TRAIN_INDICES \
+                --val_load_steps_indices $VAL_LOAD_STEPS_INDICES \
+                $TEST_LOAD_STEPS_ARG \
+                --n_ip "$N_IP" \
+                --beta "$BETA" \
+                --num_rff "$NUM_RFF" \
+                --is_fixed_reaction_force_noise "$FIXED_NOISE" \
+                --is_fixed_inducing_points "$FIXED_IP" \
+                --n_iterations "$EXT_ITERS" \
+                --geometry "$GEOMETRY_TRAIN" \
+                --disp_noise "$D_NOISE" \
+                --load_noise "$L_NOISE" \
+                --target_load_true_top "$TOP_LOAD" \
+                --asym_factor "$ASYM" \
+                --learning_rate "$EXT_LR" \
+                --final_learning_rate "$EXT_FINAL_LR" \
+                --cap_compression "$CAP_COMPRESSION" \
+                --model_mode "$MODEL_MODE" \
+                --covariance_mode "$COVARIANCE_MODE" \
+                --normalize_ell "$NORMALIZE_ELL" \
+                --u_var_anchor "$U_VAR_ANCHOR" \
+                --kzz_jitter "$KZZ_JITTER" \
+                --vfm_mode "$VFM_MODE" \
+                --vf_order "$VF_ORDER" \
+                --seed "$SEED" \
+                --batch_dir "$EXTRACT_DIR" \
+                $MAT_EXTRA_ARGS
+        fi
         echo "✅ Step 2 (Extraction for Seed $SEED) completed."
     else
         echo "⏭️ Skipping Step 2 (Extraction) for Seed $SEED."
@@ -476,7 +528,7 @@ for SEED in $SEEDS_LIST; do
             --saved_model_dir "$EXTRACT_DIR" \
             --material_model "$DIST_MODEL" \
             --distill_target "$DIST_TARGET" \
-            --val_load_steps $VAL_LOAD_STEPS_INDICES || true
+            --val_load_steps $FEM_VAL_STEPS || true
 
         for COMP in "dev" "vol" "aniso"; do
             if [ -d "$DISTILL_DIR/output/${COMP}_sensitivities" ] || [ -d "$DISTILL_DIR/${COMP}_sensitivities" ]; then
@@ -550,21 +602,22 @@ for SEED in $SEEDS_LIST; do
             python3 validation/merge_fem_workers.py --folder "$VAL_DIR/holes"
         fi
 
-        echo "Generating UQ displacement verification plots..."
+        FEM_VAL_STEPS="${TEST_LOAD_STEPS_INDICES:-$VAL_LOAD_STEPS_INDICES}"
+        echo "Generating UQ displacement verification plots (evaluating steps: $FEM_VAL_STEPS)..."
         python3 plots/uq_verification_disp.py \
             --model_path "$VAL_DIR/block" \
-            --validation_load_step_indices $VAL_LOAD_STEPS_INDICES \
+            --validation_load_step_indices $FEM_VAL_STEPS \
             --n_sample "$VAL_SAMPLES" || true
 
         python3 plots/uq_verification_disp.py \
             --model_path "$VAL_DIR/holes" \
-            --validation_load_step_indices $VAL_LOAD_STEPS_INDICES \
+            --validation_load_step_indices $FEM_VAL_STEPS \
             --n_sample "$VAL_SAMPLES" || true
 
         echo "Updating validation_metrics.json for Seed $SEED..."
         python3 validation/update_validation_metrics_json.py \
             --distilled_dir "$DISTILL_DIR" \
-            --val_load_steps $VAL_LOAD_STEPS_INDICES
+            --val_load_steps $FEM_VAL_STEPS
 
         # Copy validation_metrics.json into fem_validation and seed dir
         cp "$DISTILL_DIR/validation_metrics.json" "$VAL_DIR/validation_metrics.json" 2>/dev/null || true
