@@ -319,7 +319,9 @@ for SEED in $SEEDS_LIST; do
     if [ "$RUN_EXT" = true ]; then
         echo "--- Step 2: UGP Extraction (Seed: $SEED) ---"
         mkdir -p "$EXTRACT_DIR"
+        TRAIN_DATASET_PATH="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${GEOMETRY_TRAIN}_${SEED}.npz"
         python3 extraction/train_unsupervised.py \
+            --dataset_path "$TRAIN_DATASET_PATH" \
             --material_model_name "$MODEL" \
             --number_of_mci_sampling "$MCI_SAMPLING" \
             --train_load_steps_indices $TRAIN_INDICES \
@@ -381,6 +383,7 @@ for SEED in $SEEDS_LIST; do
             echo "Exporting GP posterior to PyTorch bridge ($EXPORT_SUB)..."
             python3 distillation/export_gp_to_pytorch.py \
                 --saved_model_dir "$EXTRACT_DIR" \
+                --dataset_path "$TRAIN_DATASET_PATH" \
                 --sample_mode "$SAMPLE_MODE" \
                 --num_points "$NUM_POINTS" \
                 --max_gamma "$MAX_GAMMA" \
@@ -489,6 +492,9 @@ for SEED in $SEEDS_LIST; do
             exit 1
         fi
 
+        VAL_DATASET_BLOCK="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${GEOMETRY_TRAIN}_${SEED}.npz"
+        VAL_DATASET_HOLES="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD_HOLES}_${ASYM}_${GEOMETRY_VAL}_${SEED}.npz"
+
         VAL_PIDS=()
         # Launch workers for Block geometry
         for ((w=0; w<VAL_WORKERS; w++)); do
@@ -496,6 +502,7 @@ for SEED in $SEEDS_LIST; do
             python3 validation/forward_fem_distilled_piola_sample.py \
                 --distilled_dir "$DISTILL_DIR" \
                 --material_model "$DIST_MODEL" \
+                --dataset_path "$VAL_DATASET_BLOCK" \
                 --n_sample "$VAL_SAMPLES" \
                 --output_dir "$VAL_DIR/block" \
                 --geometry "$GEOMETRY_TRAIN" \
@@ -511,6 +518,7 @@ for SEED in $SEEDS_LIST; do
             python3 validation/forward_fem_distilled_piola_sample.py \
                 --distilled_dir "$DISTILL_DIR" \
                 --material_model "$DIST_MODEL" \
+                --dataset_path "$VAL_DATASET_HOLES" \
                 --n_sample "$VAL_SAMPLES" \
                 --output_dir "$VAL_DIR/holes" \
                 --geometry "$GEOMETRY_VAL" \

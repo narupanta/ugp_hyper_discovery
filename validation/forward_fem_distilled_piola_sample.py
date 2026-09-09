@@ -219,6 +219,7 @@ def parse_args():
     parser.add_argument('--sample_offset', type=int, default=0, help="Starting index in candidate samples pool")
     parser.add_argument('--output_suffix', type=str, default="", help="Optional suffix for worker output file")
     parser.add_argument('--output_dir', type=str, default=None, help="Direct output directory for FEM validation")
+    parser.add_argument('--dataset_path', type=str, default="", help="Explicit path to precomputed dataset npz file")
 
     return parser.parse_args()
 if __name__ == "__main__" :
@@ -308,29 +309,35 @@ if __name__ == "__main__" :
 
     u_exp = None
     prep_dataset_path = None
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(script_dir, '..'))
-    
-    search_dirs = [
-        os.path.join(project_root, "dataset/preprocessed/syn_f"),
-        os.path.join(project_root, "dataset/precomputed_vfm"),
-        "dataset/preprocessed/syn_f",
-        "dataset/precomputed_vfm"
-    ]
-    
-    for search_dir in search_dirs:
-        if os.path.exists(search_dir):
-            for fname in os.listdir(search_dir):
-                if fname.startswith(f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}"):
-                    if geometry_flag == "block" and ("_holes" not in fname):
-                        if fname.endswith(".npz"):
+    if args.dataset_path and os.path.exists(args.dataset_path):
+        prep_dataset_path = os.path.abspath(args.dataset_path)
+        print(f"[VAL] Using explicit dataset path: {prep_dataset_path}")
+    else:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.abspath(os.path.join(script_dir, '..'))
+        
+        search_dirs = [
+            os.path.join(project_root, "dataset/preprocessed/syn_f"),
+            os.path.join(project_root, "dataset/precomputed_vfm"),
+            "dataset/preprocessed/syn_f",
+            "dataset/precomputed_vfm"
+        ]
+        
+        for search_dir in search_dirs:
+            if os.path.exists(search_dir):
+                for fname in sorted(os.listdir(search_dir)):
+                    if fname.startswith(f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}"):
+                        if geometry_flag == "block" and ("_holes" not in fname):
+                            if fname.endswith(".npz"):
+                                prep_dataset_path = os.path.join(search_dir, fname)
+                                break
+                        elif geometry_flag != "block" and (f"_{geometry_flag}" in fname):
                             prep_dataset_path = os.path.join(search_dir, fname)
                             break
-                    elif geometry_flag != "block" and (f"_{geometry_flag}" in fname):
-                        prep_dataset_path = os.path.join(search_dir, fname)
-                        break
+            if prep_dataset_path is not None:
+                break
         if prep_dataset_path is not None:
-            break
+            print(f"[VAL] Found matching dataset: {prep_dataset_path}")
 
     if prep_dataset_path is not None:
         try:

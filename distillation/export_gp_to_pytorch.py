@@ -125,6 +125,7 @@ def main():
     parser.add_argument("--num_points", type=int, default=192, help="Number of points to evaluate GP over.")
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"], help="Distillation target mode: solely Strain Energy Function (sef), joint SEF + Piola stress (sef_stress), joint SEF + Cauchy stress (sef_cauchy), or separate DEV and VOL energy (sef_split).")
     parser.add_argument("--export_subfolder", type=str, default="", help="Custom output subfolder for exported PyTorch matrices.")
+    parser.add_argument("--dataset_path", type=str, default="", help="Explicit path to precomputed dataset npz file.")
     args = parser.parse_args()
 
     best_params_dict = np.load(os.path.join(args.saved_model_dir, "best_params.npy"), allow_pickle=True).item()
@@ -223,12 +224,35 @@ def main():
                         disp_noise = sp
             
         prep_dataset_path = None
-        for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
-            if os.path.exists(search_dir):
-                for fname in os.listdir(search_dir):
-                    if (fname.startswith(f"{ugp_model_name}_{disp_noise}_{load_noise}") or fname.startswith(f"{ugp_model_name}_")) and fname.endswith(".npz"):
-                        prep_dataset_path = os.path.join(search_dir, fname)
-                        break
+        if args.dataset_path and os.path.exists(args.dataset_path):
+            prep_dataset_path = os.path.abspath(args.dataset_path)
+            print(f"[EXPORT] Using explicit dataset path: {prep_dataset_path}")
+        else:
+            meta_path = os.path.join(args.saved_model_dir, "metadata.json")
+            seed_val = None
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r") as mf:
+                        seed_val = json.load(mf).get("seed")
+                except Exception:
+                    pass
+
+            for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
+                if os.path.exists(search_dir):
+                    if seed_val is not None:
+                        for fname in sorted(os.listdir(search_dir)):
+                            if fname.endswith(f"_{seed_val}.npz") and (fname.startswith(f"{ugp_model_name}_{disp_noise}_{load_noise}") or fname.startswith(f"{ugp_model_name}_")):
+                                prep_dataset_path = os.path.join(search_dir, fname)
+                                break
+                    if prep_dataset_path is None:
+                        for fname in sorted(os.listdir(search_dir)):
+                            if (fname.startswith(f"{ugp_model_name}_{disp_noise}_{load_noise}") or fname.startswith(f"{ugp_model_name}_")) and fname.endswith(".npz"):
+                                prep_dataset_path = os.path.join(search_dir, fname)
+                                break
+                if prep_dataset_path is not None:
+                    break
+            if prep_dataset_path is not None:
+                print(f"[EXPORT] Found matching dataset: {prep_dataset_path}")
         if prep_dataset_path is not None:
             prep_data = np.load(prep_dataset_path, allow_pickle=True)
             F_all_steps_2x2 = prep_data["F"]

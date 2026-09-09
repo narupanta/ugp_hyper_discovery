@@ -4,8 +4,11 @@ import yaml
 import datetime
 from pathlib import Path
 import argparse
+import ast
 import numpy as np
+import matplotlib as mpl
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 import jax
 import jax.numpy as jnp
@@ -16,18 +19,20 @@ import optax
 jax.config.update("jax_enable_x64", True)
 
 from core.model import SparseHyperelasticityGP
-from core.utils import fto3x3, farthest_point_sampling_with_fixed_point
+from core.utils import transform_input_features, fto3x3, farthest_point_sampling_with_fixed_point
 from core.dataclass import GPRawParams, GPParams, GPWeights
-from core.gp_component import init_component_raw_params, freeze_component_anchor, inv_softplus
 from core.material_models import get_material
 from core.trainer import HyperelasticGPTrainer
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
-from core.datasetclass import DatasetFactory
+from core.datasetclass import TractionDataset, DatasetFactory
 from core.loss_function import total_stochastic_loss
-from core.plotter import plot_inducing_points, plot_training_r2
+from core.plotter import (
+    plot_loss_analysis,
+    plot_parameters_hist, plot_inducing_points, plot_combined_validation, plot_training_r2
+)
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Hyperelastic Discovery GP Extraction Configuration")
+    parser = argparse.ArgumentParser(description="Isihara Model Dataset and Training Configuration")
 
     # Dataset & Model Config
     parser.add_argument('--material_model_name', type=str, default="isihara")
@@ -36,6 +41,7 @@ def parse_args():
     parser.add_argument('--target_load_true_top', type=float, default=8.0)
     parser.add_argument('--asym_factor', type=float, default=0.95)
     parser.add_argument('--model_mode', type=str, default='isotropic')
+    parser.add_argument('--dataset_path', type=str, default="", help="Direct path to precomputed dataset npz file. Overrides heuristic path search.")
     parser.add_argument('--sampling_mode', type=str, default='pathwise', choices=['pathwise', 'cholesky', 'pws', 'mds'],
                         help="Sampling mode for GP realizations: 'pathwise' (RFF + Matheron's rule) or 'cholesky' (multivariate normal)")
 
@@ -74,29 +80,69 @@ def parse_args():
 
     return parser.parse_args()
 
-def sigma_fix_to_log_sigma_fix(sigma_fix):
+def sigma_fix_to_log_sigma_fix(sigma_fix) :
     return jnp.log(jnp.maximum(sigma_fix, 1e-3))
+
+def inv_softplus(y):
+    """Computes initial raw parameters from physical coordinates in invariant space."""
+    y_safe = jnp.maximum(y, 1e-15)
+    return jnp.where(y_safe > 20.0, y_safe, jnp.log(jnp.expm1(y_safe)))
 
 def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag"):
     def freeze_fn(grads):
         replace_kwargs = {}
-        # Zero out anchor index 0 and optionally freeze inducing coordinates
-        replace_kwargs.update(freeze_component_anchor(grads, "dev", covariance_mode, is_fixed_z))
-        replace_kwargs.update(freeze_component_anchor(grads, "vol", covariance_mode, is_fixed_z))
+
+        # Anchor index 0 (reference stress-free state)
+        if covariance_mode == "full":
+            raw_dev_u_var = grads.raw_dev_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+            raw_vol_u_var = grads.raw_vol_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+        else:
+            raw_dev_u_var = grads.raw_dev_u_var.at[0].set(0.0)
+            raw_vol_u_var = grads.raw_vol_u_var.at[0].set(0.0)
+
+        replace_kwargs.update({
+            "raw_dev_z": grads.raw_dev_z.at[0].set(0.0),
+            "raw_vol_z": grads.raw_vol_z.at[0].set(0.0),
+            "raw_dev_u_mean": grads.raw_dev_u_mean.at[0].set(0.0),
+            "raw_dev_u_var": raw_dev_u_var,
+            "raw_vol_u_mean": grads.raw_vol_u_mean.at[0].set(0.0),
+            "raw_vol_u_var": raw_vol_u_var
+        })
 
         if getattr(grads, "raw_aniso_z", None) is not None:
-            is_unknown_fiber = getattr(grads, "raw_aniso_theta_mean", None) is not None
-            freeze_aniso_z = is_fixed_z and (not is_unknown_fiber)
-            replace_kwargs.update(freeze_component_anchor(grads, "aniso", covariance_mode, freeze_aniso_z))
+            if covariance_mode == "full":
+                raw_aniso_u_var = grads.raw_aniso_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
+            else:
+                raw_aniso_u_var = grads.raw_aniso_u_var.at[0].set(0.0)
+            replace_kwargs.update({
+                "raw_aniso_z": grads.raw_aniso_z.at[0].set(0.0),
+                "raw_aniso_u_mean": grads.raw_aniso_u_mean.at[0].set(0.0),
+                "raw_aniso_u_var": raw_aniso_u_var
+            })
 
-        grads = grads._replace(**replace_kwargs)
+        if replace_kwargs:
+            grads = grads._replace(**replace_kwargs)
         
-        # Optionally freeze reaction force noise parameters
+        # 2. Optionally freeze reaction force noise parameters
         if is_fixed_noise:
             grads = grads._replace(
                 log_sigma_fix_x=jnp.zeros_like(grads.log_sigma_fix_x),
                 log_sigma_fix_y=jnp.zeros_like(grads.log_sigma_fix_y)
             )
+            
+        # 3. Optionally freeze ALL inducing point positions (from FPS)
+        if is_fixed_z:
+            replace_kwargs = {
+                "raw_dev_z": jnp.zeros_like(grads.raw_dev_z),
+                "raw_vol_z": jnp.zeros_like(grads.raw_vol_z)
+            }
+            if getattr(grads, "raw_aniso_z", None) is not None:
+                # If fiber angle is known (fixed), freeze aniso inducing points as well.
+                # Only keep aniso inducing points unfrozen if fiber angle is being learned dynamically.
+                is_unknown_fiber = getattr(grads, "raw_aniso_theta_mean", None) is not None
+                if not is_unknown_fiber:
+                    replace_kwargs["raw_aniso_z"] = jnp.zeros_like(grads.raw_aniso_z)
+            grads = grads._replace(**replace_kwargs)
         return grads
     return freeze_fn
 
@@ -145,20 +191,39 @@ if __name__ == "__main__" :
         yaml.dump(config_dict, f, default_flow_style=False)
 
     # load precomputed dataset
-    data_dir = "dataset/preprocessed/syn_f" if os.path.exists("dataset/preprocessed/syn_f") else "dataset/precomputed_vfm" 
-    prep_dataset_path = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{args.geometry}_{args.seed}.npz")
-    if not os.path.exists(prep_dataset_path):
-        fallback_path = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{args.geometry}.npz")
-        if os.path.exists(fallback_path):
-            prep_dataset_path = fallback_path
+    if args.dataset_path and os.path.exists(args.dataset_path):
+        prep_dataset_path = os.path.abspath(args.dataset_path)
+        print(f"[DATASET] Loading explicitly specified dataset: {prep_dataset_path}")
+    elif args.dataset_path:
+        raise FileNotFoundError(f"Explicitly specified --dataset_path not found: {args.dataset_path}")
+    else:
+        data_dir = "dataset/preprocessed/syn_f" if os.path.exists("dataset/preprocessed/syn_f") else "dataset/precomputed_vfm" 
+        seeded_path = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{args.geometry}_{args.seed}.npz")
+        unseeded_path = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}_{args.geometry}.npz")
+        no_geom_path = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}.npz")
+
+        if os.path.exists(seeded_path):
+            prep_dataset_path = seeded_path
+            print(f"[DATASET] Loading exact seeded dataset: {prep_dataset_path}")
+        elif os.path.exists(unseeded_path):
+            prep_dataset_path = unseeded_path
+            print(f"[DATASET] Warning: Seeded dataset not found ({seeded_path}). Loading unseeded fallback: {prep_dataset_path}")
+        elif os.path.exists(no_geom_path):
+            prep_dataset_path = no_geom_path
+            print(f"[DATASET] Warning: Geometry dataset not found ({unseeded_path}). Loading fallback: {prep_dataset_path}")
         else:
-            fallback_path_no_geom = os.path.join(data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load_true_top}_{asym_factor}.npz")
-            if os.path.exists(fallback_path_no_geom):
-                prep_dataset_path = fallback_path_no_geom
+            raise FileNotFoundError(
+                f"Could not find a valid precomputed dataset for {material_model_name} (seed={args.seed}, geom={args.geometry}).\n"
+                f"Searched paths:\n  - {seeded_path}\n  - {unseeded_path}\n  - {no_geom_path}\n"
+                f"Please pass --dataset_path directly or generate data first."
+            )
     
     dataset = DatasetFactory.create("dataset/precomputed_vfm", data_path=prep_dataset_path)
     prep_data = dataset.get_data()
-    f2x2 = prep_data["F"][train_load_steps_indices] 
+    f2x2 = prep_data["F"][train_load_steps_indices]
+    cells = prep_data["cells"]
+    node_type = np.asarray(prep_data["node_type"])
+    print(f"[DATASET] Dataset successfully loaded: {cells.shape[0]} elements, {node_type.shape[0]} nodes, {prep_data['F'].shape[0]} total load steps.") 
 
     # Data use in VFM
     f3x3 = jax.vmap(jax.vmap(fto3x3))(f2x2)
@@ -251,10 +316,6 @@ if __name__ == "__main__" :
     min_aniso = None
     max_aniso = None
     
-    # Setup random key
-    key = jax.random.PRNGKey(args.seed)
-    k1, k2, k3, k4 = jax.random.split(key, 4)
-
     if args.resume_from:
         print(f"Resuming training from: {args.resume_from}")
         resume_dir = os.path.join(base_save_path, args.resume_from)
@@ -265,80 +326,123 @@ if __name__ == "__main__" :
             aniso_z = I_z[:, 3:]
             min_aniso = jnp.min(aniso_flat, axis=0)
             max_aniso = jnp.max(aniso_flat, axis=0)
+    else:
+        dev_z = farthest_point_sampling_with_fixed_point(dev_flat, n_ip, jnp.array([3.0, 3.0]))
+        vol_z = farthest_point_sampling_with_fixed_point(vol_flat, n_ip, jnp.array([1.0]))
+        I_z_list = [dev_z, vol_z]
+        if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
+            aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, jnp.ones(aniso_flat.shape[-1]))
+            min_aniso = jnp.min(aniso_flat, axis=0)
+            max_aniso = jnp.max(aniso_flat, axis=0)
+            I_z_list.append(aniso_z)
+        I_z = jnp.concat(I_z_list, axis = -1)
+        
+    plot_inducing_points(dev_z, vol_z, dev_flat, vol_flat, save_path, aniso_z=aniso_z, aniso_I=aniso_flat, feature_extractor=extractor)
+
+    # Setup random key
+    key = jax.random.PRNGKey(args.seed)
+    k1, k2, k3, k4 = jax.random.split(key, 4)
+    
+    if args.resume_from:
+        resume_dir = os.path.join(base_save_path, args.resume_from)
         best_params_dict = np.load(os.path.join(resume_dir, "best_params.npy"), allow_pickle=True).item()
         valid_keys = set(GPRawParams._fields)
         filtered_params = {k: v for k, v in best_params_dict.items() if k in valid_keys}
         params = GPRawParams(**filtered_params)
     else:
-        dev_raw = init_component_raw_params(
-            k1, dev_flat, n_ip, anchor=jnp.array([3.0, 3.0]),
-            covariance_mode=args.covariance_mode, u_var_anchor=args.u_var_anchor, is_dev=True
-        )
-        vol_raw = init_component_raw_params(
-            k3, vol_flat, n_ip, anchor=jnp.array([1.0]),
-            covariance_mode=args.covariance_mode, u_var_anchor=args.u_var_anchor, is_dev=False
-        )
-        dev_z, vol_z = dev_raw["z"], vol_raw["z"]
-        I_z_list = [dev_z, vol_z]
+        raw_dev_z_fps = inv_softplus(dev_z - jnp.array([3.0, 3.0]))
+        raw_vol_z_fps = inv_softplus(vol_z)
+
+        raw_dev_u_mean_init = jax.random.normal(k2, (n_ip,)).at[0].set(0.0)
+        raw_vol_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
+        
+        if "full" in args.covariance_mode:
+            raw_dev_u_var_init = (jax.random.normal(k2, (n_ip, n_ip)) * 0.1)
+            raw_dev_u_var_init = raw_dev_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(args.u_var_anchor))
+            raw_vol_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+            raw_vol_u_var_init = raw_vol_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(args.u_var_anchor))
+        else:
+            raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
+            raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
 
         aniso_kwargs = {}
         if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
-            aniso_raw = init_component_raw_params(
-                k4, aniso_flat, n_ip, anchor=jnp.ones(aniso_flat.shape[-1]),
-                covariance_mode=args.covariance_mode, u_var_anchor=args.u_var_anchor, is_dev=False
-            )
-            aniso_z = aniso_raw["z"]
-            min_aniso = jnp.min(aniso_flat, axis=0)
-            max_aniso = jnp.max(aniso_flat, axis=0)
-            I_z_list.append(aniso_z)
-
+            raw_aniso_z_fps = inv_softplus(aniso_z)
+            raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
+            if "full" in args.covariance_mode:
+                raw_aniso_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+                raw_aniso_u_var_init = raw_aniso_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(args.u_var_anchor))
+            else:
+                raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
+            aniso_dim = aniso_flat.shape[-1]
             aniso_kwargs = dict(
-                raw_aniso_ls=aniso_raw["raw_ls"],
-                raw_aniso_sig=aniso_raw["raw_sig"],
-                raw_aniso_z=aniso_raw["raw_z"],
-                raw_aniso_u_mean=aniso_raw["raw_u_mean"],
-                raw_aniso_u_var=aniso_raw["raw_u_var"]
+                raw_aniso_ls=jax.random.normal(k1, (aniso_dim,)),
+                raw_aniso_sig=jax.random.normal(k1, ()),
+                raw_aniso_z=raw_aniso_z_fps,
+                raw_aniso_u_mean=raw_aniso_u_mean_init,
+                raw_aniso_u_var=raw_aniso_u_var_init
             )
             if args.model_mode in ["aniso_unk_fiber", "aniso_unk_fiber_neg"]:
-                min_deg = -89.9
-                max_deg = -0.1 if args.model_mode == "aniso_unk_fiber_neg" else 89.9
-                deg = jax.random.uniform(k1, minval=min_deg, maxval=max_deg)
+                if args.model_mode == "aniso_unk_fiber_neg":
+                    deg = jax.random.uniform(k1, minval=-89.9, maxval=-0.1)
+                else:
+                    deg = jax.random.uniform(k1, minval=-89.9, maxval=89.9)
                 print(f"Initializing fiber angle mean at {float(deg):.2f} degrees...")
                 val = (deg / 180.0) + 0.5
                 raw_theta = jnp.log(val / (1.0 - val))
                 aniso_kwargs["raw_aniso_theta_mean"] = jnp.array(raw_theta)
 
-        I_z = jnp.concat(I_z_list, axis=-1)
-
         if is_fixed_reaction_force_noise:
-            log_sigma_fix_x = sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 0])
-            log_sigma_fix_y = sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1])
-        else:
-            log_sigma_fix_x = jax.random.normal(k3, (load_noise_std_steps.shape[0],))
-            log_sigma_fix_y = jax.random.normal(k4, (load_noise_std_steps.shape[0],))
+            params = GPRawParams(
+                # Lengthscales and signal variances (Normal(0, 1))
+                raw_dev_ls=jax.random.normal(k1, (2,)),
+                raw_dev_sig=jax.random.normal(k1, ()),
+                
+                # Inducing point means and variances
+                raw_dev_z=raw_dev_z_fps,
+                raw_dev_u_mean=raw_dev_u_mean_init,
+                raw_dev_u_var=raw_dev_u_var_init,
 
-        params = GPRawParams(
-            raw_dev_ls=dev_raw["raw_ls"],
-            raw_dev_sig=dev_raw["raw_sig"],
-            raw_dev_z=dev_raw["raw_z"],
-            raw_dev_u_mean=dev_raw["raw_u_mean"],
-            raw_dev_u_var=dev_raw["raw_u_var"],
+                raw_vol_ls=jax.random.normal(k3, (1,)),
+                raw_vol_sig=jax.random.normal(k3, ()),
 
-            raw_vol_ls=vol_raw["raw_ls"],
-            raw_vol_sig=vol_raw["raw_sig"],
-            raw_vol_z=vol_raw["raw_z"],
-            raw_vol_u_mean=vol_raw["raw_u_mean"],
-            raw_vol_u_var=vol_raw["raw_u_var"],
+                raw_vol_z=raw_vol_z_fps,        
+                raw_vol_u_mean=raw_vol_u_mean_init,
+                raw_vol_u_var=raw_vol_u_var_init,
 
-            log_sigma_free_x=jnp.log(jnp.array(1.0)),
-            log_sigma_free_y=jnp.log(jnp.array(1.0)),
-            log_sigma_fix_x=log_sigma_fix_x,
-            log_sigma_fix_y=log_sigma_fix_y,
-            **aniso_kwargs
-        )
-        
-    plot_inducing_points(dev_z, vol_z, dev_flat, vol_flat, save_path, aniso_z=aniso_z, aniso_I=aniso_flat, feature_extractor=extractor)
+                # Noise parameters (Fixed PDE residual noise to prevent uncertainty collapse)
+                log_sigma_free_x=jnp.log(jnp.array(1.0)),
+                log_sigma_free_y=jnp.log(jnp.array(1.0)),
+                log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 0]),
+                log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1]),
+                **aniso_kwargs
+            )
+        else :
+            params = GPRawParams(
+                # Lengthscales and signal variances (Normal(0, 1))
+                raw_dev_ls=jax.random.normal(k1, (2,)),
+                raw_dev_sig=jax.random.normal(k1, ()),
+                
+                # Inducing point means and variances
+                raw_dev_z=raw_dev_z_fps,
+                raw_dev_u_mean=raw_dev_u_mean_init,
+                raw_dev_u_var=raw_dev_u_var_init,
 
+                raw_vol_ls=jax.random.normal(k3, (1,)),
+                raw_vol_sig=jax.random.normal(k3, ()),
+
+                raw_vol_z=raw_vol_z_fps,        
+                raw_vol_u_mean=raw_vol_u_mean_init,
+                raw_vol_u_var=raw_vol_u_var_init,
+
+                # Noise parameters (Fixed PDE residual noise to prevent uncertainty collapse)
+                log_sigma_free_x=jnp.log(jnp.array(1.0)),
+                log_sigma_free_y=jnp.log(jnp.array(1.0)),
+                log_sigma_fix_x=jax.random.normal(k3, (load_noise_std_steps.shape[0],)),
+                log_sigma_fix_y=jax.random.normal(k4, (load_noise_std_steps.shape[0],)),
+                **aniso_kwargs
+            )
+    
     min_dev = jnp.min(dev_z, axis=0)
     min_vol = jnp.min(vol_z, axis=0)
     max_dev = jnp.max(dev_z, axis=0)
