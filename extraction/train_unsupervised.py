@@ -26,9 +26,11 @@ from core.trainer import HyperelasticGPTrainer
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 from core.datasetclass import TractionDataset, DatasetFactory
 from core.loss_function import total_stochastic_loss
+from core.filters import filter_dataset_kinematics
 from core.plotter import (
     plot_loss_analysis,
-    plot_parameters_hist, plot_inducing_points, plot_combined_validation, plot_training_r2
+    plot_parameters_hist, plot_inducing_points, plot_combined_validation, plot_training_r2,
+    plot_domain_invariants
 )
 
 def parse_args():
@@ -82,6 +84,16 @@ def parse_args():
                         help="VFM loss mode: 'linear_triangle', 'global_vf', or 'mix'")
     parser.add_argument('--vf_order', type=int, default=2,
                         help="Polynomial order for kinematically admissible virtual fields basis (default: 2)")
+
+    # Noise Filtering & Preprocessing
+    parser.add_argument('--filter_noise', type=int, default=0,
+                        help="Set to 1 to enable displacement noise filtering preprocessing")
+    parser.add_argument('--filter_method', type=str, default="laplacian", choices=["laplacian", "gaussian"],
+                        help="Filtering method: 'laplacian' or 'gaussian'")
+    parser.add_argument('--filter_alpha', type=float, default=0.5,
+                        help="Laplacian relaxation parameter in (0, 1]")
+    parser.add_argument('--filter_passes', type=int, default=3,
+                        help="Number of Laplacian smoothing passes")
 
     return parser.parse_args()
 
@@ -225,6 +237,16 @@ if __name__ == "__main__" :
     
     dataset = DatasetFactory.create("dataset/precomputed_vfm", data_path=prep_dataset_path)
     prep_data = dataset.get_data()
+
+    # Optional Preprocessing: Filter displacement measurement noise
+    if args.filter_noise == 1 or config_dict.get("filter_noise", 0) == 1:
+        method = config_dict.get("filter_method", args.filter_method)
+        alpha = float(config_dict.get("filter_alpha", args.filter_alpha))
+        passes = int(config_dict.get("filter_passes", args.filter_passes))
+        prep_data = filter_dataset_kinematics(
+            prep_data, method=method, alpha=alpha, passes=passes, verbose=True
+        )
+
     f2x2 = prep_data["F"][train_load_steps_indices]
     cells = prep_data["cells"]
     node_type = np.asarray(prep_data["node_type"])
@@ -344,6 +366,24 @@ if __name__ == "__main__" :
         I_z = jnp.concat(I_z_list, axis = -1)
         
     plot_inducing_points(dev_z, vol_z, dev_flat, vol_flat, save_path, aniso_z=aniso_z, aniso_I=aniso_flat, feature_extractor=extractor)
+
+    # Pre-training visualization: Invariant fields on domain (before optimization)
+    try:
+        print("Generating pre-training domain invariants visualization...")
+        target_step = train_load_steps_indices[-1] if len(train_load_steps_indices) > 0 else -1
+        plot_domain_invariants(
+            prep_data=prep_data,
+            save_path=save_path,
+            step_idx=target_step,
+            model_mode=args.model_mode,
+            a0=a0_val if 'a0_val' in locals() else None,
+            a1=a1 if 'a1' in locals() else None,
+            make_png=True,
+            save_comparison=True
+        )
+        print("✅ Pre-training domain invariants plot generated successfully.")
+    except Exception as e:
+        print(f"Warning: Could not generate pre-training domain invariants plot: {e}")
 
     # Setup random key
     key = jax.random.PRNGKey(args.seed)
@@ -605,6 +645,23 @@ if __name__ == "__main__" :
         val_steps=val_load_steps_indices
     )
     r2, rmse, coverage = r2_res[0], r2_res[1], r2_res[2]
+
+    # Generate domain invariants plot (showing noisy observed data and smoothness)
+    try:
+        print("Generating Domain Invariants Plot (Noise-added observed data)...")
+        target_step = train_load_steps_indices[-1] if len(train_load_steps_indices) > 0 else -1
+        plot_domain_invariants(
+            prep_data=prep_data,
+            save_path=save_path,
+            step_idx=target_step,
+            model_mode=args.model_mode,
+            a0=a0_pred if 'a0_pred' in locals() else (a0 if 'a0' in locals() else None),
+            a1=a1 if 'a1' in locals() else None,
+            make_png=True,
+            save_comparison=True
+        )
+    except Exception as e:
+        print(f"Warning: Failed to generate domain invariants plot: {e}")
 
     # Capture peak memory
     import resource

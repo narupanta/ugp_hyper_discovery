@@ -8,10 +8,12 @@ and extraction, unified with the repository's styling theme.
 import os
 import json
 import yaml
+from typing import Any, Optional, Dict, List
 import numpy as np
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import matplotlib.tri as tri
 
 from core.utils import C_func, I3_func
 from plots.theme import (
@@ -1048,4 +1050,351 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
         primary_r2, primary_rmse, primary_cov,
         train_metrics=ret_train, val_metrics=ret_val, by_component=comp_metrics
     )
+
+
+def plot_domain_invariants(
+    prep_data: dict,
+    save_path: str,
+    step_idx: int = -1,
+    model_mode: str = "isotropic",
+    a0: Any = None,
+    a1: Any = None,
+    make_png: bool = True,
+    save_comparison: bool = True,
+):
+    """
+    Plots strain invariant fields on the physical domain using noise-added observed data (u_obs / F_obs).
+    For isotropic materials: plots I1_bar, I2_bar, and J.
+    For anisotropic materials: plots I1_bar, I2_bar, J, and additionally I4_bar, I6_bar, I8_bar.
+
+    Optionally generates a side-by-side noise comparison (Clean Ground Truth vs Noisy Observed)
+    to visually demonstrate the degradation of spatial smoothness caused by measurement noise.
+
+    Saved files:
+      - domain_invariants.pdf / .png (Observed noisy invariant fields)
+      - domain_invariants_noise_comparison.pdf / .png (True vs Observed comparison, if true data available)
+    """
+    from core.fem_engine import compute_all_invariants
+
+    mesh_pos = np.asarray(prep_data["mesh_pos"], dtype=np.float64)
+    cells = np.asarray(prep_data["cells"], dtype=np.int32)
+    triangulation = tri.Triangulation(mesh_pos[:, 0], mesh_pos[:, 1], cells)
+
+    # Determine step index
+    num_steps = prep_data["F"].shape[0] if "F" in prep_data else (
+        prep_data["u"].shape[0] if "u" in prep_data else 1
+    )
+    if step_idx is None or step_idx < 0:
+        step_idx = num_steps + (step_idx if step_idx is not None else -1)
+    step_idx = max(0, min(step_idx, num_steps - 1))
+
+    # Retrieve or infer fiber vectors
+    if a0 is None and "a0" in prep_data:
+        cand_a0 = prep_data["a0"]
+        if hasattr(cand_a0, "dtype") and cand_a0.dtype == object and getattr(cand_a0, "ndim", 0) == 0:
+            cand_a0 = cand_a0.item()
+        a0 = cand_a0
+    if a1 is None and "a1" in prep_data:
+        cand_a1 = prep_data["a1"]
+        if hasattr(cand_a1, "dtype") and cand_a1.dtype == object and getattr(cand_a1, "ndim", 0) == 0:
+            cand_a1 = cand_a1.item()
+        a1 = cand_a1
+
+    if a0 is not None:
+        try:
+            a0 = np.asarray(a0, dtype=np.float64).flatten()
+            if a0.size < 3:
+                a0 = np.pad(a0, (0, 3 - a0.size))
+        except Exception:
+            a0 = None
+
+    if a1 is not None:
+        try:
+            a1 = np.asarray(a1, dtype=np.float64).flatten()
+            if a1.size < 3:
+                a1 = np.pad(a1, (0, 3 - a1.size))
+        except Exception:
+            a1 = None
+
+    is_aniso = (model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]) or (a0 is not None)
+
+    # Compute or retrieve observed invariants (noisy u_obs / F_obs)
+    obs_invariants = {}
+    if "obs_I1_bar" in prep_data and prep_data["obs_I1_bar"] is not None:
+        obs_invariants["I1_bar"] = np.asarray(prep_data["obs_I1_bar"][step_idx])
+        obs_invariants["I2_bar"] = np.asarray(prep_data["obs_I2_bar"][step_idx])
+        obs_invariants["J"] = np.asarray(prep_data["obs_J"][step_idx])
+        if "obs_I4_bar" in prep_data and prep_data["obs_I4_bar"] is not None:
+            obs_invariants["I4_bar"] = np.asarray(prep_data["obs_I4_bar"][step_idx])
+        if "obs_I6_bar" in prep_data and prep_data["obs_I6_bar"] is not None:
+            obs_invariants["I6_bar"] = np.asarray(prep_data["obs_I6_bar"][step_idx])
+        if "obs_I8_bar" in prep_data and prep_data["obs_I8_bar"] is not None:
+            obs_invariants["I8_bar"] = np.asarray(prep_data["obs_I8_bar"][step_idx])
+
+    # If invariants not precomputed, or missing anisotropic keys when anisotropic is requested
+    if "I1_bar" not in obs_invariants or (is_aniso and "I4_bar" not in obs_invariants):
+        F_source = prep_data.get("F_obs", prep_data.get("F"))
+        if F_source is not None:
+            F_step = F_source[step_idx]
+            calc_invs = compute_all_invariants(F_step, a0=a0, a1=a1)
+            for k, v in calc_invs.items():
+                obs_invariants[k] = np.asarray(v)
+
+    # Compute or retrieve clean ground truth invariants (if available)
+    true_invariants = {}
+    if "true_I1_bar" in prep_data and prep_data["true_I1_bar"] is not None:
+        true_invariants["I1_bar"] = np.asarray(prep_data["true_I1_bar"][step_idx])
+        true_invariants["I2_bar"] = np.asarray(prep_data["true_I2_bar"][step_idx])
+        true_invariants["J"] = np.asarray(prep_data["true_J"][step_idx])
+        if "true_I4_bar" in prep_data and prep_data["true_I4_bar"] is not None:
+            true_invariants["I4_bar"] = np.asarray(prep_data["true_I4_bar"][step_idx])
+        if "true_I6_bar" in prep_data and prep_data["true_I6_bar"] is not None:
+            true_invariants["I6_bar"] = np.asarray(prep_data["true_I6_bar"][step_idx])
+        if "true_I8_bar" in prep_data and prep_data["true_I8_bar"] is not None:
+            true_invariants["I8_bar"] = np.asarray(prep_data["true_I8_bar"][step_idx])
+    elif "F_true" in prep_data and prep_data["F_true"] is not None:
+        F_true_step = prep_data["F_true"][step_idx]
+        calc_true = compute_all_invariants(F_true_step, a0=a0, a1=a1)
+        for k, v in calc_true.items():
+            true_invariants[k] = np.asarray(v)
+
+    # Compute or retrieve raw un-filtered invariants if filtering was applied
+    raw_invariants = {}
+    has_filtered = ("raw_I1_bar" in prep_data and prep_data["raw_I1_bar"] is not None) or (
+        "u_raw" in prep_data and prep_data["u_raw"] is not None
+    )
+    if "raw_I1_bar" in prep_data and prep_data["raw_I1_bar"] is not None:
+        raw_invariants["I1_bar"] = np.asarray(prep_data["raw_I1_bar"][step_idx])
+        raw_invariants["I2_bar"] = np.asarray(prep_data["raw_I2_bar"][step_idx])
+        raw_invariants["J"] = np.asarray(prep_data["raw_J"][step_idx])
+        if "raw_I4_bar" in prep_data and prep_data["raw_I4_bar"] is not None:
+            raw_invariants["I4_bar"] = np.asarray(prep_data["raw_I4_bar"][step_idx])
+        if "raw_I6_bar" in prep_data and prep_data["raw_I6_bar"] is not None:
+            raw_invariants["I6_bar"] = np.asarray(prep_data["raw_I6_bar"][step_idx])
+        if "raw_I8_bar" in prep_data and prep_data["raw_I8_bar"] is not None:
+            raw_invariants["I8_bar"] = np.asarray(prep_data["raw_I8_bar"][step_idx])
+    elif "F_raw" in prep_data and prep_data["F_raw"] is not None:
+        F_raw_step = prep_data["F_raw"][step_idx]
+        calc_raw = compute_all_invariants(F_raw_step, a0=a0, a1=a1)
+        for k, v in calc_raw.items():
+            raw_invariants[k] = np.asarray(v)
+
+    # Determine list of invariants to plot
+    inv_keys = ["I1_bar", "I2_bar", "J"]
+    if is_aniso:
+        for k in ["I4_bar", "I6_bar", "I8_bar"]:
+            if k in obs_invariants and obs_invariants[k] is not None:
+                inv_keys.append(k)
+
+    titles_map = {
+        "I1_bar": r"$\bar{I}_1$ (Isochoric First Invariant)",
+        "I2_bar": r"$\bar{I}_2$ (Isochoric Second Invariant)",
+        "J": r"$J = \det(\mathbf{F})$ (Volume Ratio)",
+        "I4_bar": r"$\bar{I}_4 = \mathbf{a}_0 \cdot \bar{\mathbf{C}} \cdot \mathbf{a}_0$",
+        "I6_bar": r"$\bar{I}_6 = \mathbf{a}_1 \cdot \bar{\mathbf{C}} \cdot \mathbf{a}_1$",
+        "I8_bar": r"$\bar{I}_8 = (\mathbf{a}_0 \cdot \mathbf{a}_1)(\mathbf{a}_0 \cdot \bar{\mathbf{C}} \cdot \mathbf{a}_1)$",
+    }
+    short_titles_map = {
+        "I1_bar": r"$\bar{I}_1$",
+        "I2_bar": r"$\bar{I}_2$",
+        "J": r"$J$",
+        "I4_bar": r"$\bar{I}_4$",
+        "I6_bar": r"$\bar{I}_6$",
+        "I8_bar": r"$\bar{I}_8$",
+    }
+    cmaps_map = {
+        "I1_bar": "viridis",
+        "I2_bar": "viridis",
+        "J": "coolwarm",
+        "I4_bar": "viridis",
+        "I6_bar": "viridis",
+        "I8_bar": "coolwarm",
+    }
+
+    # =========================================================================
+    # 1. Plot Invariant Fields on Domain
+    # If filtering is active: shows Row 0 (Raw Noisy) vs Row 1 (Filtered Smoothed)
+    # =========================================================================
+    apply_style()
+    n_items = len(inv_keys)
+
+    if has_filtered and all(k in raw_invariants for k in inv_keys):
+        # 2-Row Layout: Raw Noisy vs Filtered Smoothed
+        fig, axes = plt.subplots(2, n_items, figsize=(4.8 * n_items, 8.8), squeeze=False)
+        fig.suptitle(
+            f"Preprocessed Invariant Fields on Domain (Step {step_idx})\n"
+            f"Top: Raw Noisy ($u_{{\\mathrm{{raw}}}}$) | Bottom: Filtered Smoothed ($u_{{\\mathrm{{filt}}}}$)",
+            fontsize=13, y=0.99
+        )
+        for col_idx, key in enumerate(inv_keys):
+            raw_v = raw_invariants[key]
+            filt_v = obs_invariants[key]
+            cmap = cmaps_map.get(key, "viridis")
+            vmin = min(float(np.min(raw_v)), float(np.min(filt_v)))
+            vmax = max(float(np.max(raw_v)), float(np.max(filt_v)))
+
+            # Row 0: Raw Noisy
+            ax_r = axes[0, col_idx]
+            tpc_r = ax_r.tripcolor(triangulation, facecolors=raw_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
+            cbar_r = fig.colorbar(tpc_r, ax=ax_r, fraction=0.046, pad=0.04)
+            cbar_r.ax.tick_params(labelsize=8)
+            ax_r.set_aspect('equal')
+            ax_r.set_title(f"Raw Noisy {short_titles_map.get(key, key)}", fontsize=10.5, pad=5)
+            ax_r.set_xlabel("X [mm]", fontsize=9)
+            ax_r.set_ylabel("Y [mm]", fontsize=9)
+            ax_r.tick_params(labelsize=8)
+
+            # Row 1: Filtered Smoothed
+            ax_f = axes[1, col_idx]
+            tpc_f = ax_f.tripcolor(triangulation, facecolors=filt_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
+            cbar_f = fig.colorbar(tpc_f, ax=ax_f, fraction=0.046, pad=0.04)
+            cbar_f.ax.tick_params(labelsize=8)
+            ax_f.set_aspect('equal')
+            ax_f.set_title(f"Filtered Smoothed {short_titles_map.get(key, key)}", fontsize=10.5, pad=5)
+            ax_f.set_xlabel("X [mm]", fontsize=9)
+            ax_f.set_ylabel("Y [mm]", fontsize=9)
+            ax_f.tick_params(labelsize=8)
+    else:
+        # Standard Layout: 1-row (iso) or 2-row (aniso) of observed fields
+        if n_items == 3:
+            nrows, ncols = 1, 3
+            figsize = (15.5, 4.8)
+        elif n_items == 4:
+            nrows, ncols = 2, 2
+            figsize = (11.0, 9.2)
+        elif n_items <= 6:
+            nrows, ncols = 2, 3
+            figsize = (15.5, 9.2)
+        else:
+            ncols = 3
+            nrows = (n_items + 2) // 3
+            figsize = (5.2 * ncols, 4.6 * nrows)
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+        fig.suptitle(f"Observed Strain Invariant Fields on Domain (Noisy $u_{{\\mathrm{{obs}}}}$, Step {step_idx})", fontsize=13.5, y=0.98)
+
+        for idx, key in enumerate(inv_keys):
+            r, c = divmod(idx, ncols)
+            ax = axes[r, c]
+            val = obs_invariants[key]
+            cmap = cmaps_map.get(key, "viridis")
+
+            tpc = ax.tripcolor(triangulation, facecolors=val, cmap=cmap, edgecolors='k', linewidth=0.15)
+            cbar = fig.colorbar(tpc, ax=ax, fraction=0.046, pad=0.04)
+            cbar.ax.tick_params(labelsize=8.5)
+            ax.set_aspect('equal')
+            ax.set_title(titles_map.get(key, key), fontsize=10.5, pad=6)
+            ax.set_xlabel("X [mm]", fontsize=9.5)
+            ax.set_ylabel("Y [mm]", fontsize=9.5)
+            ax.tick_params(labelsize=8.5)
+
+        for idx in range(n_items, nrows * ncols):
+            r, c = divmod(idx, ncols)
+            axes[r, c].set_visible(False)
+
+    plt.tight_layout()
+    out_pdf = os.path.join(save_path, "domain_invariants.pdf")
+    save_figure(fig, out_pdf, make_png=make_png)
+    plt.close(fig)
+
+    saved_paths = {"domain_invariants": out_pdf}
+
+    # =========================================================================
+    # 2. Side-by-Side Noise Comparison Plot
+    # If Ground Truth is available:
+    #   - 3 rows if filtered: True -> Raw Noisy -> Filtered Smoothed
+    #   - 2 rows if not filtered: True -> Observed Noisy
+    # =========================================================================
+    has_clean = all(k in true_invariants for k in inv_keys)
+    if save_comparison and has_clean:
+        if has_filtered and all(k in raw_invariants for k in inv_keys):
+            # 3-row comparison: True -> Raw Noisy -> Filtered
+            fig_c, axes_c = plt.subplots(3, n_items, figsize=(4.8 * n_items, 12.8), squeeze=False)
+            fig_c.suptitle(
+                f"Noise & Filtering Impact on Domain Invariant Smoothness (Step {step_idx})\n"
+                f"Row 1: Ground Truth ($u_{{\\mathrm{{true}}}}$) | Row 2: Raw Noisy ($u_{{\\mathrm{{raw}}}}$) | Row 3: Filtered Smoothed ($u_{{\\mathrm{{filt}}}}$)",
+                fontsize=13, y=0.99
+            )
+
+            for col_idx, key in enumerate(inv_keys):
+                true_v = true_invariants[key]
+                raw_v = raw_invariants[key]
+                filt_v = obs_invariants[key]
+                cmap = cmaps_map.get(key, "viridis")
+
+                vmin = min(float(np.min(true_v)), float(np.min(raw_v)), float(np.min(filt_v)))
+                vmax = max(float(np.max(true_v)), float(np.max(raw_v)), float(np.max(filt_v)))
+                raw_mae = float(np.mean(np.abs(raw_v - true_v)))
+                filt_mae = float(np.mean(np.abs(filt_v - true_v)))
+
+                # Row 0: True Clean
+                ax_t = axes_c[0, col_idx]
+                tpc_t = ax_t.tripcolor(triangulation, facecolors=true_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
+                fig_c.colorbar(tpc_t, ax=ax_t, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
+                ax_t.set_aspect('equal')
+                ax_t.set_title(f"True {short_titles_map.get(key, key)} (Clean, Smooth)", fontsize=10.5, pad=5)
+                ax_t.set_xlabel("X [mm]", fontsize=9); ax_t.set_ylabel("Y [mm]", fontsize=9)
+                ax_t.tick_params(labelsize=8)
+
+                # Row 1: Raw Noisy
+                ax_r = axes_c[1, col_idx]
+                tpc_r = ax_r.tripcolor(triangulation, facecolors=raw_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
+                fig_c.colorbar(tpc_r, ax=ax_r, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
+                ax_r.set_aspect('equal')
+                ax_r.set_title(f"Raw Noisy {short_titles_map.get(key, key)} (MAE: {raw_mae:.2e})", fontsize=10.5, pad=5)
+                ax_r.set_xlabel("X [mm]", fontsize=9); ax_r.set_ylabel("Y [mm]", fontsize=9)
+                ax_r.tick_params(labelsize=8)
+
+                # Row 2: Filtered Smoothed
+                ax_f = axes_c[2, col_idx]
+                tpc_f = ax_f.tripcolor(triangulation, facecolors=filt_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
+                fig_c.colorbar(tpc_f, ax=ax_f, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
+                ax_f.set_aspect('equal')
+                ax_f.set_title(f"Filtered {short_titles_map.get(key, key)} (MAE: {filt_mae:.2e})", fontsize=10.5, pad=5)
+                ax_f.set_xlabel("X [mm]", fontsize=9); ax_f.set_ylabel("Y [mm]", fontsize=9)
+                ax_f.tick_params(labelsize=8)
+
+        else:
+            # 2-row comparison: True vs Observed
+            fig_c, axes_c = plt.subplots(2, n_items, figsize=(4.8 * n_items, 8.8), squeeze=False)
+            fig_c.suptitle(
+                f"Noise Impact on Invariant Field Smoothness (Step {step_idx})\n"
+                f"Top: Ground Truth ($u_{{\\mathrm{{true}}}}$) | Bottom: Observed with Measurement Noise ($u_{{\\mathrm{{obs}}}}$)",
+                fontsize=13, y=0.99
+            )
+
+            for col_idx, key in enumerate(inv_keys):
+                true_v = true_invariants[key]
+                obs_v = obs_invariants[key]
+                cmap = cmaps_map.get(key, "viridis")
+
+                vmin = min(float(np.min(true_v)), float(np.min(obs_v)))
+                vmax = max(float(np.max(true_v)), float(np.max(obs_v)))
+                mae = float(np.mean(np.abs(obs_v - true_v)))
+
+                # Row 0: True Clean
+                ax_t = axes_c[0, col_idx]
+                tpc_t = ax_t.tripcolor(triangulation, facecolors=true_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
+                fig_c.colorbar(tpc_t, ax=ax_t, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
+                ax_t.set_aspect('equal')
+                ax_t.set_title(f"True {short_titles_map.get(key, key)} (Clean, Smooth)", fontsize=10.5, pad=5)
+                ax_t.set_xlabel("X [mm]", fontsize=9); ax_t.set_ylabel("Y [mm]", fontsize=9)
+                ax_t.tick_params(labelsize=8)
+
+                # Row 1: Observed Noisy
+                ax_o = axes_c[1, col_idx]
+                tpc_o = ax_o.tripcolor(triangulation, facecolors=obs_v, cmap=cmap, vmin=vmin, vmax=vmax, edgecolors='k', linewidth=0.15)
+                fig_c.colorbar(tpc_o, ax=ax_o, fraction=0.046, pad=0.04).ax.tick_params(labelsize=8)
+                ax_o.set_aspect('equal')
+                ax_o.set_title(f"Observed {short_titles_map.get(key, key)} (Noisy, MAE: {mae:.2e})", fontsize=10.5, pad=5)
+                ax_o.set_xlabel("X [mm]", fontsize=9); ax_o.set_ylabel("Y [mm]", fontsize=9)
+                ax_o.tick_params(labelsize=8)
+
+        plt.tight_layout()
+        out_comp_pdf = os.path.join(save_path, "domain_invariants_noise_comparison.pdf")
+        save_figure(fig_c, out_comp_pdf, make_png=make_png)
+        plt.close(fig_c)
+        saved_paths["noise_comparison"] = out_comp_pdf
+
+    return saved_paths
 

@@ -210,6 +210,10 @@ U_VAR_ANCHOR=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); 
 KZZ_JITTER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('kzz_jitter', '1e-8'))" 2>/dev/null || echo "1e-8")
 VFM_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vfm_mode', 'linear_triangle'))" 2>/dev/null || echo "linear_triangle")
 VF_ORDER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vf_order', 2))" 2>/dev/null || echo "2")
+FILTER_NOISE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('filter_noise', 0))" 2>/dev/null || echo "0")
+FILTER_METHOD=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('filter_method', 'laplacian'))" 2>/dev/null || echo "laplacian")
+FILTER_ALPHA=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('filter_alpha', 0.5))" 2>/dev/null || echo "0.5")
+FILTER_PASSES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('filter_passes', 3))" 2>/dev/null || echo "3")
 
 # Distillation params
 DIST_MODEL=$(get_cfg "['distilled_material_model']")
@@ -349,6 +353,10 @@ for SEED in $SEEDS_LIST; do
             --kzz_jitter "$KZZ_JITTER" \
             --vfm_mode "$VFM_MODE" \
             --vf_order "$VF_ORDER" \
+            --filter_noise "$FILTER_NOISE" \
+            --filter_method "$FILTER_METHOD" \
+            --filter_alpha "$FILTER_ALPHA" \
+            --filter_passes "$FILTER_PASSES" \
             --seed "$SEED" \
             --batch_dir "$EXTRACT_DIR" \
             $MAT_EXTRA_ARGS
