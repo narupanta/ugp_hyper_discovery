@@ -269,7 +269,8 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     axes3[0].set_title("Deviatoric Trend Parameters")
     axes3[0].set_xlabel("Iteration Step")
     axes3[0].set_ylabel("Value")
-    axes3[0].legend()
+    if axes3[0].get_legend_handles_labels()[0]:
+        axes3[0].legend()
     axes3[0].grid(True, alpha=0.25)
 
     vol_params = ["k", "q", "s"]
@@ -279,7 +280,8 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     axes3[1].set_title("Volumetric Trend Parameters")
     axes3[1].set_xlabel("Iteration Step")
     axes3[1].set_ylabel("Value")
-    axes3[1].legend()
+    if axes3[1].get_legend_handles_labels()[0]:
+        axes3[1].legend()
     axes3[1].grid(True, alpha=0.25)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
@@ -1330,4 +1332,245 @@ def plot_domain_invariants(
         saved_paths["noise_comparison"] = out_comp_pdf
 
     return saved_paths
+
+
+def evaluate_reaction_force_calibration(
+    learned_gp,
+    prep_data: dict,
+    val_steps: list,
+    save_path: str,
+    n_samples: int = 64,
+    key: Any = None,
+    make_png: bool = True
+) -> dict:
+    """
+    Evaluates predictive uncertainty calibration on physically measured reaction forces
+    (load cell readings) across validation load steps, entirely without ground truth model.
+    Counts X and Y reaction forces independently (hits / (2 * len(val_steps))).
+    Returns a dictionary of calibration metrics and generates diagnostic parity/curve plots.
+    """
+    import jax.random as jr
+    from core.utils import fto3x3
+    from core.loss_function import vfm_loss
+
+    apply_style()
+    val_steps_idx = jnp.array(val_steps)
+    f2x2 = prep_data["F"][val_steps_idx]
+    f3x3 = jax.vmap(jax.vmap(fto3x3))(f2x2)
+    f_neu_val = prep_data["f_neu"][val_steps_idx]
+    cells = prep_data["cells"]
+    node_type = jnp.asarray(prep_data["node_type"])
+    dNdX = prep_data["dNdX"]
+    dA = prep_data["dA"]
+    n_nodes = node_type.shape[0]
+
+    load_noise_val = prep_data["load_noise_std_steps"][val_steps_idx]
+    sigma_noise_x = jnp.maximum(load_noise_val[:, 0], 1e-3)
+    sigma_noise_y = jnp.maximum(load_noise_val[:, 1], 1e-3)
+
+    if key is None:
+        key = jr.PRNGKey(42)
+    keys = jr.split(key, n_samples)
+    params = getattr(learned_gp, "params", None)
+    if params is None and hasattr(learned_gp, "raw_params"):
+        params = learned_gp.load_params(learned_gp.raw_params)
+    weights = getattr(learned_gp, "gpweight", None)
+    if weights is None and params is not None:
+        weights = learned_gp.precompute_weights_from_loaded(params)
+
+    piola2x2 = lambda f, k: learned_gp.piola(f, k, params=params, weights=weights)[:2, :2]
+    piola_cells = jax.vmap(piola2x2, in_axes=(0, None))
+    piola_steps = jax.vmap(piola_cells, in_axes=(0, None))
+    piola_sampling_batch = jax.vmap(piola_steps, in_axes=(None, 0))
+
+    def eval_step_sample(p_cells_step, f_neu_step):
+        free_x, free_y, fix_x, fix_y, _ = vfm_loss(
+            cells, n_nodes, f_neu_step, node_type, p_cells_step, dNdX, dA, None
+        )
+        return fix_x, fix_y
+
+    eval_sample = jax.vmap(eval_step_sample, in_axes=(0, 0))
+    eval_batch = jax.vmap(eval_sample, in_axes=(0, None))
+
+    batch_size = 8
+    all_fix_x = []
+    all_fix_y = []
+    for b_start in range(0, n_samples, batch_size):
+        b_keys = keys[b_start:b_start + batch_size]
+        p_val_b = piola_sampling_batch(f3x3, b_keys)
+        fix_x_b, fix_y_b = eval_batch(p_val_b, f_neu_val)
+        all_fix_x.append(np.array(fix_x_b))
+        all_fix_y.append(np.array(fix_y_b))
+
+    fix_x_samples = jnp.array(np.concatenate(all_fix_x, axis=0))
+    fix_y_samples = jnp.array(np.concatenate(all_fix_y, axis=0))
+
+    f_meas_x = jnp.sum(f_neu_val[:, :, 0], axis=1)
+    f_meas_y = jnp.sum(f_neu_val[:, :, 1], axis=1)
+
+    # Predicted load cell forces from equilibrium: F_pred = F_meas - R
+    f_pred_x_samples = f_meas_x[None, :] - fix_x_samples
+    f_pred_y_samples = f_meas_y[None, :] - fix_y_samples
+
+    mu_fx = jnp.mean(f_pred_x_samples, axis=0)
+    var_fx = jnp.var(f_pred_x_samples, axis=0) + sigma_noise_x**2
+    std_fx = jnp.sqrt(var_fx)
+
+    mu_fy = jnp.mean(f_pred_y_samples, axis=0)
+    var_fy = jnp.var(f_pred_y_samples, axis=0) + sigma_noise_y**2
+    std_fy = jnp.sqrt(var_fy)
+
+    hit_x = jnp.abs(f_meas_x - mu_fx) <= 1.96 * std_fx
+    hit_y = jnp.abs(f_meas_y - mu_fy) <= 1.96 * std_fy
+
+    total_hits = int(jnp.sum(hit_x) + jnp.sum(hit_y))
+    total_count = 2 * len(val_steps)
+    ec_force = float(total_hits / total_count * 100.0)
+    ec_force_y = float(jnp.mean(hit_y) * 100.0)
+    ec_force_x = float(jnp.mean(hit_x) * 100.0)
+
+    ss_tot_y = jnp.sum((f_meas_y - jnp.mean(f_meas_y))**2)
+    ss_res_y = jnp.sum((f_meas_y - mu_fy)**2)
+    r2_fy = float(1.0 - ss_res_y / (ss_tot_y + 1e-12))
+    rmse_fy = float(jnp.sqrt(jnp.mean((f_meas_y - mu_fy)**2)))
+
+    ss_tot_x = jnp.sum((f_meas_x - jnp.mean(f_meas_x))**2)
+    ss_res_x = jnp.sum((f_meas_x - mu_fx)**2)
+    r2_fx = float(1.0 - ss_res_x / (ss_tot_x + 1e-12))
+    rmse_fx = float(jnp.sqrt(jnp.mean((f_meas_x - mu_fx)**2)))
+
+    f_meas_all = jnp.concatenate([f_meas_x, f_meas_y])
+    mu_f_all = jnp.concatenate([mu_fx, mu_fy])
+    ss_tot_all = jnp.sum((f_meas_all - jnp.mean(f_meas_all))**2)
+    ss_res_all = jnp.sum((f_meas_all - mu_f_all)**2)
+    r2_force = float(1.0 - ss_res_all / (ss_tot_all + 1e-12))
+    rmse_force = float(jnp.sqrt(jnp.mean((f_meas_all - mu_f_all)**2)))
+
+    scores_y = jnp.abs(f_meas_y - mu_fy) / std_fy
+    scores_x = jnp.abs(f_meas_x - mu_fx) / std_fx
+    q_95_x = float(np.quantile(np.array(scores_x), 0.95))
+    q_95_y = float(np.quantile(np.array(scores_y), 0.95))
+    all_scores = jnp.concatenate([scores_x, scores_y])
+    q_95 = float(np.quantile(np.array(all_scores), 0.95))
+
+    # Plotting: 2 Rows (Row 0: X / R·e0, Row 1: Y / R·e1)
+    if save_path:
+        fig, axes = plt.subplots(2, 2, figsize=(14.0, 10.0))
+
+        steps_arr = np.array(val_steps)
+        f_m_x_np, mu_fx_np, std_fx_np = np.array(f_meas_x), np.array(mu_fx), np.array(std_fx)
+        f_m_y_np, mu_fy_np, std_fy_np = np.array(f_meas_y), np.array(mu_fy), np.array(std_fy)
+
+        # ---------------- Row 1: X-direction (R · e0) ----------------
+        # Panel (0, 0): Fx vs Load Step
+        ax1 = axes[0, 0]
+        ax1.plot(steps_arr, mu_fx_np, color='#1f77b4', lw=2.0, label=r"GP Predicted Mean ($F_x$)")
+        ax1.fill_between(steps_arr, mu_fx_np - 1.96 * std_fx_np, mu_fx_np + 1.96 * std_fx_np,
+                         color='#1f77b4', alpha=0.25, label=r"$95\%$ Credible Interval")
+        ax1.errorbar(steps_arr, mu_fx_np, yerr=1.96 * std_fx_np, fmt='o', color='#1f77b4',
+                     ecolor='#4ba3e3', elinewidth=1.2, capsize=3, markersize=5)
+        ax1.scatter(steps_arr, f_m_x_np, color='black', s=45, zorder=5, label=r"Measured Load Cell ($F_{\mathrm{meas}, x}$)")
+        ax1.set_xlabel("Validation Load Step Index", fontsize=11)
+        ax1.set_ylabel(r"Reaction Force $F_x$ ($\mathbf{F} \cdot \mathbf{e}_0$)", fontsize=11)
+        ax1.set_title(r"Validation Reaction Force vs. Load Step ($x$-direction, $\mathbf{R} \cdot \mathbf{e}_0$)", fontsize=12)
+        ax1.grid(True, alpha=0.25)
+        ax1.legend(loc="upper left", fontsize=9.5, framealpha=0.9)
+
+        # Panel (0, 1): Fx Parity Plot
+        ax2 = axes[0, 1]
+        ax2.errorbar(f_m_x_np, mu_fx_np, yerr=1.96 * std_fx_np, fmt='o',
+                     color='#1f77b4', ecolor='#4ba3e3', alpha=0.85,
+                     markersize=5, elinewidth=1.2, capsize=3, label="Validation Steps")
+        min_val_x = min(float(np.min(f_m_x_np)), float(np.min(mu_fx_np)))
+        max_val_x = max(float(np.max(f_m_x_np)), float(np.max(mu_fx_np)))
+        margin_x = max((max_val_x - min_val_x) * 0.08, 0.05)
+        ax2.plot([min_val_x - margin_x, max_val_x + margin_x], [min_val_x - margin_x, max_val_x + margin_x],
+                 'k--', lw=1.5, label=r"Parity ($F_{\mathrm{pred}} = F_{\mathrm{meas}}$)")
+        box_text_x = (
+            f"Holdout Steps: {_format_step_indices(val_steps)}\n"
+            f"$R^2_{{\\mathrm{{force}}, x}}$: {r2_fx:.4f}\n"
+            f"RMSE$_{{\\mathrm{{force}}, x}}$: {rmse_fx:.4f}\n"
+            f"EC ($X$-direction): {int(np.sum(hit_x))}/{len(val_steps)} ({ec_force_x:.1f}%)\n"
+            f"Conformal $Q_{{0.95, x}}$: {q_95_x:.2f}"
+        )
+        ax2.text(0.05, 0.95, box_text_x, transform=ax2.transAxes, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.88, edgecolor='#cccccc'), fontsize=9.5)
+        ax2.set_xlabel(r"Measured Reaction Force $F_{\mathrm{meas}, x}$ ($\mathbf{F}_{\mathrm{meas}} \cdot \mathbf{e}_0$)", fontsize=11)
+        ax2.set_ylabel(r"Predicted GP Reaction Force $F_{\mathrm{pred}, x}$ ($\mathbf{F}_{\mathrm{pred}} \cdot \mathbf{e}_0$)", fontsize=11)
+        ax2.set_title(r"Reaction Force Parity & Calibration ($x$-direction, $\mathbf{R} \cdot \mathbf{e}_0$)", fontsize=12)
+        ax2.grid(True, alpha=0.25)
+        ax2.legend(loc="lower right", fontsize=9.5, framealpha=0.9)
+
+        # ---------------- Row 2: Y-direction (R · e1) ----------------
+        # Panel (1, 0): Fy vs Load Step
+        ax3 = axes[1, 0]
+        ax3.plot(steps_arr, mu_fy_np, color='#2ca02c', lw=2.0, label=r"GP Predicted Mean ($F_y$)")
+        ax3.fill_between(steps_arr, mu_fy_np - 1.96 * std_fy_np, mu_fy_np + 1.96 * std_fy_np,
+                         color='#2ca02c', alpha=0.25, label=r"$95\%$ Credible Interval")
+        ax3.errorbar(steps_arr, mu_fy_np, yerr=1.96 * std_fy_np, fmt='o', color='#2ca02c',
+                     ecolor='#74c476', elinewidth=1.2, capsize=3, markersize=5)
+        ax3.scatter(steps_arr, f_m_y_np, color='black', s=45, zorder=5, label=r"Measured Load Cell ($F_{\mathrm{meas}, y}$)")
+        ax3.set_xlabel("Validation Load Step Index", fontsize=11)
+        ax3.set_ylabel(r"Reaction Force $F_y$ ($\mathbf{F} \cdot \mathbf{e}_1$)", fontsize=11)
+        ax3.set_title(r"Validation Reaction Force vs. Load Step ($y$-direction, $\mathbf{R} \cdot \mathbf{e}_1$)", fontsize=12)
+        ax3.grid(True, alpha=0.25)
+        ax3.legend(loc="upper left", fontsize=9.5, framealpha=0.9)
+
+        # Panel (1, 1): Fy Parity Plot
+        ax4 = axes[1, 1]
+        ax4.errorbar(f_m_y_np, mu_fy_np, yerr=1.96 * std_fy_np, fmt='o',
+                     color='#2ca02c', ecolor='#74c476', alpha=0.85,
+                     markersize=5, elinewidth=1.2, capsize=3, label="Validation Steps")
+        min_val_y = min(float(np.min(f_m_y_np)), float(np.min(mu_fy_np)))
+        max_val_y = max(float(np.max(f_m_y_np)), float(np.max(mu_fy_np)))
+        margin_y = max((max_val_y - min_val_y) * 0.08, 0.05)
+        ax4.plot([min_val_y - margin_y, max_val_y + margin_y], [min_val_y - margin_y, max_val_y + margin_y],
+                 'k--', lw=1.5, label=r"Parity ($F_{\mathrm{pred}} = F_{\mathrm{meas}}$)")
+        box_text_y = (
+            f"Holdout Steps: {_format_step_indices(val_steps)}\n"
+            f"$R^2_{{\\mathrm{{force}}, y}}$: {r2_fy:.4f}\n"
+            f"RMSE$_{{\\mathrm{{force}}, y}}$: {rmse_fy:.4f}\n"
+            f"EC ($Y$-direction): {int(np.sum(hit_y))}/{len(val_steps)} ({ec_force_y:.1f}%)\n"
+            f"Total EC ($X+Y$): {total_hits}/{total_count} ({ec_force:.1f}%)\n"
+            f"Conformal $Q_{{0.95, y}}$: {q_95_y:.2f}"
+        )
+        ax4.text(0.05, 0.95, box_text_y, transform=ax4.transAxes, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.88, edgecolor='#cccccc'), fontsize=9.5)
+        ax4.set_xlabel(r"Measured Reaction Force $F_{\mathrm{meas}, y}$ ($\mathbf{F}_{\mathrm{meas}} \cdot \mathbf{e}_1$)", fontsize=11)
+        ax4.set_ylabel(r"Predicted GP Reaction Force $F_{\mathrm{pred}, y}$ ($\mathbf{F}_{\mathrm{pred}} \cdot \mathbf{e}_1$)", fontsize=11)
+        ax4.set_title(r"Reaction Force Parity & Calibration ($y$-direction, $\mathbf{R} \cdot \mathbf{e}_1$)", fontsize=12)
+        ax4.grid(True, alpha=0.25)
+        ax4.legend(loc="lower right", fontsize=9.5, framealpha=0.9)
+
+        plt.tight_layout()
+        if save_path.endswith(".pdf") or save_path.endswith(".png"):
+            out_path = os.path.splitext(save_path)[0] + ".pdf"
+        else:
+            out_path = os.path.join(save_path, "reaction_force_calibration.pdf")
+        save_figure(fig, out_path, make_png=make_png)
+        plt.close(fig)
+
+    return {
+        "r2_force": r2_force,
+        "rmse_force": rmse_force,
+        "r2_force_y": r2_fy,
+        "rmse_force_y": rmse_fy,
+        "r2_force_x": r2_fx,
+        "rmse_force_x": rmse_fx,
+        "ec_force": ec_force,
+        "ec_force_y": ec_force_y,
+        "ec_force_x": ec_force_x,
+        "total_hits": total_hits,
+        "total_count": total_count,
+        "conformal_q95": q_95,
+        "conformal_q95_x": q_95_x,
+        "conformal_q95_y": q_95_y,
+        "f_meas_x": [float(x) for x in f_meas_x],
+        "f_pred_x": [float(x) for x in mu_fx],
+        "f_std_x": [float(x) for x in std_fx],
+        "f_meas_y": [float(x) for x in f_meas_y],
+        "f_pred_y": [float(x) for x in mu_fy],
+        "f_std_y": [float(x) for x in std_fy],
+        "val_steps": [int(x) for x in val_steps],
+    }
 
