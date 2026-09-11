@@ -21,12 +21,14 @@ SEEDS_CLI=""
 DO_GEN=false
 DO_EXT=false
 DO_DISTILL=false
+DO_FEM=false
 DO_VAL=false
 HAS_DO_FLAGS=false
 
 SKIP_GEN=false
 SKIP_EXT=false
 SKIP_DISTILL=false
+SKIP_FEM=false
 SKIP_VAL=false
 
 VAL_WORKERS_OVERRIDE=""
@@ -48,6 +50,11 @@ while [[ $# -gt 0 ]]; do
             HAS_DO_FLAGS=true
             shift
             ;;
+        --do-fem)
+            DO_FEM=true
+            HAS_DO_FLAGS=true
+            shift
+            ;;
         --do-val)
             DO_VAL=true
             HAS_DO_FLAGS=true
@@ -63,6 +70,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-distill|--no-distill)
             SKIP_DISTILL=true
+            shift
+            ;;
+        --skip-fem|--no-fem)
+            SKIP_FEM=true
             shift
             ;;
         --skip-val|--no-val)
@@ -92,7 +103,7 @@ done
 
 if [ -z "$INPUT_TARGET" ]; then
     echo "❌ Error: Please provide an experiment folder, recipe yaml, or recipe name!"
-    echo "Usage: $0 <experiment_dir_or_recipe> [--seeds '1 2'] [--do-gen] [--do-ext] [--do-distill] [--do-val]"
+    echo "Usage: $0 <experiment_dir_or_recipe> [--seeds '1 2'] [--do-gen] [--do-ext] [--do-distill] [--do-fem] [--do-val]"
     exit 1
 fi
 
@@ -102,16 +113,19 @@ if [ "$HAS_DO_FLAGS" = true ]; then
     RUN_GEN=$DO_GEN
     RUN_EXT=$DO_EXT
     RUN_DISTILL=$DO_DISTILL
+    RUN_FEM=$DO_FEM
     RUN_VAL=$DO_VAL
 else
     # Otherwise run all stages unless explicitly skipped
     RUN_GEN=true
     RUN_EXT=true
     RUN_DISTILL=true
+    RUN_FEM=true
     RUN_VAL=true
     if [ "$SKIP_GEN" = true ]; then RUN_GEN=false; fi
     if [ "$SKIP_EXT" = true ]; then RUN_EXT=false; fi
     if [ "$SKIP_DISTILL" = true ]; then RUN_DISTILL=false; fi
+    if [ "$SKIP_FEM" = true ]; then RUN_FEM=false; fi
     if [ "$SKIP_VAL" = true ]; then RUN_VAL=false; fi
 fi
 
@@ -263,7 +277,7 @@ if [ -n "$ANISO_PARAMS" ]; then MAT_EXTRA_ARGS="$MAT_EXTRA_ARGS --aniso_params $
 
 # Resolve seeds list
 if [ -n "$SEEDS_CLI" ]; then
-    SEEDS_LIST="$SEEDS_CLI"
+    SEEDS_LIST="${SEEDS_CLI//,/ }"
 else
     SEEDS_LIST=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); s=d.get('seeds', d.get('seed_list', d.get('seed', 42))); print(*s) if isinstance(s, list) else print(s)" 2>/dev/null || echo "42")
 fi
@@ -272,7 +286,7 @@ echo "========================================================================"
 echo "Experiment Directory: $EXPERIMENT_DIR"
 echo "Material Model:       $MODEL (Candidate: $DIST_MODEL)"
 echo "Seeds to process:     $SEEDS_LIST"
-echo "Stages active:        GEN=$RUN_GEN, EXT=$RUN_EXT, DISTILL=$RUN_DISTILL, VAL=$RUN_VAL"
+echo "Stages active:        GEN=$RUN_GEN, EXT=$RUN_EXT, DISTILL=$RUN_DISTILL, FEM=$RUN_FEM, VAL=$RUN_VAL"
 echo "========================================================================"
 
 # ==============================================================================
@@ -544,15 +558,15 @@ for SEED in $SEEDS_LIST; do
         echo "⏭️ Skipping Step 3 (Distillation) for Seed $SEED."
     fi
 
-    # --- STEP 4: FEM VALIDATION ---
-    if [ "$RUN_VAL" = true ]; then
-        echo "--- Step 4: FEM Validation (Seed: $SEED) ---"
+    # --- STEP 4: FEM FORWARD SIMULATION ---
+    if [ "$RUN_FEM" = true ]; then
+        echo "--- Step 4: FEM Forward Simulation (Seed: $SEED) ---"
         mkdir -p "$VAL_DIR/block"
         mkdir -p "$VAL_DIR/holes"
 
         # Verify distilled samples exist
         if [ ! -f "$DISTILL_DIR/dev_flow_samples.npy" ]; then
-            echo "❌ Error: Cannot run FEM validation; distilled flow samples not found at $DISTILL_DIR"
+            echo "❌ Error: Cannot run FEM forward simulation; distilled flow samples not found at $DISTILL_DIR"
             exit 1
         fi
 
@@ -602,30 +616,74 @@ for SEED in $SEEDS_LIST; do
             python3 validation/merge_fem_workers.py --folder "$VAL_DIR/holes"
         fi
 
-        FEM_VAL_STEPS="${TEST_LOAD_STEPS_INDICES:-$VAL_LOAD_STEPS_INDICES}"
-        echo "Generating UQ displacement verification plots (evaluating steps: $FEM_VAL_STEPS)..."
-        python3 plots/uq_verification_disp.py \
-            --model_path "$VAL_DIR/block" \
-            --validation_load_step_indices $FEM_VAL_STEPS \
-            --n_sample "$VAL_SAMPLES" || true
-
-        python3 plots/uq_verification_disp.py \
-            --model_path "$VAL_DIR/holes" \
-            --validation_load_step_indices $FEM_VAL_STEPS \
-            --n_sample "$VAL_SAMPLES" || true
-
-        echo "Updating validation_metrics.json for Seed $SEED..."
-        python3 validation/update_validation_metrics_json.py \
-            --distilled_dir "$DISTILL_DIR" \
-            --val_load_steps $FEM_VAL_STEPS
-
-        # Copy validation_metrics.json into fem_validation and seed dir
-        cp "$DISTILL_DIR/validation_metrics.json" "$VAL_DIR/validation_metrics.json" 2>/dev/null || true
-        cp "$DISTILL_DIR/validation_metrics.json" "$SEED_DIR/validation_metrics.json" 2>/dev/null || true
-
-        echo "✅ Step 4 (FEM Validation for Seed $SEED) completed."
+        echo "✅ Step 4 (FEM Forward Simulation for Seed $SEED) completed."
     else
-        echo "⏭️ Skipping Step 4 (FEM Validation) for Seed $SEED."
+        echo "⏭️ Skipping Step 4 (FEM Forward Simulation) for Seed $SEED."
+    fi
+
+    # --- STEP 5: VALIDATION METRICS & PLOTS ---
+    if [ "$RUN_VAL" = true ]; then
+        echo "--- Step 5: Validation Metrics & Plots (Seed: $SEED) ---"
+        if [ ! -d "$DISTILL_DIR" ] && [ ! -d "$VAL_DIR" ]; then
+            echo "⚠️ Notice: Neither $DISTILL_DIR nor $VAL_DIR found for Seed $SEED; skipping validation metrics & plots."
+        else
+            FEM_VAL_STEPS="${TEST_LOAD_STEPS_INDICES:-$VAL_LOAD_STEPS_INDICES}"
+
+            # If worker files exist but consolidated fem_distilled_samples.npz doesn't exist, merge them
+            for GEOM_DIR in "$VAL_DIR/block" "$VAL_DIR/holes"; do
+                if [ -d "$GEOM_DIR" ] && [ ! -f "$GEOM_DIR/fem_distilled_samples.npz" ]; then
+                    if ls "$GEOM_DIR"/fem_distilled_samples_worker*.npz 1> /dev/null 2>&1; then
+                        echo "Merging worker outputs in $GEOM_DIR..."
+                        python3 validation/merge_fem_workers.py --folder "$GEOM_DIR" || true
+                    fi
+                fi
+            done
+
+            if [ -d "$VAL_DIR/block" ] && [ -f "$VAL_DIR/block/fem_distilled_samples.npz" ]; then
+                echo "Generating UQ displacement verification plots for Block (evaluating steps: $FEM_VAL_STEPS)..."
+                python3 plots/uq_verification_disp.py \
+                    --model_path "$VAL_DIR/block" \
+                    --validation_load_step_indices $FEM_VAL_STEPS \
+                    --n_sample "$VAL_SAMPLES" || true
+            else
+                echo "⚠️ Notice: $VAL_DIR/block/fem_distilled_samples.npz not found; skipping Block UQ verification plots."
+            fi
+
+            if [ -d "$VAL_DIR/holes" ] && [ -f "$VAL_DIR/holes/fem_distilled_samples.npz" ]; then
+                echo "Generating UQ displacement verification plots for Holes (evaluating steps: $FEM_VAL_STEPS)..."
+                python3 plots/uq_verification_disp.py \
+                    --model_path "$VAL_DIR/holes" \
+                    --validation_load_step_indices $FEM_VAL_STEPS \
+                    --n_sample "$VAL_SAMPLES" || true
+            else
+                echo "⚠️ Notice: $VAL_DIR/holes/fem_distilled_samples.npz not found; skipping Holes UQ verification plots."
+            fi
+
+            # Re-run distilled energy R2 plot if distilled outputs exist
+            if [ -f "$DISTILL_DIR/dev_flow_samples.npy" ] && [ -f "$EXTRACT_DIR/gp_posterior_predictions.npz" ]; then
+                python3 plots/plot_distilled_r2_energy.py \
+                    --distilled_dir "$DISTILL_DIR" \
+                    --saved_model_dir "$EXTRACT_DIR" \
+                    --material_model "$DIST_MODEL" \
+                    --distill_target "$DIST_TARGET" \
+                    --val_load_steps $FEM_VAL_STEPS || true
+            fi
+
+            if [ -d "$DISTILL_DIR" ]; then
+                echo "Updating validation_metrics.json for Seed $SEED..."
+                python3 validation/update_validation_metrics_json.py \
+                    --distilled_dir "$DISTILL_DIR" \
+                    --val_load_steps $FEM_VAL_STEPS
+
+                # Copy validation_metrics.json into fem_validation and seed dir
+                cp "$DISTILL_DIR/validation_metrics.json" "$VAL_DIR/validation_metrics.json" 2>/dev/null || true
+                cp "$DISTILL_DIR/validation_metrics.json" "$SEED_DIR/validation_metrics.json" 2>/dev/null || true
+            fi
+
+            echo "✅ Step 5 (Validation Metrics & Plots for Seed $SEED) completed."
+        fi
+    else
+        echo "⏭️ Skipping Step 5 (Validation Metrics & Plots) for Seed $SEED."
     fi
 
 done
@@ -633,13 +691,14 @@ done
 # ==============================================================================
 # 4. Post-Execution Aggregation Across Seeds
 # ==============================================================================
-echo ""
-echo "========================================================================"
-echo "=== Updating Experiment Config & Compiling Multi-Seed Summary ==="
-echo "========================================================================"
+if [ "$RUN_VAL" = true ] || [ "$HAS_DO_FLAGS" = false ]; then
+    echo ""
+    echo "========================================================================"
+    echo "=== Updating Experiment Config & Compiling Multi-Seed Summary ==="
+    echo "========================================================================"
 
-# Update config.yaml with all available numeric seeds present in the folder
-python3 - <<EOF
+    # Update config.yaml with all available numeric seeds present in the folder
+    python3 - <<EOF
 import os
 import yaml
 
@@ -658,9 +717,13 @@ if os.path.exists(cfg_file):
         print(f"Updated {cfg_file} with complete seeds list: {seeds_found}")
 EOF
 
-# Run cross-seed summary generator
-python3 plots/generate_experiment_summary.py --experiment_dir "$EXPERIMENT_DIR"
+    # Run cross-seed summary generator
+    python3 plots/generate_experiment_summary.py --experiment_dir "$EXPERIMENT_DIR" || true
 
-echo ""
-echo "🎉 Pipeline finished successfully for experiment: $EXPERIMENT_DIR"
-echo "📊 Cross-seed results available in: $EXPERIMENT_DIR/summary_across_seeds.md and $EXPERIMENT_DIR/plots/"
+    echo ""
+    echo "🎉 Pipeline finished successfully for experiment: $EXPERIMENT_DIR"
+    echo "📊 Cross-seed results available in: $EXPERIMENT_DIR/summary_across_seeds.md and $EXPERIMENT_DIR/plots/"
+else
+    echo ""
+    echo "🎉 Pipeline finished successfully for requested stages: $EXPERIMENT_DIR"
+fi

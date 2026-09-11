@@ -12,20 +12,31 @@ ANISO_PARAM_NAMES = ["C42", "C43", "C44", "C62", "C63", "C64"]
 def compute_displacement_metrics(distilled_dir, subfolder, step_indices=[9]):
     candidates = [
         os.path.join(distilled_dir, subfolder, "fem_distilled_samples.npz"),
-        os.path.join(distilled_dir, "..", subfolder, "fem_distilled_samples.npz"),
-        os.path.join(distilled_dir, "..", "fem_validation", subfolder, "fem_distilled_samples.npz"),
+        os.path.join(distilled_dir, "fem_validation", subfolder, "fem_distilled_samples.npz"),
     ]
     if subfolder in ["fem_validation", "block"]:
         candidates.extend([
+            os.path.join(distilled_dir, "fem_validation", "block", "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "block", "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "fem_distilled_samples.npz"),
             os.path.join(distilled_dir, "..", "fem_validation", "block", "fem_distilled_samples.npz"),
             os.path.join(distilled_dir, "..", "fem_validation", "fem_distilled_samples.npz"),
-            os.path.join(distilled_dir, "fem_validation", "block", "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "..", "block", "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "..", subfolder, "fem_distilled_samples.npz"),
         ])
     elif subfolder in ["fem_validation_holes", "holes"]:
         candidates.extend([
+            os.path.join(distilled_dir, "fem_validation", "holes", "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "holes", "fem_distilled_samples.npz"),
             os.path.join(distilled_dir, "..", "fem_validation", "holes", "fem_distilled_samples.npz"),
             os.path.join(distilled_dir, "..", "fem_validation_holes", "fem_distilled_samples.npz"),
-            os.path.join(distilled_dir, "fem_validation", "holes", "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "..", "holes", "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "..", subfolder, "fem_distilled_samples.npz"),
+        ])
+    else:
+        candidates.extend([
+            os.path.join(distilled_dir, "..", subfolder, "fem_distilled_samples.npz"),
+            os.path.join(distilled_dir, "..", "fem_validation", subfolder, "fem_distilled_samples.npz"),
         ])
 
     file_path = None
@@ -42,14 +53,16 @@ def compute_displacement_metrics(distilled_dir, subfolder, step_indices=[9]):
         return None
 
     u_pred = data["u_pred"]  # (N, n_steps, n_nodes, 2)
-    u_true_all = data["u_exp"] if "u_exp" in data else data["u_true"]
+    u_true_all = data["u_true"] if "u_true" in data else data["u_exp"]
 
-    # Filter and validate indices
+    # Filter and validate indices against available steps
     if isinstance(step_indices, int):
         step_indices = [step_indices]
-    valid_steps = [s for s in step_indices if s < u_pred.shape[1]]
+    valid_steps = [s for s in step_indices if s < u_pred.shape[1] and s < u_true_all.shape[0]]
     if not valid_steps:
-        valid_steps = [u_pred.shape[1] - 1]
+        fallback_step = min(u_pred.shape[1] - 1, u_true_all.shape[0] - 1)
+        print(f"[WARN] No requested step_indices {step_indices} valid for u_pred ({u_pred.shape[1]}) and u_true ({u_true_all.shape[0]}). Clamping to {fallback_step}.")
+        valid_steps = [fallback_step]
 
     # Concatenate across all evaluation steps
     # Shape: (N, len(valid_steps) * n_nodes, 2)
@@ -274,19 +287,23 @@ def update_metrics(distilled_dir, step_idx=9, train_steps=None):
     def parse_fem_time(folder_name):
         candidates = [
             os.path.join(distilled_dir, folder_name),
-            os.path.join(distilled_dir, "..", "fem_validation", folder_name),
-            os.path.join(distilled_dir, "..", "fem_validation"),
-            os.path.join(distilled_dir, "..", folder_name),
+            os.path.join(distilled_dir, "fem_validation", folder_name),
         ]
         if folder_name in ["fem_validation", "block"]:
             candidates.extend([
-                os.path.join(distilled_dir, "..", "fem_validation", "block"),
                 os.path.join(distilled_dir, "fem_validation", "block"),
+                os.path.join(distilled_dir, "block"),
+                os.path.join(distilled_dir, "..", "fem_validation", "block"),
+                os.path.join(distilled_dir, "..", "fem_validation"),
+                os.path.join(distilled_dir, "..", "block"),
             ])
         elif folder_name in ["fem_validation_holes", "holes"]:
             candidates.extend([
-                os.path.join(distilled_dir, "..", "fem_validation", "holes"),
                 os.path.join(distilled_dir, "fem_validation", "holes"),
+                os.path.join(distilled_dir, "holes"),
+                os.path.join(distilled_dir, "..", "fem_validation", "holes"),
+                os.path.join(distilled_dir, "..", "fem_validation_holes"),
+                os.path.join(distilled_dir, "..", "holes"),
             ])
 
         fem_dir = None
