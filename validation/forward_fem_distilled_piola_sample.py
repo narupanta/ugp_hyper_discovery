@@ -220,6 +220,7 @@ def parse_args():
     parser.add_argument('--output_suffix', type=str, default="", help="Optional suffix for worker output file")
     parser.add_argument('--output_dir', type=str, default=None, help="Direct output directory for FEM validation")
     parser.add_argument('--dataset_path', type=str, default="", help="Explicit path to precomputed dataset npz file")
+    parser.add_argument('--num_steps', type=int, default=None, help="Number of load steps (defaults to dataset load shape or 10)")
 
     return parser.parse_args()
 if __name__ == "__main__" :
@@ -339,22 +340,29 @@ if __name__ == "__main__" :
         if prep_dataset_path is not None:
             print(f"[VAL] Found matching dataset: {prep_dataset_path}")
 
+    prep_data = None
+    u_true = None
     if prep_dataset_path is not None:
         try:
             prep_data = np.load(prep_dataset_path, allow_pickle=True)
+            if "u_true" in prep_data:
+                u_true = prep_data["u_true"]
+            elif "u" in prep_data:
+                u_true = prep_data["u"]
+
             if "u_exp" in prep_data:
                 u_exp = prep_data["u_exp"]
-            elif "u_true" in prep_data:
-                u_exp = prep_data["u_true"]
+            elif "u_obs" in prep_data:
+                u_exp = prep_data["u_obs"]
             else:
-                u_exp = prep_data["u"]
+                u_exp = u_true
             
             # Load mesh directly from dataset
             node_coords = prep_data["mesh_pos"][:, :2] if "mesh_pos" in prep_data else prep_data["node_coords"][:, :2]
             cells = prep_data["cells"]
             node_type = prep_data["node_type"]
         except Exception as e:
-            print(f"Failed to load u_exp from {prep_dataset_path}: {e}")
+            print(f"Failed to load dataset from {prep_dataset_path}: {e}")
             sys.exit(1)
     else:
         print(f"Warning: No dataset found for {material_model_name}_{disp_noise}_{load_noise}_{target_load} with geometry={geometry_flag}.")
@@ -368,6 +376,25 @@ if __name__ == "__main__" :
         node_coords = mesh_data["node_coords"][:, :2]
         cells = mesh_data["cells"]
         node_type = np.zeros(node_coords.shape[0], dtype=int)
+
+    # Determine load schedule and step count
+    if prep_data is not None and "load" in prep_data:
+        loads_solve = jnp.array(prep_data["load"])
+        num_steps = loads_solve.shape[0]
+        print(f"[VAL] Using loading schedule from dataset with {num_steps} load steps.")
+    else:
+        key = jax.random.PRNGKey(42)
+        num_steps = args.num_steps if getattr(args, "num_steps", None) is not None else 10
+        noise_std = load_noise * target_load
+        target_load_noisy = target_load + noise_std * jax.random.normal(key)
+
+        noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1, 1)
+        if geometry_flag == "holes":
+            noisy_load_right_base = jnp.zeros_like(noisy_load_top_base)
+        else:
+            noisy_load_right_base = noisy_load_top_base * asym_factor
+        loads_solve = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
+        print(f"[VAL] Generated synthetic linspace loading schedule with {num_steps} load steps.")
 
     ele_type = 'TRI3'
     cell_type = get_meshio_cell_type(ele_type)
@@ -402,8 +429,14 @@ if __name__ == "__main__" :
             existing_data = np.load(consolidated_file, allow_pickle=True)
             existing_u_pred = existing_data["u_pred"]
             existing_selected_samples = existing_data["selected_samples"]
-            num_existing = existing_u_pred.shape[0]
-            print(f"Found existing {num_existing} FEM sample realizations in {consolidated_file}.")
+            if existing_u_pred.shape[1] != num_steps:
+                print(f"[VAL] Warning: Cached u_pred has {existing_u_pred.shape[1]} steps, but expected {num_steps} steps. Discarding stale cache.")
+                existing_u_pred = None
+                existing_selected_samples = None
+                num_existing = 0
+            else:
+                num_existing = existing_u_pred.shape[0]
+                print(f"Found existing {num_existing} FEM sample realizations in {consolidated_file}.")
         except Exception as e:
             print(f"Could not load existing consolidated file: {e}. Starting fresh.")
 
@@ -498,25 +531,30 @@ if __name__ == "__main__" :
             "pc_type": "lu",
             "pc_factor_mat_solver_type": "mumps",
         }
-        key = jax.random.PRNGKey(42 + num_existing)
-        num_steps = 10
-        noise_std = load_noise * target_load
-        target_load_noisy = target_load + noise_std * jax.random.normal(key)
-
-        noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1, 1)
-        if geometry_flag == "holes":
-            noisy_load_right_base = jnp.zeros_like(noisy_load_top_base)
-        else:
-            noisy_load_right_base = noisy_load_top_base * asym_factor
-        loads_noisy = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
-
         gt_dir = os.path.join(save_path, "gt")
         gt_file = os.path.join(gt_dir, "u_gt.npz")
+        u_true_cached = None
         if os.path.exists(gt_file):
-            u_true = np.load(gt_file)["u"]
+            try:
+                cached_data = np.load(gt_file)
+                if cached_data["u"].shape[0] == num_steps:
+                    u_true_cached = cached_data["u"]
+                    print(f"[VAL] Loaded existing ground truth from {gt_file}")
+                else:
+                    print(f"[VAL] Warning: Cached ground truth has {cached_data['u'].shape[0]} steps != {num_steps}. Re-evaluating.")
+            except Exception as e:
+                print(f"[VAL] Error reading gt_file: {e}")
+
+        if u_true_cached is not None:
+            u_true = u_true_cached
+        elif u_true is not None and u_true.shape[0] == num_steps:
+            os.makedirs(gt_dir, exist_ok=True)
+            np.savez_compressed(gt_file, u=u_true, cells=cells, node_coords=node_coords, node_type=node_type)
+            print(f"[VAL] Reused and cached ground truth displacements from dataset: shape={u_true.shape}")
         else:
             os.makedirs(gt_dir, exist_ok=True)
-            u_true = solve_adaptive_fem(problem_true, bc_config, loads_noisy, petsc_options)
+            print(f"[VAL] Solving adaptive FEM for ground truth with {num_steps} load steps...")
+            u_true = solve_adaptive_fem(problem_true, bc_config, loads_solve, petsc_options)
             np.savez_compressed(gt_file, u=u_true, cells=cells, node_coords=node_coords, node_type=node_type)
 
         u_pred_samples = []
@@ -552,7 +590,7 @@ if __name__ == "__main__" :
             
             try:
                 print(f"Sample {num_existing + success_count + 1}/{target_total_samples}: Attempting realization {sample_idx}/{len(selected_samples)}...")
-                u_pred = solve_adaptive_fem(problem_pred, bc_config, loads_noisy, petsc_options)
+                u_pred = solve_adaptive_fem(problem_pred, bc_config, loads_solve, petsc_options)
                 success = True 
             except Exception as e:
                 print(f"Simulation failed on realization {sample_idx}: {e}")
@@ -581,7 +619,7 @@ if __name__ == "__main__" :
                 "node_coords": node_coords,
                 "cells": cells,
                 "node_type": node_type,
-                "loads": loads_noisy,
+                "loads": loads_solve,
                 "fem_time_sec": t_fem_duration
             }
             if 'u_true' in locals() and u_true is not None:

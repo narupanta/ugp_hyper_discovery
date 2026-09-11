@@ -248,9 +248,11 @@ def plot_node_distributions(u_true, u_pred_samples, u_pred_piola_traction_sample
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     
     save_file = os.path.join(save_path, "local_node_distributions.pdf")
+    save_file_png = os.path.join(save_path, "local_node_distributions.png")
     plt.savefig(save_file, bbox_inches='tight', transparent=True)
-    # print(f"Transposed plot saved to: {save_file}")
-    # plt.show()
+    plt.savefig(save_file_png, bbox_inches='tight', transparent=True, dpi=300)
+    print(f"Local node distributions plot saved to: {save_file} and {save_file_png}")
+    plt.close(fig)
 # def plot_node_distributions(u_true, u_pred_samples, u_pred_piola_traction_samples, node_to_plot, save_path):
 #     """
 #     Plots local distributions with 95% Quantile CIs.
@@ -480,9 +482,13 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, node_in
         ax.set_aspect('equal')
 
     plt.tight_layout(rect=[0, 0.05, 1, 0.95])
-    # plt.tight_layout(rect=[0, 0, 1, 1])
     os.makedirs(save_path, exist_ok=True)
-    plt.savefig(os.path.join(save_path, "displacement_analysis.pdf"), bbox_inches='tight')
+    pdf_file = os.path.join(save_path, "displacement_analysis.pdf")
+    png_file = os.path.join(save_path, "displacement_analysis.png")
+    plt.savefig(pdf_file, bbox_inches='tight')
+    plt.savefig(png_file, bbox_inches='tight', dpi=300)
+    print(f"Displacement analysis plot saved to: {pdf_file} and {png_file}")
+    plt.close(fig)
 
 
 import matplotlib.pyplot as plt
@@ -567,10 +573,11 @@ def plot_disp_r2_coverage(u_true, u_pred_med, u_pred_lower, u_pred_upper, save_p
     if save_path:
         os.makedirs(save_path, exist_ok=True)
         save_file = os.path.join(save_path, f"disp_r2_coverage_xy_{suffix}.pdf")
+        save_file_png = os.path.join(save_path, f"disp_r2_coverage_xy_{suffix}.png")
         plt.savefig(save_file, bbox_inches='tight')
-        print(f"Plot saved to: {save_file}")
-    
-    plt.show()
+        plt.savefig(save_file_png, bbox_inches='tight', dpi=300)
+        print(f"Plot saved to: {save_file} and {save_file_png}")
+    plt.close(fig)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Isihara Model Dataset and Training Configuration")
@@ -619,15 +626,20 @@ if __name__ == "__main__" :
 
     if os.path.exists(consolidated_file):
         consolidated_data = np.load(consolidated_file, allow_pickle=True)
+        max_step = consolidated_data["u_pred"].shape[1] - 1
+        if step > max_step:
+            print(f"[WARN] Requested step {step} exceeds simulation steps ({max_step + 1}). Clamping to {max_step}.")
+            step = max_step
         u_pred_piola_samples = consolidated_data["u_pred"][:, step]
         mesh_node_coords = consolidated_data["node_coords"]
         mesh_cells = consolidated_data["cells"]
         true_data = consolidated_data
-        if "u_exp" in consolidated_data:
+        if "u_true" in consolidated_data:
+            u_true = consolidated_data["u_true"][step]
+            print(f"Using ground truth displacement (u_true) as reference for plots.")
+        elif "u_exp" in consolidated_data:
             u_true = consolidated_data["u_exp"][step]
             print(f"Using experimental displacement (u_exp) as ground truth reference for plots.")
-        elif "u_true" in consolidated_data:
-            u_true = consolidated_data["u_true"][step]
         else:
             gt_data = np.load(pred_dir_name.parent / "gt" / "u_gt.npz")
             u_true = gt_data["u"][step]
@@ -683,17 +695,23 @@ if __name__ == "__main__" :
     plot_node_distributions(u_true, u_pred_piola_samples, u_pred_piola_traction_samples, node_indices, save_path)
     # plot_disp_r2_coverage(u_true, u_pred_samples.mean(axis=0), u_pred_samples.std(axis=0), save_path)
 
-    # true_data = np.load(true_data_dir / f"{precomputed_vfm_name}.npz")
-    u_true_val = (true_data["u_exp"] if "u_exp" in true_data else (true_data["u_true"] if "u_true" in true_data else true_data["u"]))[validation_load_step_indices]
+    # Filter step indices to ensure they are strictly within bounds
+    max_steps_avail = consolidated_data["u_pred"].shape[1] if os.path.exists(consolidated_file) else 9999
+    valid_val_step_indices = [s for s in validation_load_step_indices if s < max_steps_avail]
+    if not valid_val_step_indices:
+        valid_val_step_indices = [max_steps_avail - 1]
+
+    ref_u_all = true_data["u_true"] if "u_true" in true_data else (true_data["u_exp"] if "u_exp" in true_data else true_data["u"])
+    u_true_val = ref_u_all[valid_val_step_indices]
 
     if os.path.exists(consolidated_file):
-        u_pred_piola_samples_val = consolidated_data["u_pred"][:, validation_load_step_indices]
+        u_pred_piola_samples_val = consolidated_data["u_pred"][:, valid_val_step_indices]
     else:
         files = os.listdir(pred_dir_name / "piola_samples") if os.path.exists(pred_dir_name / "piola_samples") else []
         u_pred_piola_samples_val = [] 
         for f in files:
             data = np.load(pred_dir_name / "piola_samples" / f)
-            u_pred_piola_samples_val.append(data["u_pred"][validation_load_step_indices])
+            u_pred_piola_samples_val.append(data["u_pred"][valid_val_step_indices])
         u_pred_piola_samples_val = jnp.array(u_pred_piola_samples_val)
     p_val_shape = u_pred_piola_samples_val.shape
     u_pred_piola_samples_val_flat = u_pred_piola_samples_val.reshape(p_val_shape[0], -1, 2)
@@ -701,7 +719,7 @@ if __name__ == "__main__" :
         u_pred_piola_traction_samples_val = []
         for f in pt_files:
             data = np.load(pred_dir_name / "piola_traction_samples" / f)
-            u_pred_piola_traction_samples_val.append(data["u_pred"][validation_load_step_indices])
+            u_pred_piola_traction_samples_val.append(data["u_pred"][valid_val_step_indices])
         u_pred_piola_traction_samples_val = jnp.array(u_pred_piola_traction_samples_val)
         pt_val_shape = u_pred_piola_traction_samples_val.shape
 
