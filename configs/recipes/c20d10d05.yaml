@@ -12,23 +12,26 @@ load_noise: 0.01
 target_load_true_top: 4.0
 target_load_holes: 2.4
 asym_factor: 0.95
-n_loadsteps: 10
+n_loadsteps: 20
 geometry_train: block
 geometry_val: holes
 mesh_size: 0.08
 # 2. UGP Extraction (Training) Config
 number_of_mci_sampling: 8
 num_rff: 800
-train_load_steps_indices: [1, 3, 6]
+train_load_steps_indices: [2, 6, 10, 14]
+val_load_steps_indices: [1, 3, 5, 7, 9, 11, 13, 15, 16, 17]
+test_load_steps_indices: [18, 19]
 n_ip: 5
-beta: 1.0
+beta_list: [0.01, 0.1, 1.0, 10.0, 50]
 is_fixed_reaction_force_noise: 1
 is_fixed_inducing_points: 1
 is_include_prior_mean: 0
+
 extraction_n_iterations: 50000
 extraction_learning_rate: 0.01
 covariance_mode: diag
-
+normalize_ell: 0
 # 3. Distillation (Uncertainty-Aware Model Discovery) Config
 distilled_material_model: gmr
 distillation_n_iterations: 10000
@@ -36,7 +39,7 @@ dev_vol_distillation_n_iterations: 10000
 distill_target: sef_split
 sample_mode: dataset_f
 num_func_samples: 512
-num_points: 256
+num_points: 512
 max_gamma: 1.0
 do_sensitivity: 1
 sobol_threshold: 0.0001
@@ -44,6 +47,5 @@ sobol_samples_factor: 4096
 
 # 4. Validation Config
 run_validation: 1
-val_load_steps_indices: [7,8, 9]
-seeds: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
+seeds: [1,2,3,4,5]
 val_number_samples: 1024
