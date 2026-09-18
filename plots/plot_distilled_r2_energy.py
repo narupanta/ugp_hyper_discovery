@@ -324,10 +324,13 @@ def main():
         eval_all_samples_fn = jax.jit(jax.vmap(eval_distilled_psi_single, in_axes=(0, None)))
 
     # 5. Evaluate each validation load step
-    components = ["dev", "vol"]
-    if has_aniso:
-        components.append("aniso")
-    components.append("total")
+    if args.distill_target == "sef_split":
+        components = ["dev", "vol"]
+        if has_aniso:
+            components.append("aniso")
+        components.append("total")
+    else:
+        components = ["total"]
 
     data_by_comp = {comp: {"true": [], "dist_mean": [], "dist_std": [], "dist_q025": [], "dist_q975": [], "gp_mean": [], "gp_std": []} for comp in components}
 
@@ -622,9 +625,12 @@ def main():
         triangulation = mtri.Triangulation(coords_rep[:, 0], coords_rep[:, 1], cells)
 
         # Domain columns: Total, Dev, Vol, (Aniso)
-        domain_cols = ["total", "dev", "vol"]
-        if has_aniso:
-            domain_cols.append("aniso")
+        if args.distill_target == "sef_split":
+            domain_cols = ["total", "dev", "vol"]
+            if has_aniso:
+                domain_cols.append("aniso")
+        else:
+            domain_cols = ["total"]
 
         col_titles = {
             "total": r"$\mathbf{Total\ Energy\ \Psi_{\mathrm{total}}}$",

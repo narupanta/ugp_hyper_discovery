@@ -358,25 +358,14 @@ import os
 import matplotlib.pyplot as plt
 import matplotlib.tri as tri
 import numpy as np
+import matplotlib.ticker as ticker
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from sklearn.metrics import r2_score
 
-def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, node_indices, save_path):
-    plt.rcParams.update({
-        "font.family": "serif",
-        "font.serif": ["Times New Roman", "DejaVu Serif"],
-        "font.size": 14,
-        "axes.titlesize": 18,
-        "axes.labelsize": 16,
-        "legend.fontsize": 16,
-        "xtick.labelsize": 14,
-        "ytick.labelsize": 14,
-        "figure.dpi": 600,
-        "savefig.dpi": 600,
-        "text.usetex": False
-    })
+def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path):
+    apply_style()
 
     # --- Data Preparation ---
-    node_indices = np.array(node_indices)
     coords_true = node_coords + u_true
     coords_pred = node_coords + u_pred_mean
     
@@ -385,133 +374,114 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, node_in
     mag_pred = get_mag(u_pred_mean)
     # Nodal RMSE between true and predicted displacement
     error = np.sqrt(np.mean((u_true - u_pred_mean)**2, axis=-1))
-    mag_std = get_mag(u_pred_std) if u_pred_std.ndim > 1 else u_pred_std
 
-    marker_coords_true = coords_true[node_indices]
-    marker_coords_pred = coords_pred[node_indices]
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 3.8), gridspec_kw={"width_ratios": [1, 1, 1.15]})
 
-    fig, axes = plt.subplots(2, 2, figsize=(12*1.5, 14*1.5)) # Slightly wider to accommodate colorbars
-    # plt.suptitle('Deformed Field: Accuracy & Uncertainty', fontsize=20)
+    # Shared limits for disp magnitude
+    vmin_disp = min(mag_true.min(), mag_pred.min())
+    vmax_disp = max(mag_true.max(), mag_pred.max())
 
-    # --- Helper Function for Labels ---
-    def add_markers_with_labels(ax, coords, indices):
-        ax.scatter(coords[:, 0], coords[:, 1], 
-                   color='red', marker='x', s=60*1.5, linewidths=1.5, 
-                   label='Probe Nodes', zorder=8)
-        for i, idx in enumerate(indices):
-                    ax.annotate(f'ID: {idx}', 
-                                (coords[i, 0], coords[i, 1]),
-                                textcoords="offset points", 
-                                xytext=(-60, 10),        # Slightly increased vertical offset for better clearance
-                                fontsize=28, 
-                                fontweight='bold',
-                                color='red',
-                                zorder=7,
-                                # --- Background Box Styling ---
-                                bbox=dict(
-                                    boxstyle='round,pad=0.3', 
-                                    facecolor='white', 
-                                    edgecolor='red', 
-                                    alpha=0.8,
-                                    linewidth=1
-                                ))
-
-    # --- Helper Function for Colorbars ---
-    def add_colorbar(im, ax, label):
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="5%", pad=0.1)
-        
-        # cbar = fig.colorbar(im, cax=cax, label=label)
-        cbar = fig.colorbar(im, cax=cax)
-        
-        # 1. Set the main colorbar title (label) and its size
-        cbar.set_label(label, size=36, weight='bold') # Adjust '16' as needed
-        
-        # 2. Set the size of the tick values (the numbers)
-        cbar.ax.tick_params(labelsize=36) # Adjust '14' as needed
-        cbar.locator = ticker.MaxNLocator(nbins=4)
-        cbar.update_ticks()
-
-    # 1,1: True Material
-    tri_true = tri.Triangulation(coords_true[:, 0], coords_true[:, 1], cells)
-    im1 = axes[0, 0].tripcolor(tri_true, mag_true, cmap='Blues')
-    add_markers_with_labels(axes[0, 0], marker_coords_true, node_indices)
-    # axes[0, 0].set_title('True Material Model $\|\mathbf{u_{true}}\|$')
-    add_colorbar(im1, axes[0, 0], r"$\|\mathbf{u_{true}}\|$")
-
-    # 1,2: Predicted Material
+    # --- 1. Predicted Displacement Magnitude with Observed Domain Underlay ---
+    tri_obs = tri.Triangulation(coords_true[:, 0], coords_true[:, 1], cells)
     tri_pred = tri.Triangulation(coords_pred[:, 0], coords_pred[:, 1], cells)
-    im2 = axes[0, 1].tripcolor(tri_pred, mag_pred, cmap='Blues')
-    add_markers_with_labels(axes[0, 1], marker_coords_pred, node_indices)
-    # axes[0, 1].set_title('Predicted Material Model $\|\mathbf{u_{pred}}\|$')
-    add_colorbar(im2, axes[0, 1], r"$\|\mathbf{u_{pred}}\|$")
 
-    # 2,1: Nodal error
-    im3 = axes[1, 0].tripcolor(tri_pred, error, cmap='inferno')
-    add_markers_with_labels(axes[1, 0], marker_coords_pred, node_indices)
-    # axes[1, 0].set_title(r'$||\mthbf{u_{true}} - \mathbf{u_{pred}}||$')
-    add_colorbar(im3, axes[1, 0], r"$\mathrm{RMSE}$")
+    # 1a. Background shaded fill of observed domain
+    axes[0].tripcolor(tri_obs, mag_true, cmap="Blues", alpha=0.30, vmin=vmin_disp, vmax=vmax_disp, zorder=1)
+    # 1b. Clear wireframe grid of observed domain
+    axes[0].triplot(tri_obs, color="#444444", linestyle=":", linewidth=0.7, alpha=0.75, zorder=2, label=r"Observed ($\mathbf{u}_{\mathrm{obs}}$)")
+    
+    # 1c. Predicted displacement field contour on top with slight transparency
+    im1 = axes[0].tripcolor(tri_pred, mag_pred, cmap="Blues", alpha=0.88, vmin=vmin_disp, vmax=vmax_disp, zorder=3)
+    # 1d. Solid contour boundary of predicted domain
+    axes[0].triplot(tri_pred, color="#002b4d", linestyle="-", linewidth=0.35, alpha=0.45, zorder=4)
 
-    # 2,2: Uncertainty
-    im4 = axes[1, 1].tripcolor(tri_pred, mag_std, cmap='magma')
-    add_markers_with_labels(axes[1, 1], marker_coords_pred, node_indices)
-    # axes[1, 1].set_title(r'Uncertainty ($\sigma_u$)')
-    add_colorbar(im4, axes[1, 1], r"$\sigma_{\|\mathbf{u_{pred}}\|}$")
+    axes[0].set_aspect("equal")
+    axes[0].axis("off")
+    div1 = make_axes_locatable(axes[0])
+    cax1 = div1.append_axes("right", size="5%", pad=0.08)
+    cbar1 = fig.colorbar(im1, cax=cax1, orientation="vertical")
+    cbar1.set_label(r"$\|\mathbf{u}_{\mathrm{pred}}\|$", fontsize=10, fontweight="bold")
+    cbar1.ax.tick_params(labelsize=8.5)
+    cbar1.locator = ticker.MaxNLocator(nbins=4)
+    cbar1.update_ticks()
 
-    # Standardize labels
-    for ax in axes.flat:
-        # ax.set_xlabel('X')
-        # ax.set_ylabel('Y')
-        # for ax in axes.flat:
-        # Remove axis labels
-        ax.set_xlabel('')
-        ax.set_ylabel('')
-        
-        # Remove tick marks and tick labels (values)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-            
-        # Ensure the grid is off so it doesn't show through the transparency
-        # ax.grid(False)
-        # Optional: if you want to remove the frame/box as well, uncomment the line below
-        ax.axis('off') 
-        
-        # ax.set_aspect('equal')
-        ax.set_aspect('equal')
+    # --- 2. Nodal RMSE (Oranges) ---
+    im2 = axes[1].tripcolor(tri_pred, error, cmap="Oranges")
+    axes[1].set_aspect("equal")
+    axes[1].axis("off")
+    div2 = make_axes_locatable(axes[1])
+    cax2 = div2.append_axes("right", size="5%", pad=0.08)
+    cbar2 = fig.colorbar(im2, cax=cax2, orientation="vertical")
+    cbar2.set_label(r"$\mathrm{RMSE}$", fontsize=10, fontweight="bold")
+    cbar2.ax.tick_params(labelsize=8.5)
+    cbar2.locator = ticker.MaxNLocator(nbins=4)
+    cbar2.update_ticks()
 
-    plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+    # --- 3. Parity & Coverage Plot ---
+    ux_true, uy_true = u_true_val_flat[:, 0], u_true_val_flat[:, 1]
+    ux_med, uy_med = u_p_mean[:, 0], u_p_mean[:, 1]
+    ux_lower, ux_upper = u_p_lower_bound[:, 0], u_p_upper_bound[:, 0]
+    uy_lower, uy_upper = u_p_lower_bound[:, 1], u_p_upper_bound[:, 1]
+
+    cov_x = np.mean((ux_true >= ux_lower) & (ux_true <= ux_upper)) * 100
+    cov_y = np.mean((uy_true >= uy_lower) & (uy_true <= uy_upper)) * 100
+    cov_xy = np.mean((ux_true >= ux_lower) & (ux_true <= ux_upper) & (uy_true >= uy_lower) & (uy_true <= uy_upper)) * 100
+    
+    r2_x = r2_score(ux_true, ux_med)
+    r2_y = r2_score(uy_true, uy_med)
+    
+    rmse_x = np.sqrt(np.mean((ux_med - ux_true)**2))
+    rmse_y = np.sqrt(np.mean((uy_med - uy_true)**2))
+
+    ux_err = [ux_med - ux_lower, ux_upper - ux_med]
+    uy_err = [uy_med - uy_lower, uy_upper - uy_med]
+
+    axes[2].errorbar(ux_true, ux_med, yerr=ux_err, fmt="x", color="#0072B2", ecolor="#0072B2",
+                     alpha=0.35, label=r"$u_x$ " + f"({cov_x:.1f}%)", markersize=4, capsize=0, elinewidth=0.8)
+    axes[2].errorbar(uy_true, uy_med, yerr=uy_err, fmt="o", color="#D55E00", ecolor="#D55E00",
+                     alpha=0.35, label=r"$u_y$ " + f"({cov_y:.1f}%)", markersize=3, capsize=0, elinewidth=0.8)
+
+    all_vals = np.concatenate([u_true_val_flat.flatten(), u_p_mean.flatten()])
+    limits = [all_vals.min(), all_vals.max()]
+    axes[2].plot(limits, limits, "k--", linewidth=1.2, label="Isoline", zorder=5)
+
+    axes[2].set_xlabel(r"$u_{\mathrm{obs}}$", fontsize=11)
+    axes[2].set_ylabel(r"$u_{\mathrm{pred}}$", fontsize=11)
+    axes[2].tick_params(axis="both", which="major", labelsize=8.5)
+    axes[2].grid(True, linestyle=":", alpha=0.6)
+    axes[2].legend(loc="lower right", frameon=True, fontsize=8.5)
+    axes[2].xaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
+    axes[2].yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
+    axes[2].set_box_aspect(1)
+
+    # Observed vs Predicted legend centered directly below Panel 1
+    import matplotlib.lines as mlines
+    obs_line = mlines.Line2D([], [], color='#444444', linestyle=':', linewidth=1.4, label=r'Observed ($\mathbf{u}_{\mathrm{obs}}$)')
+    pred_line = mlines.Line2D([], [], color='#002b4d', linestyle='-', linewidth=1.4, label=r'Predicted ($\mathbf{u}_{\mathrm{pred}}$)')
+    fig.legend(handles=[obs_line, pred_line], loc='center', bbox_to_anchor=(0.18, 0.04),
+               ncol=2, frameon=False, fontsize=8.5, handlelength=1.6, borderpad=0.1)
+
+    # --- Bottom Text Box Banner across figure width (centered under panels 2 & 3) ---
+    stats_banner = (
+        rf"$95\%\;\mathrm{{EC}}_{{u_x \cup u_y}} = \mathbf{{{cov_xy:.1f}\%}}$   $\vert$   "
+        rf"$r^2_{{u_x}} = \mathbf{{{r2_x:.4f}}},\; r^2_{{u_y}} = \mathbf{{{r2_y:.4f}}}$   $\vert$   "
+        rf"$\mathrm{{RMSE}}_{{u_x}} = \mathbf{{{rmse_x:.4f}}},\; \mathrm{{RMSE}}_{{u_y}} = \mathbf{{{rmse_y:.4f}}}$"
+    )
+    fig.text(0.57, 0.04, stats_banner, ha="center", va="center", fontsize=9.0,
+             bbox=dict(boxstyle="round,pad=0.35", facecolor="#f5f5f5", edgecolor="#bbbbbb", lw=0.6))
+
+    plt.subplots_adjust(left=0.03, right=0.97, wspace=0.18, bottom=0.18, top=0.96)
     os.makedirs(save_path, exist_ok=True)
     pdf_file = os.path.join(save_path, "displacement_analysis.pdf")
     png_file = os.path.join(save_path, "displacement_analysis.png")
-    plt.savefig(pdf_file, bbox_inches='tight')
-    plt.savefig(png_file, bbox_inches='tight', dpi=300)
+    plt.savefig(pdf_file, bbox_inches="tight")
+    plt.savefig(png_file, bbox_inches="tight", dpi=300)
     print(f"Displacement analysis plot saved to: {pdf_file} and {png_file}")
     plt.close(fig)
-
-
-import matplotlib.pyplot as plt
-import numpy as np
-import os
-from sklearn.metrics import r2_score
-
 def plot_disp_r2_coverage(u_true, u_pred_med, u_pred_lower, u_pred_upper, save_path, suffix="_"):
-    plt.rcParams.update({
-        "font.family": "serif",
-        "font.serif": ["Times New Roman", "DejaVu Serif"],
-        "font.size": 28,
-        "axes.titlesize": 32,
-        "axes.labelsize": 32,
-        "legend.fontsize": 28,
-        "xtick.labelsize": 28,
-        "ytick.labelsize": 28,
-        "figure.dpi": 600,
-        "savefig.dpi": 600,
-        "text.usetex": False
-    })
+    apply_style()
 
-    fig, ax = plt.subplots(figsize=(15, 9))
+    fig, ax = plt.subplots(figsize=(10, 7))
     
     # --- Component Extraction ---
     ux_true, uy_true = u_true[:, 0], u_true[:, 1]
@@ -531,22 +501,21 @@ def plot_disp_r2_coverage(u_true, u_pred_med, u_pred_lower, u_pred_upper, save_p
     cov_y, r2_y = get_stats(uy_true, uy_med, uy_lower, uy_upper)
 
     # --- Error Bar Formatting ---
-    # Relative errors for Matplotlib yerr
     ux_err = [ux_med - ux_lower, ux_upper - ux_med]
     uy_err = [uy_med - uy_lower, uy_upper - uy_med]
 
     # 1. Plot Displacement X (Blue, 'x' marker)
-    ax.errorbar(ux_true, ux_med, yerr=ux_err, fmt='x', color='blue', ecolor='blue', 
-                alpha=0.3, label=f'$u_x$ (Cov: {cov_x:.1f}%)', markersize=6, capsize=0)
+    ax.errorbar(ux_true, ux_med, yerr=ux_err, fmt='x', color='#0072B2', ecolor='#0072B2', 
+                alpha=0.35, label=f'$u_x$ (Cov: {cov_x:.1f}%)', markersize=5, capsize=0, elinewidth=0.8)
     
-    # 2. Plot Displacement Y (Red, 'o' marker)
-    ax.errorbar(uy_true, uy_med, yerr=uy_err, fmt='o', color='red', ecolor='red', 
-                alpha=0.3, label=f'$u_y$ (Cov: {cov_y:.1f}%)', markersize=4, capsize=0)
+    # 2. Plot Displacement Y (Orange/Red, 'o' marker)
+    ax.errorbar(uy_true, uy_med, yerr=uy_err, fmt='o', color='#D55E00', ecolor='#D55E00', 
+                alpha=0.35, label=f'$u_y$ (Cov: {cov_y:.1f}%)', markersize=4, capsize=0, elinewidth=0.8)
 
     # 3. Identity line (Black dashed)
     all_vals = np.concatenate([u_true.flatten(), u_pred_med.flatten()])
     limits = [all_vals.min(), all_vals.max()]
-    ax.plot(limits, limits, 'k--', linewidth=2, label='Isoline', zorder=5)
+    ax.plot(limits, limits, 'k--', linewidth=1.5, label='Isoline', zorder=5)
 
     # --- Annotation Box ---
     stats_text = (f'Estimated Coverage $X$: {cov_x:.1f}%\n'
@@ -554,15 +523,15 @@ def plot_disp_r2_coverage(u_true, u_pred_med, u_pred_lower, u_pred_upper, save_p
                   f'$R^2_X$: {r2_x:.4f}\n'
                   f'$R^2_Y$: {r2_y:.4f}')
     
-    ax.text(0.05, 0.95, stats_text, transform=ax.transAxes, fontsize=28, 
+    ax.text(0.05, 0.95, stats_text, transform=ax.transAxes, fontsize=12, 
             verticalalignment='top',
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8, edgecolor='gray'))
+            bbox=dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.85, edgecolor='gray', lw=0.5))
 
     # Formatting
-    ax.set_xlabel('$u_{gt}$')
-    ax.set_ylabel('$u_{pred}$')
+    ax.set_xlabel(r'$u_{\mathrm{obs}}$', fontsize=14)
+    ax.set_ylabel(r'$u_{\mathrm{pred}}$', fontsize=14)
     ax.grid(True, linestyle=':', alpha=0.6)
-    ax.legend(loc='lower right', frameon=True, fontsize=28)
+    ax.legend(loc='lower right', frameon=True, fontsize=12)
     
     # Ticks limit
     ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
@@ -584,7 +553,8 @@ def parse_args():
 
     # Dataset & Model Config
     parser.add_argument('--model_path', type=str, default="20260411T115941_isihara_0.0_0.01_8_0.975_5_40.0_1_0")
-    parser.add_argument('--validation_load_step_indices', type=int, nargs='+', default=[2, 4, 6, 8])
+    parser.add_argument('--validation_load_step_indices', type=int, nargs='+', default=None)
+    parser.add_argument('--step', '--dist_step', type=int, default=16, dest='dist_step', help="Step index for local node distribution and mesh contour plots (default: 16)")
     parser.add_argument('--n_sample', type=int, default=128)
     parser.add_argument('--subfolder', type=str, default="fem_validation")
 
@@ -593,7 +563,6 @@ def parse_args():
 if __name__ == "__main__" :
     args = parse_args()
     validation_load_step_indices = args.validation_load_step_indices
-    print(validation_load_step_indices)
     n_sample = args.n_sample
     model_path = args.model_path
 
@@ -621,15 +590,36 @@ if __name__ == "__main__" :
     save_path = pred_dir_name
     save_path.mkdir(parents=True, exist_ok=True)
 
-    step = validation_load_step_indices[-1]
     consolidated_file = pred_dir_name / "fem_distilled_samples.npz"
 
     if os.path.exists(consolidated_file):
         consolidated_data = np.load(consolidated_file, allow_pickle=True)
-        max_step = consolidated_data["u_pred"].shape[1] - 1
-        if step > max_step:
-            print(f"[WARN] Requested step {step} exceeds simulation steps ({max_step + 1}). Clamping to {max_step}.")
-            step = max_step
+        max_steps_avail = consolidated_data["u_pred"].shape[1]
+    else:
+        consolidated_data = None
+        max_steps_avail = 9999
+
+    if validation_load_step_indices is None:
+        if max_steps_avail <= 3:
+            valid_val_step_indices = list(range(max_steps_avail))
+        else:
+            valid_val_step_indices = list(range(max_steps_avail - 3, max_steps_avail))
+    else:
+        valid_val_step_indices = [s for s in validation_load_step_indices if s < max_steps_avail]
+        if not valid_val_step_indices:
+            valid_val_step_indices = [max_steps_avail - 1]
+        if len(valid_val_step_indices) > 3:
+            valid_val_step_indices = valid_val_step_indices[-3:]
+
+    print(f"Evaluating load step indices (last {len(valid_val_step_indices)} steps): {valid_val_step_indices}")
+
+    if args.dist_step is not None and args.dist_step < max_steps_avail:
+        step = args.dist_step
+    else:
+        step = valid_val_step_indices[-1]
+    print(f"Plotting local node distribution and field contours at load step: {step}")
+
+    if consolidated_data is not None:
         u_pred_piola_samples = consolidated_data["u_pred"][:, step]
         mesh_node_coords = consolidated_data["node_coords"]
         mesh_cells = consolidated_data["cells"]
@@ -666,23 +656,12 @@ if __name__ == "__main__" :
     else:
         u_pred_piola_traction_samples = None
 
-    # err = u_samples - u_true[None, :, :]
-    import numpy as np
-
-    # Define target locations on the r = 0.1 circle
     targets = np.array([
-        # [0.0866, 0.05],
         [0.0707, 0.0707],
-        # [0.05, 0.0866],
         [0.25, 0.75],
         [0.6, 0.4],
-        # [0.75, 0.25],
         [1, 1]
-
-
     ])
-    # u_samples = u_true_samples
-    # Find the indices of the closest nodes in your mesh
     node_indices = []
     for target in targets:
         dist = np.linalg.norm(mesh_node_coords - target, axis=1)
@@ -690,16 +669,6 @@ if __name__ == "__main__" :
 
     print(f"Closest node indices: {node_indices}")
     node_type = true_data["node_type"]
-    plot_disp_field(mesh_node_coords, mesh_cells, u_true, u_pred_piola_samples.mean(axis=0), u_pred_piola_samples.std(axis=0), node_indices, save_path)
-
-    plot_node_distributions(u_true, u_pred_piola_samples, u_pred_piola_traction_samples, node_indices, save_path)
-    # plot_disp_r2_coverage(u_true, u_pred_samples.mean(axis=0), u_pred_samples.std(axis=0), save_path)
-
-    # Filter step indices to ensure they are strictly within bounds
-    max_steps_avail = consolidated_data["u_pred"].shape[1] if os.path.exists(consolidated_file) else 9999
-    valid_val_step_indices = [s for s in validation_load_step_indices if s < max_steps_avail]
-    if not valid_val_step_indices:
-        valid_val_step_indices = [max_steps_avail - 1]
 
     ref_u_all = true_data["u_true"] if "u_true" in true_data else (true_data["u_exp"] if "u_exp" in true_data else true_data["u"])
     u_true_val = ref_u_all[valid_val_step_indices]
@@ -715,6 +684,21 @@ if __name__ == "__main__" :
         u_pred_piola_samples_val = jnp.array(u_pred_piola_samples_val)
     p_val_shape = u_pred_piola_samples_val.shape
     u_pred_piola_samples_val_flat = u_pred_piola_samples_val.reshape(p_val_shape[0], -1, 2)
+
+    u_true_val_flat = u_true_val.reshape(-1, 2)
+    u_p_lower_bound = np.quantile(u_pred_piola_samples_val_flat, 0.025, axis=0)
+    u_p_upper_bound = np.quantile(u_pred_piola_samples_val_flat, 0.975, axis=0)
+    u_p_mean = np.mean(u_pred_piola_samples_val_flat, axis=0)
+
+    # 1x4 Consolidated Displacement Analysis Plot
+    plot_disp_field(
+        mesh_node_coords, mesh_cells, u_true, u_pred_piola_samples.mean(axis=0),
+        u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound,
+        save_path
+    )
+
+    plot_node_distributions(u_true, u_pred_piola_samples, u_pred_piola_traction_samples, node_indices, save_path)
+
     if len(pt_files) > 0:
         u_pred_piola_traction_samples_val = []
         for f in pt_files:
@@ -722,23 +706,12 @@ if __name__ == "__main__" :
             u_pred_piola_traction_samples_val.append(data["u_pred"][valid_val_step_indices])
         u_pred_piola_traction_samples_val = jnp.array(u_pred_piola_traction_samples_val)
         pt_val_shape = u_pred_piola_traction_samples_val.shape
-
         u_pred_piola_traction_samples_val_flat = u_pred_piola_traction_samples_val.reshape(pt_val_shape[0], -1, 2)
-        u_true_val_flat = u_true_val.reshape(-1, 2)
 
         u_pt_lower_bound = np.quantile(u_pred_piola_traction_samples_val_flat, 0.025, axis=0)
         u_pt_upper_bound = np.quantile(u_pred_piola_traction_samples_val_flat, 0.975, axis=0)
         u_pt_mean = np.mean(u_pred_piola_traction_samples_val_flat, axis=0)
 
         plot_disp_r2_coverage(u_true_val_flat, u_pt_mean, u_pt_lower_bound, u_pt_upper_bound, save_path, suffix ="_piola_traction")
-    else:
-        u_true_val_flat = u_true_val.reshape(-1, 2)
 
-
-    u_p_lower_bound = np.quantile(u_pred_piola_samples_val_flat, 0.025, axis=0)
-    u_p_upper_bound = np.quantile(u_pred_piola_samples_val_flat, 0.975, axis=0)
-    u_p_mean = np.mean(u_pred_piola_samples_val_flat, axis=0)
     plot_disp_r2_coverage(u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, suffix ="_piola")
-    # for n_idx in node_indices :
-    #     plot_comprehensive_analysis(u_true, u_pred_samples, node_type, n_idx, save_path)
-    pass

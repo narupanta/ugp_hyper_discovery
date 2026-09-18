@@ -53,6 +53,7 @@ def load_seed_metrics(seed_path):
     candidates = [
         os.path.join(seed_path, "fem_validation", "validation_metrics.json"),
         os.path.join(seed_path, "distilled", "validation_metrics.json"),
+        os.path.join(seed_path, "fem_validation", "validation_metrics.json"),
         os.path.join(seed_path, "validation_metrics.json"),
     ]
     for c in candidates:
@@ -137,6 +138,15 @@ def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
                 shutil.copyfile(cand, os.path.join(plots_dir, f"split_params_{mat_model}.{ext}"))
                 break
 
+        # split_invariant_spaces
+        for cand in [
+            os.path.join(distilled_p, f"split_invariant_spaces_{mat_model}.{ext}"),
+            os.path.join(distilled_p, f"split_invariant_spaces.{ext}"),
+        ]:
+            if os.path.exists(cand):
+                shutil.copyfile(cand, os.path.join(plots_dir, f"split_invariant_spaces_{mat_model}.{ext}"))
+                break
+
         # sobol_total_order_vs_invariants
         for cand in [
             os.path.join(distilled_p, f"sobol_total_order_vs_invariants.{ext}"),
@@ -174,6 +184,27 @@ def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
                 cand = os.path.join(base, f"disp_r2_coverage_xy__piola.{ext}")
                 if os.path.exists(cand):
                     shutil.copyfile(cand, os.path.join(plots_dir, f"disp_r2_coverage_xy__piola_{geom}.{ext}"))
+                    break
+
+            # reaction_force_distilled
+            for base in paths:
+                cand = os.path.join(base, f"reaction_force_distilled_{geom}.{ext}")
+                if os.path.exists(cand):
+                    shutil.copyfile(cand, os.path.join(plots_dir, f"reaction_force_distilled_{geom}.{ext}"))
+                    break
+
+            # reaction_force_distribution
+            for base in paths:
+                cand = os.path.join(base, f"reaction_force_distribution_{geom}.{ext}")
+                if os.path.exists(cand):
+                    shutil.copyfile(cand, os.path.join(plots_dir, f"reaction_force_distribution_{geom}.{ext}"))
+                    break
+
+            # free_node_residuals
+            for base in paths:
+                cand = os.path.join(base, f"free_node_residuals_{geom}.{ext}")
+                if os.path.exists(cand):
+                    shutil.copyfile(cand, os.path.join(plots_dir, f"free_node_residuals_{geom}.{ext}"))
                     break
 
 
@@ -468,100 +499,98 @@ def format_param_latex(p_dict):
 
 
 def format_summary_markdown(ranked_seeds, exp_dir, config):
-    """Generates summary_across_seeds.md matching the layout of results_table_top10.md."""
+    """Generates summary_across_seeds.md with Top 5 seeds and aggregate stats across all seeds."""
     out_md = os.path.join(exp_dir, "summary_across_seeds.md")
 
     mat_model = config.get("material_model_name", "nh2")
-    top_n = min(10, len(ranked_seeds))
+    top_n = min(5, len(ranked_seeds))
     top_seeds = ranked_seeds[:top_n]
-    true_params, true_active = get_true_model_info(config)
+    total_seeds_count = len(ranked_seeds)
 
-    # LaTeX parameter display map
-    param_math = {
-        "C10": "$C_{10}$", "C01": "$C_{01}$", "C20": "$C_{20}$", "C11": "$C_{11}$",
-        "C02": "$C_{02}$", "C30": "$C_{30}$", "C21": "$C_{21}$", "C12": "$C_{12}$",
-        "C03": "$C_{03}$", "E": "$E$", "D1": "$D_{1}$", "D2": "$D_{2}$", "D3": "$D_{3}$"
-    }
+    # Helper to extract a scalar metric from a seed dict
+    def get_val(s, *keys):
+        cur = s["metrics"]
+        for k in keys:
+            if not isinstance(cur, dict):
+                return None
+            cur = cur.get(k)
+        if cur is None:
+            return None
+        try:
+            val = float(cur)
+            return val if not np.isnan(val) else None
+        except (ValueError, TypeError):
+            return None
 
-    # Precompute structure discovery metrics for each seed
-    structure_metrics = []
-    for s in top_seeds:
-        struct = s["metrics"].get("model_structure", {})
-        pred_active = set(struct.keys())
-        tp = len(pred_active & true_active)
-        fp = len(pred_active - true_active)
-        fn = len(true_active - pred_active)
-        prec = tp / (tp + fp) if (tp + fp) > 0 else (1.0 if len(true_active) == 0 else 0.0)
-        rec = tp / (tp + fn) if (tp + fn) > 0 else (1.0 if len(true_active) == 0 else 0.0)
-        f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
-        structure_metrics.append({
-            "prec": prec,
-            "rec": rec,
-            "f1": f1
-        })
+    # Helper to compute Mean ± Std across all seeds
+    def get_agg_stat(seeds, *keys, decimals=4, is_pct=False):
+        vals = [get_val(s, *keys) for s in seeds]
+        vals = [v for v in vals if v is not None]
+        if not vals:
+            return "-"
+        mean_v = np.mean(vals)
+        std_v = np.std(vals)
+        if is_pct:
+            return f"{mean_v:.2f} ± {std_v:.2f}"
+        return f"{mean_v:.{decimals}f} ± {std_v:.{decimals}f}"
+
+    def get_agg_stat_tex(seeds, *keys, decimals=4, is_pct=False):
+        res = get_agg_stat(seeds, *keys, decimals=decimals, is_pct=is_pct)
+        if res == "-":
+            return "-"
+        return res.replace("±", r"\pm")
+
+    # Define metric rows to report:
+    # (section_name, [ (row_label, tex_label, keys_tuple, decimals, is_pct) ])
+    sections = [
+        ("GP Posterior Extraction (SEF)", [
+            ("GP $\\Psi$ RMSE", r"GP $\Psi$ RMSE", ("sef", "gp", "total", "rmse"), 4, False),
+            ("GP $\\Psi$ EC (%)", r"GP $\Psi$ EC (\%)", ("sef", "gp", "total", "coverage"), 2, True),
+            ("GP $\\Psi$ $R^2$", r"GP $\Psi$ $R^2$", ("sef", "gp", "total", "r2"), 4, False),
+        ]),
+        ("Validation Results (Distilled $\\Psi$)", [
+            ("Distilled $\\Psi$ RMSE", r"Distilled $\Psi$ RMSE", ("sef", "dist", "total", "rmse"), 4, False),
+            ("Distilled $\\Psi$ EC (%)", r"Distilled $\Psi$ EC (\%)", ("sef", "dist", "total", "coverage"), 2, True),
+            ("Distilled $\\Psi$ $R^2$", r"Distilled $\Psi$ $R^2$", ("sef", "dist", "total", "r2"), 4, False),
+        ]),
+        ("Displacement Field Metrics (FEM)", [
+            ("Disp RMSE (Holes)", "Disp RMSE (Holes)", ("disp", "holes", "norm", "rmse"), 4, False),
+            ("Disp EC (%) (Holes)", r"Disp EC (\%) (Holes)", ("disp", "holes", "coverage_xy"), 2, True),
+            ("Disp $R^2$ (Holes)", r"Disp $R^2$ (Holes)", ("disp", "holes", "norm", "r2"), 4, False),
+            ("Disp RMSE (Block)", "Disp RMSE (Block)", ("disp", "block", "norm", "rmse"), 4, False),
+            ("Disp EC (%) (Block)", r"Disp EC (\%) (Block)", ("disp", "block", "coverage_xy"), 2, True),
+            ("Disp $R^2$ (Block)", r"Disp $R^2$ (Block)", ("disp", "block", "norm", "r2"), 4, False),
+        ])
+    ]
 
     # ==============================================================================
     # 1. Markdown Table Generation
     # ==============================================================================
-    col_headers = ["Metric / Parameter"] + [f"Seed {s['seed']}" for s in top_seeds] + ["True Value"]
+    col_headers = ["Metric"] + [f"Seed {s['seed']}" for s in top_seeds] + [f"All Seeds ($N={total_seeds_count}$) Mean ± Std"]
     aligns = ["---"] + [":---:"] * (len(top_seeds) + 1)
     n_cols = len(col_headers)
 
     md_lines = []
-    md_lines.append(f"# Results (Top {top_n} Seeds Ranked by Validation Disp R²)\n")
+    md_lines.append(f"# Results Summary (Top {top_n} Seeds & Aggregate Statistics across all {total_seeds_count} Seeds)\n")
     md_lines.append("## Markdown Table\n")
     md_lines.append("| " + " | ".join(col_headers) + " |")
     md_lines.append("| " + " | ".join(aligns) + " |")
 
-    def add_sec_hdr_md(title):
-        row = [f"**{title}**"] + [""] * (n_cols - 1)
-        md_lines.append("| " + " | ".join(row) + " |")
-
-    def add_row_md(name, values, true_v="-"):
-        row = [name] + [str(v) for v in values] + [str(true_v)]
-        md_lines.append("| " + " | ".join(row) + " |")
-
-    # Section 1: GP Posterior Extraction
-    add_sec_hdr_md("GP Posterior Extraction")
-    add_row_md("GP $\\Psi$ RMSE", [fmt_val(s["metrics"].get("sef", {}).get("gp", {}).get("total", {}).get("rmse")) for s in top_seeds])
-    add_row_md("GP $\\Psi$ EC (%)", [fmt_val(s["metrics"].get("sef", {}).get("gp", {}).get("total", {}).get("coverage"), 2) for s in top_seeds])
-    add_row_md("GP $\\Psi$ $R^2$", [fmt_val(s["metrics"].get("sef", {}).get("gp", {}).get("total", {}).get("r2")) for s in top_seeds])
-
-    # Section 2: Validation Results (Distilled Psi)
-    add_sec_hdr_md("Validation Results (Distilled $\\Psi$)")
-    add_row_md("Distilled $\\Psi$ RMSE", [fmt_val(s["metrics"].get("sef", {}).get("dist", {}).get("total", {}).get("rmse")) for s in top_seeds])
-    add_row_md("Distilled $\\Psi$ EC (%)", [fmt_val(s["metrics"].get("sef", {}).get("dist", {}).get("total", {}).get("coverage"), 2) for s in top_seeds])
-    add_row_md("Distilled $\\Psi$ $R^2$", [fmt_val(s["metrics"].get("sef", {}).get("dist", {}).get("total", {}).get("r2")) for s in top_seeds])
-
-    # Section 3: Displacement Field Metrics (FEM)
-    add_sec_hdr_md("Displacement Field Metrics (FEM)")
-    add_row_md("Disp RMSE (Holes)", [fmt_val(s["metrics"].get("disp", {}).get("holes", {}).get("norm", {}).get("rmse")) for s in top_seeds])
-    add_row_md("Disp EC (%) (Holes)", [fmt_val(s["metrics"].get("disp", {}).get("holes", {}).get("coverage_xy", s["metrics"].get("disp", {}).get("holes", {}).get("norm", {}).get("coverage")), 2) for s in top_seeds])
-    add_row_md("Disp $R^2$ (Holes)", [fmt_val(s["metrics"].get("disp", {}).get("holes", {}).get("norm", {}).get("r2")) for s in top_seeds])
-    add_row_md("Disp RMSE (Block)", [fmt_val(s["metrics"].get("disp", {}).get("block", {}).get("norm", {}).get("rmse")) for s in top_seeds])
-    add_row_md("Disp EC (%) (Block)", [fmt_val(s["metrics"].get("disp", {}).get("block", {}).get("coverage_xy", s["metrics"].get("disp", {}).get("block", {}).get("norm", {}).get("coverage")), 2) for s in top_seeds])
-    add_row_md("Disp $R^2$ (Block)", [fmt_val(s["metrics"].get("disp", {}).get("block", {}).get("norm", {}).get("r2")) for s in top_seeds])
-
-    # Section 4: Model Structure Discovery
-    add_sec_hdr_md("Model Structure Discovery (UQ / Pruning)")
-    add_row_md("Term Precision", [fmt_val(sm["prec"], 3) for sm in structure_metrics], "1.000")
-    add_row_md("Term Recall", [fmt_val(sm["rec"], 3) for sm in structure_metrics], "1.000")
-    add_row_md("Term F1-Score", [fmt_val(sm["f1"], 3) for sm in structure_metrics], "1.000")
-
-    # Section 5: Discovered Model Parameters
-    add_sec_hdr_md("Discovered Model Parameters")
-    for p in ALL_CANDIDATE_PARAMS:
-        label = param_math[p]
-        p_cells = [format_param_md(s["metrics"].get("model_structure", {}).get(p)) for s in top_seeds]
-        true_v = true_params.get(p, "-")
-        add_row_md(label, p_cells, true_v)
+    for sec_title, row_defs in sections:
+        sec_row = [f"**{sec_title}**"] + [""] * (n_cols - 1)
+        md_lines.append("| " + " | ".join(sec_row) + " |")
+        for label, _, keys, decimals, is_pct in row_defs:
+            vals = [fmt_val(get_val(s, *keys), decimals=decimals) for s in top_seeds]
+            agg = get_agg_stat(ranked_seeds, *keys, decimals=decimals, is_pct=is_pct)
+            row = [label] + vals + [agg]
+            md_lines.append("| " + " | ".join(row) + " |")
 
     # ==============================================================================
     # 2. LaTeX Table Generation
     # ==============================================================================
     tex_lines = []
     tex_col_spec = "l" + "c" * len(top_seeds) + "c"
-    tex_header = " & ".join([r"\textbf{Metric / Parameter}"] + [f"\\textbf{{Seed {s['seed']}}}" for s in top_seeds] + [r"\textbf{True Value}"]) + r" \\"
+    tex_header = " & ".join([r"\textbf{Metric}"] + [f"\\textbf{{Seed {s['seed']}}}" for s in top_seeds] + [f"\\textbf{{All Seeds ($N={total_seeds_count}$) Mean $\\pm$ Std}}"]) + r" \\"
 
     tex_lines.append("\n## LaTeX Table\n")
     tex_lines.append("```latex")
@@ -573,53 +602,25 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
     tex_lines.append(tex_header)
     tex_lines.append(r"\midrule")
 
-    def add_sec_hdr_tex(title):
-        tex_lines.append(f"\\multicolumn{{{n_cols}}}{{l}}{{\\textbf{{{title}}}}} \\\\")
+    for sec_title, row_defs in sections:
+        tex_lines.append(f"\\multicolumn{{{n_cols}}}{{l}}{{\\textbf{{{sec_title}}}}} \\\\")
+        tex_lines.append(r"\midrule")
+        for _, tex_label, keys, decimals, is_pct in row_defs:
+            vals = [fmt_val(get_val(s, *keys), decimals=decimals) for s in top_seeds]
+            agg = get_agg_stat_tex(ranked_seeds, *keys, decimals=decimals, is_pct=is_pct)
+            row_str = " & ".join([tex_label] + vals + [agg]) + r" \\"
+            tex_lines.append(row_str)
         tex_lines.append(r"\midrule")
 
-    def add_row_tex(name, values, true_v="-"):
-        tex_row = " & ".join([name] + [str(v) for v in values] + [str(true_v)]) + r" \\"
-        tex_lines.append(tex_row)
-
-    add_sec_hdr_tex("GP Posterior Extraction")
-    add_row_tex(r"GP $\Psi$ RMSE", [fmt_val(s["metrics"].get("sef", {}).get("gp", {}).get("total", {}).get("rmse")) for s in top_seeds])
-    add_row_tex(r"GP $\Psi$ EC (\%)", [fmt_val(s["metrics"].get("sef", {}).get("gp", {}).get("total", {}).get("coverage"), 2) for s in top_seeds])
-    add_row_tex(r"GP $\Psi$ $R^2$", [fmt_val(s["metrics"].get("sef", {}).get("gp", {}).get("total", {}).get("r2")) for s in top_seeds])
-    tex_lines.append(r"\midrule")
-
-    add_sec_hdr_tex(r"Validation Results (Distilled $\Psi$)")
-    add_row_tex(r"Distilled $\Psi$ RMSE", [fmt_val(s["metrics"].get("sef", {}).get("dist", {}).get("total", {}).get("rmse")) for s in top_seeds])
-    add_row_tex(r"Distilled $\Psi$ EC (\%)", [fmt_val(s["metrics"].get("sef", {}).get("dist", {}).get("total", {}).get("coverage"), 2) for s in top_seeds])
-    add_row_tex(r"Distilled $\Psi$ $R^2$", [fmt_val(s["metrics"].get("sef", {}).get("dist", {}).get("total", {}).get("r2")) for s in top_seeds])
-    tex_lines.append(r"\midrule")
-
-    add_sec_hdr_tex("Displacement Field Metrics (FEM)")
-    add_row_tex("Disp RMSE (Holes)", [fmt_val(s["metrics"].get("disp", {}).get("holes", {}).get("norm", {}).get("rmse")) for s in top_seeds])
-    add_row_tex(r"Disp EC (\%) (Holes)", [fmt_val(s["metrics"].get("disp", {}).get("holes", {}).get("coverage_xy", s["metrics"].get("disp", {}).get("holes", {}).get("norm", {}).get("coverage")), 2) for s in top_seeds])
-    add_row_tex(r"Disp $R^2$ (Holes)", [fmt_val(s["metrics"].get("disp", {}).get("holes", {}).get("norm", {}).get("r2")) for s in top_seeds])
-    add_row_tex("Disp RMSE (Block)", [fmt_val(s["metrics"].get("disp", {}).get("block", {}).get("norm", {}).get("rmse")) for s in top_seeds])
-    add_row_tex(r"Disp EC (\%) (Block)", [fmt_val(s["metrics"].get("disp", {}).get("block", {}).get("coverage_xy", s["metrics"].get("disp", {}).get("block", {}).get("norm", {}).get("coverage")), 2) for s in top_seeds])
-    add_row_tex(r"Disp $R^2$ (Block)", [fmt_val(s["metrics"].get("disp", {}).get("block", {}).get("norm", {}).get("r2")) for s in top_seeds])
-    tex_lines.append(r"\midrule")
-
-    add_sec_hdr_tex("Model Structure Discovery Metrics")
-    add_row_tex("Term Precision", [fmt_val(sm["prec"], 3) for sm in structure_metrics], "1.000")
-    add_row_tex("Term Recall", [fmt_val(sm["rec"], 3) for sm in structure_metrics], "1.000")
-    add_row_tex("Term F1-Score", [fmt_val(sm["f1"], 3) for sm in structure_metrics], "1.000")
-    tex_lines.append(r"\midrule")
-
-    add_sec_hdr_tex("Discovered Model Parameters")
-    for p in ALL_CANDIDATE_PARAMS:
-        label = param_math[p]
-        p_cells = [format_param_latex(s["metrics"].get("model_structure", {}).get(p)) for s in top_seeds]
-        true_v = true_params.get(p, "-")
-        add_row_tex(label, p_cells, true_v)
+    # Remove trailing \midrule before bottomrule
+    if tex_lines[-1] == r"\midrule":
+        tex_lines.pop()
 
     tex_lines.append(r"\bottomrule")
     tex_lines.append(r"\end{tabular}")
     tex_lines.append(r"}")
-    tex_lines.append(f"\\caption{{Distillation Results and Discovered Material Parameters (Top {top_n} Seeds Ranked by Validation Disp R²)}}")
-    tex_lines.append(f"\\label{{tab:distillation_results_{top_n}}}")
+    tex_lines.append(f"\\caption{{Performance Summary: Top {top_n} Seeds and Aggregate Metrics ($N={total_seeds_count}$)}}")
+    tex_lines.append(f"\\label{{tab:results_summary_top{top_n}}}")
     tex_lines.append(r"\end{table}")
     tex_lines.append("```\n")
 
@@ -632,14 +633,18 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
     vis_lines.append(f"- **Candidate Parameters Posterior**: `plots/split_params_{mat_model}.pdf`")
     vis_lines.append(f"- **Sobol Sensitivity Analysis**: `plots/sobol_total_order_vs_invariants.pdf`")
     vis_lines.append(f"- **Block Displacement UQ**: `plots/displacement_analysis_block.pdf` & `plots/disp_r2_coverage_xy__piola_block.pdf`")
-    vis_lines.append(f"- **Holes Displacement UQ**: `plots/displacement_analysis_holes.pdf` & `plots/disp_r2_coverage_xy__piola_holes.pdf`\n")
+    vis_lines.append(f"- **Holes Displacement UQ**: `plots/displacement_analysis_holes.pdf` & `plots/disp_r2_coverage_xy__piola_holes.pdf`")
+    vis_lines.append(f"- **Reaction Force UQ**: `plots/reaction_force_distilled_block.pdf` & `plots/reaction_force_distilled_holes.pdf`")
+    vis_lines.append(f"- **Reaction Force Distribution (Step 16)**: `plots/reaction_force_distribution_block.pdf` & `plots/reaction_force_distribution_holes.pdf`")
+    vis_lines.append(f"- **Free Node Equilibrium Residuals (Step 16)**: `plots/free_node_residuals_block.pdf` & `plots/free_node_residuals_holes.pdf`")
+    vis_lines.append(f"- **Sampled Material Parameters Posterior**: `plots/fem_material_parameters_distribution.pdf` & `plots/fem_material_parameters_joint.pdf`\n")
 
     final_content = "\n".join(md_lines) + "\n" + "\n".join(tex_lines) + "\n" + "\n".join(vis_lines)
 
     with open(out_md, "w") as f:
         f.write(final_content)
 
-    print(f"✅ Generated summary markdown matching results_table_top10.md at: {out_md}")
+    print(f"✅ Generated summary markdown at: {out_md}")
 
 
 def main():

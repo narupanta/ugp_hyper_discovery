@@ -3,6 +3,8 @@ import argparse
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import matplotlib.lines as mlines
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 import jax
 from jax import config
@@ -10,27 +12,43 @@ config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 from plots.theme import apply_style, save_figure
+from plots.sensitivity import load_sobol_csv
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material
 from core.features import IsotropicFeatureExtractor
-from core.utils import infer_material_model_name, generate_standard_deformation_modes as generate_standard_modes
+from core.utils import (
+    infer_material_model_name,
+    generate_standard_deformation_modes as generate_standard_modes,
+    compute_invariants_np,
+    load_f3x3_from_distilled,
+)
 from scipy.spatial import ConvexHull
 
 def to_latex(name):
-    if name.startswith("C") and len(name) == 3 and name[1:].isdigit():
-        return rf"$C_{{{name[1:]}}}$"
-    if name.startswith("D") and len(name) == 2 and name[1:].isdigit():
-        return rf"$D_{{{name[1:]}}}$"
-    if name == "E":
+    clean = str(name).replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+    if clean.startswith("C") and len(clean) == 3 and clean[1:].isdigit():
+        return rf"$C_{{{clean[1:]}}}$"
+    if clean.startswith("D") and len(clean) == 2 and clean[1:].isdigit():
+        return rf"$D_{{{clean[1:]}}}$"
+    if clean == "E":
         return r"$E$"
-    return rf"${name}$"
+    return rf"${clean}$"
 
 def get_comp_color(name):
-    if name.startswith("D"):
+    clean = name.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+    if clean == "C10":
+        return "#0072B2"
+    elif clean == "C01":
+        return "#56B4E9"
+    elif clean == "D1":
         return "#D55E00"
-    elif name.startswith("C4") or name.startswith("C6"):
+    elif clean == "D2":
+        return "#E69F00"
+    elif clean.startswith("C4") or clean.startswith("C6"):
         return "#CC79A7"
+    elif clean.startswith("D"):
+        return "#D55E00"
     return "#0072B2"
 
 def get_sensitivities(out_dir, prefix, subdir):
@@ -87,6 +105,8 @@ def main():
     args = parser.parse_args()
     
     distilled_dir = os.path.abspath(args.distilled_dir)
+    if not os.path.exists(os.path.join(distilled_dir, "dev_flow_samples.npy")) and os.path.isdir(os.path.join(distilled_dir, "distilled")):
+        distilled_dir = os.path.join(distilled_dir, "distilled")
     if args.material_model is None:
         args.material_model = infer_material_model_name(distilled_dir)
     true_model_name = args.material_model
@@ -410,24 +430,25 @@ def main():
     h_viol = 8.183
     h_params = 4.0  # Increased vertical height slightly to fix EC label cutoff
     
-    # 1. Energy Plots
-    h_energy_split = 4.5
-    fig_width_energy = 8.5
+    # 1. Energy Plots (3x2 grid layout: 3 rows, 2 cols with square plots)
+    fig_width_energy = 3.65
+    h_energy_split = 4.85
     fig_energy = plt.figure(figsize=(fig_width_energy, h_energy_split))
-    gs_top = fig_energy.add_gridspec(2, 3, wspace=1.1, hspace=0.05)
+    gs_top = fig_energy.add_gridspec(3, 2, hspace=0.30, wspace=0.14, top=0.96, bottom=0.13, left=0.13, right=0.97)
     dist_color = "#009E73"
     
     mode_limits_dev = {}
     mode_limits_vol = {}
     
     for i, name in enumerate(mode_names):
-        row, col = i // 3, i % 3
+        row, col = divmod(i, 2)
         ax_psi = fig_energy.add_subplot(gs_top[row, col])
-        ax_psi.plot(gamma, psi_true[i], 'k--', lw=1.5, label="Ground Truth", zorder=5)
+        ax_psi.set_box_aspect(1)
+        ax_psi.plot(gamma, psi_true[i], 'k--', lw=1.2, label="Ground Truth", zorder=5)
         gp_psi_lower = psi_dist_mean[i] - 1.96 * jnp.sqrt(psi_dist_var[i])
         gp_psi_upper = psi_dist_mean[i] + 1.96 * jnp.sqrt(psi_dist_var[i])
         ax_psi.fill_between(gamma, gp_psi_lower, gp_psi_upper, color='gray', alpha=0.3, label="GP 95% CI")
-        ax_psi.plot(gamma, psi_dist_mean[i], color='gray', lw=1.5, ls='-', label="GP mean", zorder=4)
+        ax_psi.plot(gamma, psi_dist_mean[i], color='gray', lw=1.2, ls='-', label="GP mean", zorder=4)
         
         gp_cov_psi = jnp.mean((psi_true[i] >= gp_psi_lower) & (psi_true[i] <= gp_psi_upper))
         rmse_psi_gp = jnp.sqrt(jnp.mean((psi_dist_mean[i] - psi_true[i]) ** 2))
@@ -439,32 +460,42 @@ def main():
         dist_psi_mean = dist_psi_samples[i].mean(axis=0)
         
         ax_psi.fill_between(gamma, nf_psi_lower, nf_psi_upper, color=dist_color, alpha=0.15, label="Distilled 95%CI", zorder=2)
-        ax_psi.plot(gamma, dist_psi_samples[i].T, color=dist_color, lw=0.6, alpha=0.1, zorder=1)
-        ax_psi.plot(gamma, dist_psi_mean, color=dist_color, lw=2.0, label="Distilled Mean", zorder=3)
+        ax_psi.plot(gamma, dist_psi_samples[i].T, color=dist_color, lw=0.4, alpha=0.1, zorder=1)
+        ax_psi.plot(gamma, dist_psi_mean, color=dist_color, lw=1.5, label="Distilled Mean", zorder=3)
         
         nf_cov_psi = jnp.mean((psi_true[i] >= nf_psi_lower) & (psi_true[i] <= nf_psi_upper))
         rmse_psi = jnp.sqrt(jnp.mean((dist_psi_mean - psi_true[i]) ** 2))
         r2_psi = 1 - jnp.sum((psi_true[i] - dist_psi_mean) ** 2) / (ss_tot_psi + 1e-12)
         
         if col == 0:
-            ax_psi.set_ylabel(r"$\Psi_\mathrm{total}$", fontsize=8)
-        if row == 1:
-            ax_psi.set_xlabel(r"$\gamma$", fontsize=8)
-        ax_psi.set_title(name, fontsize=9, pad=2)
-        ax_psi.set_box_aspect(1)
-        ax_psi.grid(False)
-        ax_psi.tick_params(axis='both', which='major', labelsize=7)
+            ax_psi.set_ylabel(r"$\Psi$", fontsize=7.5, labelpad=2)
+        if row == 2:
+            ax_psi.set_xlabel(r"$\gamma$", fontsize=7.5, labelpad=2)
+        else:
+            ax_psi.tick_params(axis='x', labelbottom=False)
             
-        annotation_gp_psi = f"GP\nEC: {gp_cov_psi:.0%}\nRMSE: {rmse_psi_gp:.3f}\n$R^2$: {r2_psi_gp:.3f}"
-        annotation_dist_psi = f"Distilled\nEC: {nf_cov_psi:.0%}\nRMSE: {rmse_psi:.3f}\n$R^2$: {r2_psi:.3f}"
+        mode_full_names = {
+            "UT": "Uniaxial Tension",
+            "ET": "Equibiaxial Tension",
+            "PS": "Pure Shear",
+            "UC": "Uniaxial Compression",
+            "EC": "Equibiaxial Compression",
+            "SS": "Simple Shear",
+        }
+        title_text = mode_full_names.get(name, name)
+        ax_psi.set_title(title_text, fontsize=6.8, pad=2, fontweight='normal')
+        ax_psi.grid(False)
+        ax_psi.tick_params(axis='both', which='major', labelsize=6.0, pad=1)
         
-        ax_psi.annotate(annotation_gp_psi, xy=(1.05, 0.75), xycoords='axes fraction', 
-                        ha='left', va='center', fontsize=7, clip_on=False,
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", lw=0.5, alpha=0.8), zorder=6)
-                        
-        ax_psi.annotate(annotation_dist_psi, xy=(1.05, 0.25), xycoords='axes fraction', 
-                        ha='left', va='center', fontsize=7, clip_on=False,
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=dist_color, lw=0.5, alpha=0.8), zorder=6)
+        # Clean ylim margins
+        cur_ylim = ax_psi.get_ylim()
+        y_span = cur_ylim[1] - cur_ylim[0]
+        ax_psi.set_ylim(bottom=-0.04 * y_span, top=cur_ylim[1] + 0.05 * y_span)
+            
+        # Top-left r^2 box for distilled model
+        ax_psi.text(0.06, 0.92, rf"$r^2 = {r2_psi:.3f}$", transform=ax_psi.transAxes,
+                    ha='left', va='top', fontsize=5.8,
+                    bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="#bbbbbb", lw=0.4, alpha=0.90), zorder=6)
         
         # Interpolation Limit boundary
         feats_ext = jax.vmap(extractor.extract)(F_all[i])
@@ -477,7 +508,8 @@ def main():
         crossings_dev = np.where(np.diff(inside_dev.astype(int)) != 0)[0]
         limits_dev = []
         for idx in crossings_dev:
-            limits_dev.append((float(gamma[idx]), dev_I_np[idx]))
+            is_entry = (not inside_dev[idx]) and inside_dev[idx + 1]
+            limits_dev.append((float(gamma[idx]), dev_I_np[idx], is_entry))
         mode_limits_dev[name] = {
             'crossings': limits_dev,
             'always_out': len(limits_dev) == 0 and not inside_dev[0]
@@ -487,7 +519,8 @@ def main():
         crossings_vol = np.where(np.diff(inside_vol.astype(int)) != 0)[0]
         limits_vol = []
         for idx in crossings_vol:
-            limits_vol.append((float(gamma[idx]), float(vol_J[idx, 0])))
+            is_entry = (not inside_vol[idx]) and inside_vol[idx + 1]
+            limits_vol.append((float(gamma[idx]), float(vol_J[idx, 0]), is_entry))
         mode_limits_vol[name] = {
             'crossings': limits_vol,
             'always_out': len(limits_vol) == 0 and not inside_vol[0]
@@ -497,22 +530,83 @@ def main():
         
         crossings_mask = np.where(np.diff(inside_mask.astype(int)) != 0)[0]
         gamma_boundaries = [float(gamma[0])] + [float(gamma[idx]) for idx in crossings_mask] + [float(gamma[-1])]
-        state_is_out = not inside_mask[0]
         for k in range(len(gamma_boundaries) - 1):
-            if state_is_out:
+            if k == 0:
+                is_inside = bool(inside_mask[0])
+            else:
+                is_inside = bool(inside_mask[crossings_mask[k - 1] + 1])
+            if not is_inside:
                 ax_psi.axvspan(gamma_boundaries[k], gamma_boundaries[k+1], color='#E69F00', alpha=0.15, zorder=-1, label='Extrapolation')
-            state_is_out = not state_is_out
             
         for idx in crossings_mask:
-            ax_psi.axvline(float(gamma[idx]), color='#E69F00', linestyle=':', linewidth=1.5, zorder=0)
+            ax_psi.axvline(float(gamma[idx]), color='#E69F00', linestyle=':', linewidth=1.2, zorder=0)
 
-    # Global legend for energy plots
+    # Global legend for energy plots placed in bottom margin below x-axis labels
     handles, labels = ax_psi.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
-    fig_energy.legend(by_label.values(), by_label.keys(), loc='lower center', ncol=3, bbox_to_anchor=(0.5, -0.05), fontsize=8, frameon=False)
+    fig_energy.legend(by_label.values(), by_label.keys(), loc='lower center', ncol=3,
+                      bbox_to_anchor=(0.5, 0.01), fontsize=5.8, frameon=False, handlelength=1.2, handletextpad=0.3, columnspacing=0.8)
     
     fig_energy.savefig(os.path.join(distilled_dir, f"split_energy_{true_model_name}.pdf"), dpi=300, bbox_inches='tight')
+    fig_energy.savefig(os.path.join(distilled_dir, f"split_energy_{true_model_name}.png"), dpi=300, bbox_inches='tight')
     plt.close(fig_energy)
+    # Save SEF metrics across modes to validation_metrics.json
+    try:
+        val_json_path = os.path.join(distilled_dir, "validation_metrics.json")
+        vdata = {}
+        if os.path.exists(val_json_path):
+            with open(val_json_path, "r") as f:
+                vdata = json.load(f)
+        if "sef" not in vdata:
+            vdata["sef"] = {}
+        
+        # Calculate overall averages
+        gp_rmses = []
+        gp_covs = []
+        gp_r2s = []
+        dist_rmses = []
+        dist_covs = []
+        dist_r2s = []
+        for i in range(len(mode_names)):
+            gp_l = psi_dist_mean[i] - 1.96 * jnp.sqrt(psi_dist_var[i])
+            gp_u = psi_dist_mean[i] + 1.96 * jnp.sqrt(psi_dist_var[i])
+            gp_covs.append(float(jnp.mean((psi_true[i] >= gp_l) & (psi_true[i] <= gp_u)) * 100.0))
+            gp_rmses.append(float(jnp.sqrt(jnp.mean((psi_dist_mean[i] - psi_true[i]) ** 2))))
+            ss_tot = jnp.sum((psi_true[i] - jnp.mean(psi_true[i])) ** 2)
+            gp_r2s.append(float(1 - jnp.sum((psi_true[i] - psi_dist_mean[i]) ** 2) / (ss_tot + 1e-12)))
+
+            nf_l = jnp.percentile(dist_psi_samples[i], 2.5, axis=0)
+            nf_u = jnp.percentile(dist_psi_samples[i], 97.5, axis=0)
+            dist_m = dist_psi_samples[i].mean(axis=0)
+            dist_covs.append(float(jnp.mean((psi_true[i] >= nf_l) & (psi_true[i] <= nf_u)) * 100.0))
+            dist_rmses.append(float(jnp.sqrt(jnp.mean((dist_m - psi_true[i]) ** 2))))
+            dist_r2s.append(float(1 - jnp.sum((psi_true[i] - dist_m) ** 2) / (ss_tot + 1e-12)))
+
+        vdata["sef"]["gp"] = {
+            "total": {
+                "rmse": float(np.mean(gp_rmses)),
+                "coverage": float(np.mean(gp_covs)),
+                "r2": float(np.mean(gp_r2s))
+            }
+        }
+        vdata["sef"]["dist"] = {
+            "total": {
+                "rmse": float(np.mean(dist_rmses)),
+                "coverage": float(np.mean(dist_covs)),
+                "r2": float(np.mean(dist_r2s))
+            }
+        }
+        with open(val_json_path, "w") as f:
+            json.dump(vdata, f, indent=4)
+        
+        # Also sync to fem_validation and seed_dir if they exist
+        for parent_sub in ["fem_validation", ".."]:
+            sync_p = os.path.join(distilled_dir, parent_sub, "validation_metrics.json")
+            if os.path.exists(os.path.dirname(sync_p)):
+                with open(sync_p, "w") as f:
+                    json.dump(vdata, f, indent=4)
+    except Exception as e:
+        print(f"Warning: Failed saving SEF metrics to validation_metrics.json: {e}")
 
     # Parse disabled parameters from config if available
     import yaml
@@ -531,12 +625,16 @@ def main():
     except Exception:
         pass
 
-    # 2. Parameters Figure (Sensitivity + Violin)
-    h_params = 5.0
-    fig_params = plt.figure(figsize=(fig_width, h_params))
-    gs_params = fig_params.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.65)
+    # 2. Unified Parameters & Invariant Sensitivity Figure (Left: Sensitivity + Violin, Right: 3 Invariant Plots)
+    fig_width_params = 7.8
+    h_params = 4.25
+    fig_params = plt.figure(figsize=(fig_width_params, h_params))
+    gs_master = fig_params.add_gridspec(1, 2, width_ratios=[0.77, 0.23], wspace=0.26, top=0.96, bottom=0.10, left=0.07, right=0.97)
     
-    ax_sens = fig_params.add_subplot(gs_params[0, 0])
+    gs_left = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs_master[0, 0], height_ratios=[1, 1.05], hspace=0.55)
+    gs_right = GridSpecFromSubplotSpec(3, 1, subplot_spec=gs_master[0, 1], hspace=0.38)
+    
+    ax_sens = fig_params.add_subplot(gs_left[0, 0])
     x_pos = np.arange(len(sorted_params))
     
     gt_label_added = False
@@ -571,34 +669,64 @@ def main():
         
     ax_sens.set_yscale('log')
     ax_sens.set_ylim(bottom=max(1e-5, args.sobol_threshold * 0.1), top=10.0)
-    ax_sens.axhline(args.sobol_threshold, color='black', linestyle='--', linewidth=1.5, label=f"Threshold ({args.sobol_threshold})")
-    ax_sens.set_ylabel('Sobol Sensitivity', fontsize=8)
+    ax_sens.axhline(args.sobol_threshold, color='black', linestyle='--', linewidth=1.2, label=f"Threshold ({args.sobol_threshold})")
+    ax_sens.set_ylabel('Sobol Sensitivity', fontsize=7.0)
+    ax_sens.grid(False)
     
     ax_sens.set_xticks(x_pos)
     ax_sens.set_xticklabels([]) # Hide for sensitivity since violin shares it
-    ax_sens.tick_params(axis='y', labelsize=7)
+    ax_sens.tick_params(axis='y', labelsize=6.0)
     
     # Add estimated coverage secondary axis
     ax2 = ax_sens.twinx()
-    ax2.plot(x_pos, est_coverage_pct, color='black', marker='o', linestyle='-', linewidth=1.5, markersize=4, label="Estimated Coverage (EC)")
-    ax2.set_ylabel('Estimated Coverage (%)', color='black', fontsize=8)
+    ax2.plot(x_pos, est_coverage_pct, color='black', marker='o', linestyle='-', linewidth=1.2, markersize=3, label="Estimated Coverage (EC)")
+    ax2.set_ylabel('Estimated Coverage (%)', color='black', fontsize=7.0)
     ax2.set_ylim(0, 105)
     ax2.set_yticks([0, 20, 40, 60, 80, 100])
-    ax2.tick_params(axis='y', labelcolor='black', labelsize=7)
-    ax2.axhline(100, color='black', linestyle='-', linewidth=0.8, alpha=0.5)
-    ax2.axhline(95, color='black', linestyle='-', linewidth=0.8, alpha=0.5)
+    ax2.tick_params(axis='y', labelcolor='black', labelsize=6.0)
+    ax2.axhline(100, color='black', linestyle='-', linewidth=0.6, alpha=0.5)
+    ax2.axhline(95, color='black', linestyle='-', linewidth=0.6, alpha=0.5)
+    ax2.grid(False)
     
     lines_1, labels_1 = ax_sens.get_legend_handles_labels()
     lines_2, labels_2 = ax2.get_legend_handles_labels()
     by_label_sens = dict(zip(labels_1 + labels_2, lines_1 + lines_2))
-    ax_sens.legend(by_label_sens.values(), by_label_sens.keys(), fontsize=6.5, loc='upper center', bbox_to_anchor=(0.5, -0.08), ncol=5, frameon=False)
+    
+    # Organize legend into 2 clean rows:
+    # Row 1: Ground Truth Parameter, Threshold
+    # Row 2: Sensitivities, Estimated Coverage (EC)
+    import matplotlib.lines as mlines
+    spacer_handle = mlines.Line2D([], [], color='none')
+    
+    row1_keys = ["Ground Truth Parameter", f"Threshold ({args.sobol_threshold})", "Disabled Parameter"]
+    row2_keys = [r"$\bar{S}_{\mathrm{T,v}}$", r"$\bar{S}_{\mathrm{T,d}}$", r"$\bar{S}_{\mathrm{T,a}}$", "Estimated Coverage (EC)"]
+    
+    r1_handles = [by_label_sens[k] for k in row1_keys if k in by_label_sens]
+    r1_labels = [k for k in row1_keys if k in by_label_sens]
+    
+    r2_handles = [by_label_sens[k] for k in row2_keys if k in by_label_sens]
+    r2_labels = [k for k in row2_keys if k in by_label_sens]
+    
+    # Pad both rows to 3 items
+    while len(r1_handles) < 3:
+        r1_handles.append(spacer_handle)
+        r1_labels.append("")
+        
+    while len(r2_handles) < 3:
+        r2_handles.append(spacer_handle)
+        r2_labels.append("")
+        
+    ordered_handles = [r1_handles[0], r2_handles[0], r1_handles[1], r2_handles[1], r1_handles[2], r2_handles[2]]
+    ordered_labels = [r1_labels[0], r2_labels[0], r1_labels[1], r2_labels[1], r1_labels[2], r2_labels[2]]
+    
+    ax_sens.legend(ordered_handles, ordered_labels, fontsize=5.5,
+                   loc='upper center', bbox_to_anchor=(0.5, -0.06), ncol=3, frameon=False,
+                   handlelength=1.0, handletextpad=0.3, columnspacing=0.6)
     
     plt.setp(ax_sens.get_xticklabels(), visible=False)
 
-
-
-    # 3. Violin Plot (Row 3)
-    ax_viol = fig_params.add_subplot(gs_params[1, 0], sharex=ax_sens)
+    # 3. Violin Plot (Row 2, Left Column)
+    ax_viol = fig_params.add_subplot(gs_left[1, 0], sharex=ax_sens)
 
     for i, p in enumerate(sorted_params):
         clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
@@ -615,7 +743,7 @@ def main():
         
         if clean_p in disabled_params_names:
             ax_viol.axvspan(i - 0.4, i + 0.4, color='red', alpha=0.15, zorder=0)
-            ax_viol.plot(i, 0.0, marker='x', color='red', markersize=6, zorder=10)
+            ax_viol.plot(i, 0.0, marker='x', color='red', markersize=4, zorder=10)
         
         if is_active:
             # 95% CI interval as a light background bar
@@ -629,42 +757,103 @@ def main():
             b_height = bin_edges[1] - bin_edges[0]
             ax_viol.barh(bin_centers, counts, height=b_height, left=i - counts/2, color=color, alpha=0.5, edgecolor='none')
             
-            ax_viol.plot([i - 0.35, i + 0.35], [mean_val, mean_val], color=color, lw=2)
-            
-            ax_viol.text(i, 1.05, fr"${mean_val:.3f}$", transform=ax_viol.get_xaxis_transform(),
-                    ha='center', va='bottom', fontsize=6.5, color=color,
-                    bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor=color, lw=0.5), zorder=10, clip_on=False)
+            ax_viol.plot([i - 0.35, i + 0.35], [mean_val, mean_val], color=color, lw=1.5)
         
         if is_true:
-            ax_viol.plot([i - 0.35, i + 0.35], [true_val, true_val], color='black', lw=1.5, linestyle='--')
-            
-            ax_viol.text(i, 1.18, fr"${true_val:.3f}$", transform=ax_viol.get_xaxis_transform(),
-                    ha='center', va='bottom', fontsize=6.5, color='black',
-                    bbox=dict(boxstyle="round,pad=0.18", facecolor="white", edgecolor='black', lw=0.5), zorder=10, clip_on=False)
+            ax_viol.plot([i - 0.35, i + 0.35], [true_val, true_val], color='black', lw=1.2, linestyle='--')
                 
     ax_viol.set_xticks(range(len(sorted_params)))
-    ax_viol.set_xticklabels(sorted_params, fontsize=9)
-    ax_viol.set_ylabel('Parameter Value', fontsize=8)
-    ax_viol.set_ylim([0, 2.1])
+    ax_viol.set_xticklabels(sorted_params, fontsize=6.8)
+    ax_viol.set_ylabel('Parameter Value', fontsize=7.0)
+    ax_viol.set_ylim([0, 2.05])
     ax_viol.set_yticks([0.0, 0.5, 1.0, 1.5, 2.0])
-    ax_viol.tick_params(axis='y', labelsize=7)
+    ax_viol.tick_params(axis='y', labelsize=6.0)
     ax_viol.grid(False)
-    
-    # Row labels for the text boxes placed cleanly outside ax_viol above the top spine
-    ax_viol.text(-0.025, 1.05, "Mean", transform=ax_viol.transAxes, ha='right', va='bottom', fontsize=7.5, fontweight='bold', color='black', clip_on=False)
-    ax_viol.text(-0.025, 1.18, "True", transform=ax_viol.transAxes, ha='right', va='bottom', fontsize=7.5, fontweight='bold', color='black', clip_on=False)
 
-    # Legend for the parameter plot
-    import matplotlib.patches as mpatches
-    import matplotlib.lines as mlines
-    
     viol_legend = [
         mpatches.Patch(color='gray', alpha=0.5, label='Density'),
-        mlines.Line2D([0], [0], color='gray', lw=2, label='Mean'),
+        mlines.Line2D([0], [0], color='gray', lw=1.5, label='Mean'),
         mpatches.Patch(color='gray', alpha=0.1, label='95% CI'),
-        mlines.Line2D([0], [0], color='black', lw=1.5, linestyle='--', label='Ground Truth')
+        mlines.Line2D([0], [0], color='black', lw=1.2, linestyle='--', label='Ground Truth')
     ]
-    ax_viol.legend(handles=viol_legend, loc='upper center', bbox_to_anchor=(0.5, -0.22), ncol=4, fontsize=7, frameon=False)
+    ax_viol.legend(handles=viol_legend, loc='upper center', bbox_to_anchor=(0.5, -0.28), ncol=4, fontsize=5.5, frameon=False,
+                   handlelength=1.0, handletextpad=0.2, columnspacing=0.5)
+
+    # 4. Invariant-dependent Sobol Sensitivity (Right Column: 3 subplots)
+    ax_inv1 = fig_params.add_subplot(gs_right[0, 0])
+    ax_inv2 = fig_params.add_subplot(gs_right[1, 0])
+    ax_inv3 = fig_params.add_subplot(gs_right[2, 0])
+    
+    f3x3 = load_f3x3_from_distilled(distilled_dir)
+    if f3x3 is not None:
+        I1_bar, I2_bar, J = compute_invariants_np(f3x3)
+        n_points = len(f3x3)
+
+        df_dev_inv, _ = load_sobol_csv(distilled_dir, "dev_sensitivities")
+        if df_dev_inv is None:
+            df_dev_inv, _ = load_sobol_csv(distilled_dir, "sensitivities")
+        df_vol_inv, _ = load_sobol_csv(distilled_dir, "vol_sensitivities")
+
+        if df_dev_inv is not None and df_vol_inv is not None:
+            df_dev_inv = df_dev_inv.iloc[:n_points]
+            df_vol_inv = df_vol_inv.iloc[:n_points]
+
+            exclude_cols = ['test cases', 'Unnamed: 0']
+            dev_inv_cols = [c for c in df_dev_inv.columns if c not in exclude_cols and not c.startswith('Unnamed')]
+            vol_inv_cols = [c for c in df_vol_inv.columns if c not in exclude_cols and not c.startswith('Unnamed')]
+
+            active_dev_inv = [p for p in dev_inv_cols if df_dev_inv[p].max() > args.sobol_threshold]
+            active_vol_inv = [p for p in vol_inv_cols if df_vol_inv[p].max() > args.sobol_threshold]
+
+            if not active_dev_inv and dev_inv_cols:
+                active_dev_inv = [dev_inv_cols[0]]
+            if not active_vol_inv and vol_inv_cols:
+                active_vol_inv = [vol_inv_cols[0]]
+
+            # Panel 1: ST,d vs I1_bar
+            for p in active_dev_inv:
+                col = get_comp_color(p)
+                ax_inv1.scatter(I1_bar, df_dev_inv[p].values, color=col, alpha=0.65, s=8, edgecolors='none')
+            ax_inv1.set_xlabel(r"$\bar{I}_1$", fontsize=6.8, labelpad=1)
+            ax_inv1.set_ylabel(r"$\bar{S}_{\mathrm{T,d}}$", fontsize=7.0, labelpad=1)
+            ax_inv1.set_ylim(-0.05, 1.05)
+            ax_inv1.set_yticks([0.0, 0.5, 1.0])
+            ax_inv1.tick_params(axis='both', which='major', labelsize=5.5, pad=1)
+            ax_inv1.grid(False)
+
+            # Panel 2: ST,d vs I2_bar
+            for p in active_dev_inv:
+                col = get_comp_color(p)
+                ax_inv2.scatter(I2_bar, df_dev_inv[p].values, color=col, alpha=0.65, s=8, edgecolors='none')
+            ax_inv2.set_xlabel(r"$\bar{I}_2$", fontsize=6.8, labelpad=1)
+            ax_inv2.set_ylabel(r"$\bar{S}_{\mathrm{T,d}}$", fontsize=7.0, labelpad=1)
+            ax_inv2.set_ylim(-0.05, 1.05)
+            ax_inv2.set_yticks([0.0, 0.5, 1.0])
+            ax_inv2.tick_params(axis='both', which='major', labelsize=5.5, pad=1)
+            ax_inv2.grid(False)
+
+            # Panel 3: ST,v vs J
+            for p in active_vol_inv:
+                col = get_comp_color(p)
+                ax_inv3.scatter(J, df_vol_inv[p].values, color=col, alpha=0.65, s=8, edgecolors='none')
+            ax_inv3.set_xlabel(r"$J$", fontsize=6.8, labelpad=1)
+            ax_inv3.set_ylabel(r"$\bar{S}_{\mathrm{T,v}}$", fontsize=7.0, labelpad=1)
+            ax_inv3.set_ylim(-0.05, 1.05)
+            ax_inv3.set_yticks([0.0, 0.5, 1.0])
+            ax_inv3.tick_params(axis='both', which='major', labelsize=5.5, pad=1)
+            ax_inv3.grid(False)
+
+            # Unified bottom legend for invariant plots
+            all_inv_active = list(dict.fromkeys(active_dev_inv + active_vol_inv))
+            inv_handles = []
+            inv_labels = []
+            for p in all_inv_active:
+                col = get_comp_color(p)
+                inv_handles.append(mlines.Line2D([], [], color=col, marker='o', linestyle='none', markersize=4))
+                inv_labels.append(to_latex(p))
+
+            ax_inv3.legend(handles=inv_handles, labels=inv_labels, loc='upper center', bbox_to_anchor=(0.5, -0.42),
+                           ncol=len(inv_handles), fontsize=6.0, frameon=False, handletextpad=0.2, columnspacing=0.5)
     
     fig_params.savefig(os.path.join(distilled_dir, f"split_params_{true_model_name}.pdf"), dpi=300, bbox_inches='tight')
     fig_params.savefig(os.path.join(distilled_dir, f"split_params_{true_model_name}.png"), dpi=300, bbox_inches='tight')
@@ -699,8 +888,8 @@ def main():
         if dev_info['always_out']:
             extrap_texts_dev.append(fr"$\gamma^{{(\mathrm{{{name}}})}}$ (Extrap)")
         else:
-            for g_dev, p_dev in dev_info['crossings']:
-                subscript = r"\mathrm{min}" if name in ["UC", "EC"] else r"\mathrm{max}"
+            for g_dev, p_dev, is_entry in dev_info['crossings']:
+                subscript = r"\mathrm{min}" if is_entry else r"\mathrm{max}"
                 extrap_texts_dev.append(fr"$\gamma_{{{subscript}}}^{{(\mathrm{{{name}}})}} = {g_dev:.2f}$")
                 
     # Add boundary intercepts text box outside
@@ -739,8 +928,8 @@ def main():
         if vol_info['always_out']:
             extrap_texts_vol.append(fr"$\gamma^{{(\mathrm{{{name}}})}}$ (Extrap)")
         else:
-            for g_vol, p_vol in vol_info['crossings']:
-                subscript = r"\mathrm{min}" if name in ["UC", "EC"] else r"\mathrm{max}"
+            for g_vol, p_vol, is_entry in vol_info['crossings']:
+                subscript = r"\mathrm{min}" if is_entry else r"\mathrm{max}"
                 extrap_texts_vol.append(fr"$\gamma_{{{subscript}}}^{{(\mathrm{{{name}}})}} = {g_vol:.2f}$")
                 
     # Add boundary intercepts text box outside
@@ -768,6 +957,7 @@ def main():
     
     space_path = os.path.join(distilled_dir, f"split_invariant_spaces_{true_model_name}.pdf")
     fig_space.savefig(space_path, dpi=300, bbox_inches='tight')
+    fig_space.savefig(os.path.join(distilled_dir, f"split_invariant_spaces_{true_model_name}.png"), dpi=300, bbox_inches='tight')
     plt.close(fig_space)
     
     print(f"Saved split summary plots to {distilled_dir}")

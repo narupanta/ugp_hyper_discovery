@@ -659,14 +659,28 @@ for SEED in $SEEDS_LIST; do
                 echo "⚠️ Notice: $VAL_DIR/holes/fem_distilled_samples.npz not found; skipping Holes UQ verification plots."
             fi
 
-            # Re-run distilled energy R2 plot if distilled outputs exist
-            if [ -f "$DISTILL_DIR/dev_flow_samples.npy" ] && [ -f "$EXTRACT_DIR/gp_posterior_predictions.npz" ]; then
-                python3 plots/plot_distilled_r2_energy.py \
+            if [ -d "$VAL_DIR" ]; then
+                echo "Generating Reaction Force verification plots for Seed $SEED..."
+                python3 plots/plot_reaction_force_distilled.py --model_path "$VAL_DIR" || true
+                python3 plots/plot_free_node_residuals.py --model_path "$VAL_DIR" || true
+            fi
+
+            # Re-run distilled energy R2 plot and split summary if distilled outputs exist
+            if [ -f "$DISTILL_DIR/dev_flow_samples.npy" ]; then
+                if [ -f "$EXTRACT_DIR/gp_posterior_predictions.npz" ]; then
+                    python3 plots/plot_distilled_r2_energy.py \
+                        --distilled_dir "$DISTILL_DIR" \
+                        --saved_model_dir "$EXTRACT_DIR" \
+                        --material_model "$DIST_MODEL" \
+                        --distill_target "$DIST_TARGET" \
+                        --val_load_steps $FEM_VAL_STEPS || true
+                fi
+
+                python3 plots/plot_split_summary.py \
                     --distilled_dir "$DISTILL_DIR" \
                     --saved_model_dir "$EXTRACT_DIR" \
                     --material_model "$DIST_MODEL" \
-                    --distill_target "$DIST_TARGET" \
-                    --val_load_steps $FEM_VAL_STEPS || true
+                    --distill_target "$DIST_TARGET" || true
             fi
 
             if [ -d "$DISTILL_DIR" ]; then

@@ -1,8 +1,10 @@
 """
 plots/plot_combined_invariant_sensitivity.py: Plots combined invariant-dependent Sobol indices:
+3 rows x 1 col layout:
 1. Total Sobol order vs I1_bar (dev parameters only)
 2. Total Sobol order vs I2_bar (dev parameters only)
 3. Total Sobol order vs J (vol parameters only)
+Merged unified legend at bottom outside the plots.
 """
 
 import os
@@ -11,11 +13,38 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from plots.theme import apply_style, save_figure
 from plots.sensitivity import load_sobol_csv
 from core.utils import compute_invariants_np, load_f3x3_from_distilled
+
+
+def to_latex(name):
+    clean = name.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+    if clean.startswith("C") and len(clean) == 3 and clean[1:].isdigit():
+        return rf"$C_{{{clean[1:]}}}$"
+    if clean.startswith("D") and len(clean) == 2 and clean[1:].isdigit():
+        return rf"$D_{{{clean[1:]}}}$"
+    if clean == "E":
+        return r"$E$"
+    return rf"${clean}$"
+
+
+def get_param_color(name):
+    clean = name.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+    if clean == "C10":
+        return "#0072B2"
+    elif clean == "C01":
+        return "#56B4E9"
+    elif clean == "D1":
+        return "#D55E00"
+    elif clean == "D2":
+        return "#E69F00"
+    elif clean.startswith("C4") or clean.startswith("C6"):
+        return "#CC79A7"
+    return "#009E73"
 
 
 def main():
@@ -27,6 +56,8 @@ def main():
     args = parser.parse_args()
 
     distilled_dir = os.path.abspath(args.distilled_dir)
+    if not os.path.exists(os.path.join(distilled_dir, "f3x3.npy")) and os.path.isdir(os.path.join(distilled_dir, "distilled")):
+        distilled_dir = os.path.join(distilled_dir, "distilled")
 
     # 1. Load f3x3 deformation gradients and compute invariants
     f3x3 = load_f3x3_from_distilled(distilled_dir)
@@ -67,60 +98,66 @@ def main():
     if not active_vol:
         active_vol = [vol_params[0]]
 
-    # 3. Create 3-panel plot
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
-
-    tab10_colors = plt.cm.tab10.colors
-    dev_colors = [tab10_colors[i % len(tab10_colors)] for i in range(len(active_dev))]
-    vol_colors = [tab10_colors[(len(active_dev) + i) % len(tab10_colors)] for i in range(len(active_vol))]
+    # 3. Create 3 rows x 1 col plot for narrow column layout (ratio ~ 0.20)
+    fig_width = 1.65
+    fig_height = 4.30
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    gs = fig.add_gridspec(3, 1, hspace=0.36, top=0.98, bottom=0.12, left=0.28, right=0.94)
 
     # Panel 1: Total Sobol Order vs I1_bar (Deviatoric parameters only)
-    ax1 = axes[0]
+    ax1 = fig.add_subplot(gs[0, 0])
     for j, param in enumerate(active_dev):
-        label_clean = param.replace("$", "")
-        ax1.scatter(I1_bar, df_dev[param].values, label=f"${label_clean}$",
-                    color=dev_colors[j], alpha=0.75, s=26, edgecolors='none')
-    ax1.set_title(r"Total Sobol Order vs $\bar{I}_1$", fontsize=13)
-    ax1.set_xlabel(r"$\bar{I}_1$", fontsize=12)
-    ax1.set_ylabel(r"Total-Order Sobol Index ($S_T$)", fontsize=12)
+        color = get_param_color(param)
+        ax1.scatter(I1_bar, df_dev[param].values, color=color, alpha=0.65, s=8, edgecolors='none')
+    ax1.set_xlabel(r"$\bar{I}_1$", fontsize=6.8, labelpad=1)
+    ax1.set_ylabel(r"$\bar{S}_{\mathrm{T,d}}$", fontsize=7.0, labelpad=1)
     ax1.set_ylim(-0.05, 1.05)
-    ax1.grid(True, alpha=0.25)
-    ax1.legend(loc="best", fontsize=11, framealpha=0.92)
+    ax1.set_yticks([0.0, 0.5, 1.0])
+    ax1.tick_params(axis='both', which='major', labelsize=5.5, pad=1)
+    ax1.grid(False)
 
     # Panel 2: Total Sobol Order vs I2_bar (Deviatoric parameters only)
-    ax2 = axes[1]
+    ax2 = fig.add_subplot(gs[1, 0])
     for j, param in enumerate(active_dev):
-        label_clean = param.replace("$", "")
-        ax2.scatter(I2_bar, df_dev[param].values, label=f"${label_clean}$",
-                    color=dev_colors[j], alpha=0.75, s=26, edgecolors='none')
-    ax2.set_title(r"Total Sobol Order vs $\bar{I}_2$", fontsize=13)
-    ax2.set_xlabel(r"$\bar{I}_2$", fontsize=12)
-    ax2.set_ylabel(r"Total-Order Sobol Index ($S_T$)", fontsize=12)
+        color = get_param_color(param)
+        ax2.scatter(I2_bar, df_dev[param].values, color=color, alpha=0.65, s=8, edgecolors='none')
+    ax2.set_xlabel(r"$\bar{I}_2$", fontsize=6.8, labelpad=1)
+    ax2.set_ylabel(r"$\bar{S}_{\mathrm{T,d}}$", fontsize=7.0, labelpad=1)
     ax2.set_ylim(-0.05, 1.05)
-    ax2.grid(True, alpha=0.25)
-    ax2.legend(loc="best", fontsize=11, framealpha=0.92)
+    ax2.set_yticks([0.0, 0.5, 1.0])
+    ax2.tick_params(axis='both', which='major', labelsize=5.5, pad=1)
+    ax2.grid(False)
 
     # Panel 3: Total Sobol Order vs J (Volumetric parameters only)
-    ax3 = axes[2]
+    ax3 = fig.add_subplot(gs[2, 0])
     for j, param in enumerate(active_vol):
-        label_clean = param.replace("$", "")
-        ax3.scatter(J, df_vol[param].values, label=f"${label_clean}$",
-                    color=vol_colors[j], alpha=0.75, s=26, edgecolors='none')
-    ax3.set_title(r"Total Sobol Order vs $J$", fontsize=13)
-    ax3.set_xlabel(r"$J$", fontsize=12)
-    ax3.set_ylabel(r"Total-Order Sobol Index ($S_T$)", fontsize=12)
+        color = get_param_color(param)
+        ax3.scatter(J, df_vol[param].values, color=color, alpha=0.65, s=8, edgecolors='none')
+    ax3.set_xlabel(r"$J$", fontsize=6.8, labelpad=1)
+    ax3.set_ylabel(r"$\bar{S}_{\mathrm{T,v}}$", fontsize=7.0, labelpad=1)
     ax3.set_ylim(-0.05, 1.05)
-    ax3.grid(True, alpha=0.25)
-    ax3.legend(loc="best", fontsize=11, framealpha=0.92)
+    ax3.set_yticks([0.0, 0.5, 1.0])
+    ax3.tick_params(axis='both', which='major', labelsize=5.5, pad=1)
+    ax3.grid(False)
 
-    plt.tight_layout()
+    # Unified bottom legend outside the plots (e.g. C10, C01, D1)
+    all_active = list(dict.fromkeys(active_dev + active_vol))
+    legend_handles = []
+    legend_labels = []
+    for p in all_active:
+        color = get_param_color(p)
+        legend_handles.append(mlines.Line2D([], [], color=color, marker='o', linestyle='none', markersize=4))
+        legend_labels.append(to_latex(p))
+
+    fig.legend(legend_handles, legend_labels, loc='lower center', bbox_to_anchor=(0.5, 0.01),
+               ncol=len(legend_handles), fontsize=6.0, frameon=False, handletextpad=0.2, columnspacing=0.5)
 
     out_pdf = os.path.join(distilled_dir, args.output_name)
     base_name = os.path.splitext(args.output_name)[0]
     out_png = os.path.join(distilled_dir, f"{base_name}.png")
 
-    save_figure(fig, out_pdf)
-    save_figure(fig, out_png)
+    fig.savefig(out_pdf, dpi=300, bbox_inches='tight')
+    fig.savefig(out_png, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
     print(f"Saved combined invariant sensitivity plot to:\n  - {out_pdf}\n  - {out_png}")
