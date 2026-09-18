@@ -587,8 +587,9 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
         ax_psi.plot(gamma, psi_dets[i], color="red", lw=0.8, alpha=0.3, zorder=1)
         ax_psi.plot(gamma, psi_samples[:, i, :].T, color="lightblue", lw=0.8, alpha=0.3, zorder=1)
         ax_psi.plot(gamma, psi_dist_mean[i], **CURVE_STYLES["gp"])
-        ax_psi.fill_between(gamma, psi_dist_mean[i] - 1.96 * jnp.sqrt(psi_dist_var[i]),
-                            psi_dist_mean[i] + 1.96 * jnp.sqrt(psi_dist_var[i]), **CURVE_STYLES["gp_ci"])
+        psi_std_i = jnp.sqrt(jnp.maximum(1e-12, psi_dist_var[i]))
+        ax_psi.fill_between(gamma, psi_dist_mean[i] - 1.96 * psi_std_i,
+                            psi_dist_mean[i] + 1.96 * psi_std_i, **CURVE_STYLES["gp_ci"])
 
         y_min, y_max = jnp.min(psi_true[i]), jnp.max(psi_true[i])
         pad = (y_max - y_min) * 0.1
@@ -599,7 +600,7 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
         ax_p = axes[i, 1]
         p_true_comp = P_true[i, :, idx_comp[0], idx_comp[1]]
         p_mean_comp = P_dist_mean[i][:, idx_comp[0], idx_comp[1]]
-        p_std_comp = jnp.sqrt(P_dist_var[i][:, idx_comp[0], idx_comp[1]])
+        p_std_comp = jnp.sqrt(jnp.maximum(1e-12, P_dist_var[i][:, idx_comp[0], idx_comp[1]]))
         p_samples_comp = P_samples[:, i, :, idx_comp[0], idx_comp[1]]
         p_det_comp = P_dets[i][:, idx_comp[0], idx_comp[1]]
 
