@@ -203,14 +203,17 @@ class DirichletBC:
     dof: 0 for u_x, 1 for u_y
     val: float or callable pt -> float
     is_prescribed: True if this DOF carries prescribed displacement increments.
+    schedule_index: index in the displacement schedule vector.
     """
     def __init__(self, name: str, location_fn: Callable, dof: int, 
-                 val: Union[float, Callable] = 0.0, is_prescribed: bool = False):
+                 val: Union[float, Callable] = 0.0, is_prescribed: bool = False,
+                 schedule_index: int = 0):
         self.name = name
         self.location_fn = location_fn
         self.dof = int(dof)
         self.val = val
         self.is_prescribed = is_prescribed
+        self.schedule_index = int(schedule_index)
 
 
 class NeumannBC:
@@ -275,34 +278,43 @@ class BoundaryConditionConfig:
     def create_node_type_array(self, node_coords: jnp.ndarray) -> jnp.ndarray:
         """
         Constructs the standard 5-channel one-hot node_type array:
-        [is_internal, is_fix_x, is_fix_y, is_traction_x, is_traction_y]
-        Completely decoupled from boundary names: checks Dirichlet DOFs and Neumann traction directions.
+        [is_internal, is_fix_x, is_fix_y, is_loaded_x, is_loaded_y]
+        Completely unified across force and displacement modes:
+        - Channels 1, 2: zero-fixed Dirichlet DOFs (u_x=0, u_y=0)
+        - Channels 3, 4: loaded boundaries (traction DOFs in force mode, prescribed DOFs in displacement mode)
+        - Channel 0: internal nodes
         """
         n_nodes = node_coords.shape[0]
         is_fix_x = jnp.zeros(n_nodes, dtype=bool)
         is_fix_y = jnp.zeros(n_nodes, dtype=bool)
-        is_traction_x = jnp.zeros(n_nodes, dtype=bool)
-        is_traction_y = jnp.zeros(n_nodes, dtype=bool)
+        is_loaded_x = jnp.zeros(n_nodes, dtype=bool)
+        is_loaded_y = jnp.zeros(n_nodes, dtype=bool)
 
         # 1. Evaluate Dirichlet DOFs
         for dbc in self.dirichlet_bcs:
             mask = jax.vmap(dbc.location_fn)(node_coords)
-            if dbc.dof == 0:
-                is_fix_x = is_fix_x | mask
-            elif dbc.dof == 1:
-                is_fix_y = is_fix_y | mask
+            if dbc.is_prescribed:
+                if dbc.dof == 0:
+                    is_loaded_x = is_loaded_x | mask
+                elif dbc.dof == 1:
+                    is_loaded_y = is_loaded_y | mask
+            else:
+                if dbc.dof == 0:
+                    is_fix_x = is_fix_x | mask
+                elif dbc.dof == 1:
+                    is_fix_y = is_fix_y | mask
 
-        # 2. Evaluate Neumann Traction DOFs
+        # 2. Evaluate Neumann Traction DOFs (force mode)
         for nbc in self.neumann_bcs:
             mask = jax.vmap(nbc.location_fn)(node_coords)
             if abs(nbc.direction[0]) > 1e-6:
-                is_traction_x = is_traction_x | mask
+                is_loaded_x = is_loaded_x | mask
             if abs(nbc.direction[1]) > 1e-6:
-                is_traction_y = is_traction_y | mask
+                is_loaded_y = is_loaded_y | mask
 
-        is_internal = ~(is_fix_x | is_fix_y | is_traction_x | is_traction_y)
+        is_internal = ~(is_fix_x | is_fix_y | is_loaded_x | is_loaded_y)
         node_type = jnp.stack([
-            is_internal, is_fix_x, is_fix_y, is_traction_x, is_traction_y
+            is_internal, is_fix_x, is_fix_y, is_loaded_x, is_loaded_y
         ], axis=-1).astype(jnp.float32)
         return node_type
 
@@ -310,7 +322,9 @@ class BoundaryConditionConfig:
 def create_default_bc_config(
     geometry_name: str = "block",
     mode: str = "force",
-    pred_dict: Optional[Dict[str, Callable]] = None
+    pred_dict: Optional[Dict[str, Callable]] = None,
+    prescribe_right: Optional[bool] = None,
+    clamp_top_x: bool = False
 ) -> BoundaryConditionConfig:
     """
     Factory helper creating standard boundary conditions for standard geometries.
@@ -321,6 +335,10 @@ def create_default_bc_config(
 
     mode = mode.lower()
     geometry_name = geometry_name.lower()
+
+    if prescribe_right is None:
+        # Default: block is biaxial (prescribe_right=True), holes is uniaxial tension (prescribe_right=False)
+        prescribe_right = (geometry_name != "holes")
 
     if geometry_name == "holes":
         if mode == "force":
@@ -336,8 +354,14 @@ def create_default_bc_config(
             dirichlet_bcs = [
                 DirichletBC("bottom_x", pred_dict["bottom"], dof=0, val=0.0),
                 DirichletBC("bottom_y", pred_dict["bottom"], dof=1, val=0.0),
-                DirichletBC("top_y", pred_dict["top"], dof=1, val=0.0, is_prescribed=True)
             ]
+            if clamp_top_x:
+                dirichlet_bcs.append(DirichletBC("top_x", pred_dict["top"], dof=0, val=0.0, is_prescribed=False))
+            sched_idx = 0
+            if prescribe_right:
+                dirichlet_bcs.append(DirichletBC("right_x", pred_dict["right"], dof=0, val=0.0, is_prescribed=True, schedule_index=sched_idx))
+                sched_idx += 1
+            dirichlet_bcs.append(DirichletBC("top_y", pred_dict["top"], dof=1, val=0.0, is_prescribed=True, schedule_index=sched_idx))
             neumann_bcs = []
     else: # default "block"
         if mode == "force":
@@ -353,11 +377,52 @@ def create_default_bc_config(
             dirichlet_bcs = [
                 DirichletBC("left_x", pred_dict["left"], dof=0, val=0.0),
                 DirichletBC("bottom_y", pred_dict["bottom"], dof=1, val=0.0),
-                DirichletBC("top_y", pred_dict["top"], dof=1, val=0.0, is_prescribed=True)
             ]
+            sched_idx = 0
+            if prescribe_right:
+                dirichlet_bcs.append(DirichletBC("right_x", pred_dict["right"], dof=0, val=0.0, is_prescribed=True, schedule_index=sched_idx))
+                sched_idx += 1
+            dirichlet_bcs.append(DirichletBC("top_y", pred_dict["top"], dof=1, val=0.0, is_prescribed=True, schedule_index=sched_idx))
             neumann_bcs = []
 
     return BoundaryConditionConfig(mode=mode, dirichlet_bcs=dirichlet_bcs, neumann_bcs=neumann_bcs)
+
+
+def make_plane_stress_piola(mat_model: Any, max_iter: int = 8) -> Tuple[Callable, Callable]:
+    """
+    Constructs an autodiff-compatible 2D First Piola-Kirchhoff stress function
+    P_2D(F_2D) and lambda_3 root solver satisfying P_33(F_2D, lambda_3) = 0
+    for compressible hyperelastic materials.
+    """
+    def solve_lambda3(F_2d: jnp.ndarray) -> jnp.ndarray:
+        det_2d = jnp.linalg.det(F_2d)
+        lam3_0 = 1.0 / jnp.clip(det_2d, 1e-4, 1e4)
+
+        def step_fn(i, lam):
+            def p33_val(l):
+                F_3d = jnp.array([
+                    [F_2d[0, 0], F_2d[0, 1], 0.0],
+                    [F_2d[1, 0], F_2d[1, 1], 0.0],
+                    [0.0,        0.0,        l]
+                ])
+                return mat_model.P(F_3d)[2, 2]
+
+            p33, dp33 = jax.value_and_grad(p33_val)(lam)
+            lam_next = lam - p33 / jnp.where(jnp.abs(dp33) < 1e-12, 1.0, dp33)
+            return jnp.clip(lam_next, 1e-3, 100.0)
+
+        return jax.lax.fori_loop(0, max_iter, step_fn, lam3_0)
+
+    def piola_2d(F_2d: jnp.ndarray) -> jnp.ndarray:
+        lam3 = solve_lambda3(F_2d)
+        F_3d = jnp.array([
+            [F_2d[0, 0], F_2d[0, 1], 0.0],
+            [F_2d[1, 0], F_2d[1, 1], 0.0],
+            [0.0,        0.0,        lam3]
+        ])
+        return mat_model.P(F_3d)[:2, :2]
+
+    return piola_2d, solve_lambda3
 
 
 # ==============================================================================
@@ -435,7 +500,7 @@ def solve_adaptive_fem(
     if bc_config.mode == "displacement":
         for i, dbc in enumerate(bc_config.dirichlet_bcs):
             if dbc.is_prescribed:
-                prescribed_dof_map.append((i, dbc.dof))
+                prescribed_dof_map.append((i, dbc.schedule_index))
 
     for step_idx in range(n_steps):
         target = schedule[step_idx]
@@ -461,8 +526,8 @@ def solve_adaptive_fem(
                         problem.internal_vars_surfaces = surface_vars
                     elif bc_config.mode == "displacement":
                         # Apply prescribed Dirichlet displacement
-                        for val_idx, dof in prescribed_dof_map:
-                            disp_val = interm[dof] if hasattr(interm, '__getitem__') else interm
+                        for val_idx, s_idx in prescribed_dof_map:
+                            disp_val = interm[s_idx] if (hasattr(interm, '__getitem__') and interm.ndim > 0) else interm
                             problem.fes[0].vals_list[val_idx] = jnp.full_like(
                                 problem.fes[0].vals_list[val_idx], disp_val
                             )
@@ -496,19 +561,25 @@ def solve_adaptive_fem(
 def compute_all_invariants(
     F_array: jnp.ndarray,
     a0: Optional[np.ndarray] = None,
-    a1: Optional[np.ndarray] = None
+    a1: Optional[np.ndarray] = None,
+    lam3: Optional[np.ndarray] = None
 ) -> Dict[str, np.ndarray]:
     """
     Computes isochoric invariants I1_bar, I2_bar, J, and anisotropic invariants
     I4_bar, I6_bar, I8_bar when fiber directions (a0, a1) are provided.
     F_array shape: (..., 2, 2) or (..., 3, 3)
+    lam3: optional out-of-plane stretch array of shape (...) when F_array is (..., 2, 2).
     """
     orig_shape = F_array.shape
     if F_array.shape[-2:] == (2, 2):
         F_flat = F_array.reshape(-1, 2, 2)
         F_3d = np.zeros((F_flat.shape[0], 3, 3), dtype=np.float64)
         F_3d[:, :2, :2] = np.array(F_flat)
-        F_3d[:, 2, 2] = 1.0
+        if lam3 is not None:
+            lam3_flat = np.asarray(lam3, dtype=np.float64).reshape(-1)
+            F_3d[:, 2, 2] = lam3_flat
+        else:
+            F_3d[:, 2, 2] = 1.0
     else:
         F_3d = np.array(F_array).reshape(-1, 3, 3)
 
@@ -519,6 +590,7 @@ def compute_all_invariants(
         "I1_bar": I1_bar.reshape(out_shape),
         "I2_bar": I2_bar.reshape(out_shape),
         "J": J.reshape(out_shape),
+        "F_3d": F_3d.reshape(*out_shape, 3, 3)
     }
 
     if a0 is not None:
@@ -559,16 +631,24 @@ def export_fem_dataset(
     a0: Optional[np.ndarray] = None,
     a1: Optional[np.ndarray] = None,
     a2: Optional[np.ndarray] = None,
-    mode: str = "force"
+    mode: str = "force",
+    stress_mode: str = "plane_strain",
+    solve_lambda3_fn: Optional[Callable] = None,
+    piola_func_2d: Optional[Callable] = None,
+    load_noise: float = 0.01
 ) -> Dict[str, Any]:
     """
     Computes kinematics and exports ground truth and observed fields into a clean .npz archive:
       1. Displacements: u_true (unperturbed) and u_obs / u (with noise on free DOFs).
-      2. Kinematics: F_true, F_obs (and F), dNdX, dA, f_neu.
-      3. Invariants:
+      2. Kinematics: F_true, F_obs (and F), F_3d, F_3d_true, dNdX, dA, f_neu.
+      3. Invariants (with exact out-of-plane stretch lambda_3 if plane stress):
          - true_I1_bar, true_I2_bar, true_J
          - obs_I1_bar, obs_I2_bar, obs_J
          - (true_I4_bar, true_I6_bar, true_I8_bar, obs_I4_bar, obs_I6_bar, obs_I8_bar if anisotropic).
+      4. Metadata & Reactions:
+         - stress_mode: 'plane_strain' or 'plane_stress'
+         - control_mode: 'force' or 'displacement'
+         - reaction_forces / load (computed from true stress integration in displacement control).
     """
     os.makedirs(os.path.dirname(os.path.abspath(output_npz_path)), exist_ok=True)
     num_steps = u_true.shape[0]
@@ -578,6 +658,9 @@ def export_fem_dataset(
     F_true_list = []
     F_obs_list = []
     f_neu_list = []
+    lam3_true_list = []
+    lam3_obs_list = []
+    reactions_true_list = []
 
     m_cells = mesh_pos[cells]
 
@@ -588,6 +671,9 @@ def export_fem_dataset(
         # Add displacement noise to free nodes (where is_fix_x != 1 or is_fix_y != 1)
         u_noise = jax.random.normal(subkey_disp, u_step_true.shape) * disp_noise
         free_nodes = (node_type[:, 1] != 1) & (node_type[:, 2] != 1)
+        if mode == "displacement":
+            # In displacement mode, nodes with prescribed displacement (channels 3 and 4) are also Dirichlet
+            free_nodes = free_nodes & (node_type[:, 3] != 1) & (node_type[:, 4] != 1)
         u_noise = u_noise.at[~free_nodes].set(0.0)
         u_step_obs = u_step_true + u_noise
 
@@ -610,6 +696,23 @@ def export_fem_dataset(
         else:
             f_neu_step = jnp.zeros((mesh_pos.shape[0], 2), dtype=jnp.float64)
 
+        if stress_mode == "plane_stress" and solve_lambda3_fn is not None:
+            lam3_step_true = jax.vmap(solve_lambda3_fn)(F_step_true)
+            lam3_step_obs = jax.vmap(solve_lambda3_fn)(F_step_obs)
+            lam3_true_list.append(np.array(lam3_step_true))
+            lam3_obs_list.append(np.array(lam3_step_obs))
+
+        # Under displacement mode, compute true nodal reaction forces
+        if mode == "displacement" and piola_func_2d is not None:
+            P_step = jax.vmap(piola_func_2d)(F_step_true)
+            f_int_cell = jnp.einsum("cij, cnj -> cin", P_step, dNdX) * dA[:, None, None]
+            f_int_cell = jnp.swapaxes(f_int_cell, 1, 2)
+            f_int_nodes = jnp.zeros((mesh_pos.shape[0], 2), dtype=jnp.float64).at[cells].add(f_int_cell)
+            
+            rx = float(jnp.sum(f_int_nodes[node_type[:, 3] == 1, 0]))
+            ry = float(jnp.sum(f_int_nodes[node_type[:, 4] == 1, 1]))
+            reactions_true_list.append([rx, ry])
+
         u_obs_list.append(u_step_obs)
         F_true_list.append(F_step_true)
         F_obs_list.append(F_step_obs)
@@ -620,9 +723,23 @@ def export_fem_dataset(
     F_obs_arr = jnp.stack(F_obs_list)
     f_neu_arr = jnp.stack(f_neu_list)
 
+    lam3_true_arr = np.array(lam3_true_list) if len(lam3_true_list) > 0 else None
+    lam3_obs_arr = np.array(lam3_obs_list) if len(lam3_obs_list) > 0 else None
+
     # Compute invariants
-    inv_true = compute_all_invariants(F_true_arr, a0=a0, a1=a1)
-    inv_obs = compute_all_invariants(F_obs_arr, a0=a0, a1=a1)
+    inv_true = compute_all_invariants(F_true_arr, a0=a0, a1=a1, lam3=lam3_true_arr)
+    inv_obs = compute_all_invariants(F_obs_arr, a0=a0, a1=a1, lam3=lam3_obs_arr)
+
+    # Process displacement-control reaction loads
+    if mode == "displacement" and len(reactions_true_list) > 0:
+        reactions_true = np.array(reactions_true_list)
+        rng, subkey_r1 = jax.random.split(rng)
+        rng, subkey_r2 = jax.random.split(rng)
+        noise_x = load_noise * np.abs(reactions_true[:, 0]) * np.array(jax.random.normal(subkey_r1, (num_steps,)))
+        noise_y = load_noise * np.abs(reactions_true[:, 1]) * np.array(jax.random.normal(subkey_r2, (num_steps,)))
+        loads_noisy = np.column_stack([reactions_true[:, 0] + noise_x, reactions_true[:, 1] + noise_y])
+        load_noise_std = load_noise * np.abs(reactions_true)
+        load_noise_std_steps = load_noise_std
 
     export_dict = {
         # Geometry & Mesh
@@ -642,9 +759,11 @@ def export_fem_dataset(
         "u_true": u_true,
 
         # Kinematics
-        "F": F_obs_arr,       # Backward compatible key
+        "F": F_obs_arr,       # Backward compatible key (2, 2)
         "F_obs": F_obs_arr,
         "F_true": F_true_arr,
+        "F_3d": inv_obs["F_3d"],
+        "F_3d_true": inv_true["F_3d"],
 
         # Invariants (True)
         "true_I1_bar": inv_true["I1_bar"],
@@ -655,7 +774,19 @@ def export_fem_dataset(
         "obs_I1_bar": inv_obs["I1_bar"],
         "obs_I2_bar": inv_obs["I2_bar"],
         "obs_J": inv_obs["J"],
+
+        # Modes metadata
+        "stress_mode": stress_mode,
+        "control_mode": mode,
     }
+
+    if lam3_obs_arr is not None:
+        export_dict["lam3"] = lam3_obs_arr
+        export_dict["lam3_true"] = lam3_true_arr
+
+    if mode == "displacement" and len(reactions_true_list) > 0:
+        export_dict["reaction_forces"] = loads_noisy
+        export_dict["reaction_forces_true"] = reactions_true
 
     # Anisotropic invariants (only included when fiber vectors are defined)
     if a0 is not None:

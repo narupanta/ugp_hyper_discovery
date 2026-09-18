@@ -13,11 +13,13 @@ from .model import SparseHyperelasticityGP
 def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, cells: jnp.ndarray, 
                           n_nodes: int, f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, dNdX: jnp.ndarray, 
                           dA: jnp.ndarray, key: jnp.ndarray, n_s: int, normalize_ell: int = 0,
-                          vfm_mode: str = "linear_triangle", V_basis: jnp.ndarray = None) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+                          vfm_mode: str = "linear_triangle", V_basis: jnp.ndarray = None,
+                          control_mode: str = "force", loads: jnp.ndarray = None) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
     """
     Computes the variational stochastic VFM loss and KL divergence ELBO objective.
     Strictly preserves functional purity without mutating stateful class instance attributes.
     Supports vfm_mode: 'linear_triangle', 'global_vf', or 'mix'.
+    Supports control_mode: 'force' or 'displacement'.
     """
     params = model.load_params(p)
     gpweight = model.precompute_weights_from_loaded(params)
@@ -34,9 +36,9 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
     piola2x2_cells = piola_sampling(f3x3, subkey)
 
     # vmapped_ell maps over Monte Carlo samples
-    vmapped_ell = jax.vmap(ell, in_axes=(None, None, None, None, None, None, None, 0, None, None, None, None, None))
+    vmapped_ell = jax.vmap(ell, in_axes=(None, None, None, None, None, None, None, 0, None, None, None, None, None, None, None))
     ell_, (free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, sum_free_loss, sum_fix_loss) = vmapped_ell(
-        params, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA, normalize_ell, vfm_mode, V_basis
+        params, sigma_fix_x, sigma_fix_y, cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA, normalize_ell, vfm_mode, V_basis, control_mode, loads
     )
     
     kl_div = model.kl_divergence(params=params, weights=gpweight)
@@ -48,7 +50,8 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
 
 def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.ndarray, n_nodes: int, 
         f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, piola2x2_cells: jnp.ndarray, dNdX: jnp.ndarray, dA: jnp.ndarray,
-        normalize_ell: int = 0, vfm_mode: str = "linear_triangle", V_basis: jnp.ndarray = None):
+        normalize_ell: int = 0, vfm_mode: str = "linear_triangle", V_basis: jnp.ndarray = None,
+        control_mode: str = "force", loads: jnp.ndarray = None):
     sigma_free_x = jnp.maximum(p.sigma_free_x, 1e-6)
     sigma_free_y = jnp.maximum(p.sigma_free_y, 1e-6)
     sigma_fix_x = jnp.maximum(sigma_fix_x, 1e-3)
@@ -60,9 +63,12 @@ def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.n
     sigma_global = jnp.maximum(sigma_global, 1e-6)
 
     # vmap over load steps for the VFM loss
+    n_steps = f_neu_nodes.shape[0] if f_neu_nodes is not None else piola2x2_cells.shape[0]
+    loads_schedule = loads if loads is not None else jnp.zeros((n_steps, 2), dtype=jnp.float64)
+
     free_x_loss, free_y_loss, fix_x_loss, fix_y_loss, global_loss = jax.vmap(
-        vfm_loss, in_axes=(None, None, 0, None, 0, None, None, None)
-    )(cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA, V_basis)
+        vfm_loss, in_axes=(None, None, 0, None, 0, None, None, None, None, 0)
+    )(cells, n_nodes, f_neu_nodes, node_type, piola2x2_cells, dNdX, dA, V_basis, control_mode, loads_schedule)
 
     n_steps = free_x_loss.shape[0]
     n_freedofs_x = free_x_loss.shape[1]
@@ -122,7 +128,8 @@ def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.n
 
 def vfm_loss(cells: jnp.ndarray, n_nodes: int, f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, 
              piola2x2: jnp.ndarray, dNdx: jnp.ndarray, dA: jnp.ndarray,
-             V_basis: jnp.ndarray = None):
+             V_basis: jnp.ndarray = None, control_mode: str = "force",
+             load_step: jnp.ndarray = None):
     # internal element nodal forces: (C,3,2)
     f_int_cell = jnp.einsum("cij, cnj -> cin", piola2x2, dNdx) * dA[:, None, None]
     f_int_cell = jnp.swapaxes(f_int_cell, 1, 2)  # (C,3,2)
@@ -130,17 +137,40 @@ def vfm_loss(cells: jnp.ndarray, n_nodes: int, f_neu_nodes: jnp.ndarray, node_ty
     # assemble into global internal force vector (n_nodes, 2) using explicit float64 precision
     f_int_nodes = jnp.zeros((n_nodes, 2), dtype=jnp.float64).at[cells].add(f_int_cell)
 
-    # --- Residual R = int(grad v : P) dx  -  int(v·T) ds(Neumann)
-    R_nodes = f_int_nodes - f_neu_nodes
     is_fix_x = (node_type[:, 1] == 1)
     is_fix_y = (node_type[:, 2] == 1)
-    
-    free_x_loss = R_nodes[~is_fix_x, 0]
-    free_y_loss = R_nodes[~is_fix_y, 1]
-    
-    # Global equilibrium loss (sum of reactions + sum of external forces on free nodes)
-    fix_x_loss = jnp.sum(R_nodes[is_fix_x, 0]) + jnp.sum(f_neu_nodes[~is_fix_x, 0])
-    fix_y_loss = jnp.sum(R_nodes[is_fix_y, 1]) + jnp.sum(f_neu_nodes[~is_fix_y, 1])
+    is_loaded_x = (node_type[:, 3] == 1)
+    is_loaded_y = (node_type[:, 4] == 1)
+
+    if control_mode == "displacement":
+        # Constrained DOFs are both zero-fixed and prescribed-displacement boundaries
+        is_free_x = ~(is_fix_x | is_loaded_x)
+        is_free_y = ~(is_fix_y | is_loaded_y)
+
+        # Free node residuals (tractions are zero on free nodes)
+        free_x_loss = f_int_nodes[is_free_x, 0]
+        free_y_loss = f_int_nodes[is_free_y, 1]
+
+        # Reaction force equilibrium on the loaded boundary (against load-cell measurement)
+        f_pred_x = jnp.sum(f_int_nodes[is_loaded_x, 0])
+        f_pred_y = jnp.sum(f_int_nodes[is_loaded_y, 1])
+
+        target_x = load_step[0] if (load_step is not None and load_step.shape[0] > 0) else 0.0
+        target_y = load_step[1] if (load_step is not None and load_step.shape[0] > 1) else 0.0
+
+        fix_x_loss = f_pred_x - target_x
+        fix_y_loss = f_pred_y - target_y
+        R_nodes = f_int_nodes
+    else:
+        # Force control:
+        # --- Residual R = int(grad v : P) dx  -  int(v·T) ds(Neumann)
+        R_nodes = f_int_nodes - f_neu_nodes
+        free_x_loss = R_nodes[~is_fix_x, 0]
+        free_y_loss = R_nodes[~is_fix_y, 1]
+        
+        # Global equilibrium loss (sum of reactions + sum of external forces on free nodes)
+        fix_x_loss = jnp.sum(R_nodes[is_fix_x, 0]) + jnp.sum(f_neu_nodes[~is_fix_x, 0])
+        fix_y_loss = jnp.sum(R_nodes[is_fix_y, 1]) + jnp.sum(f_neu_nodes[~is_fix_y, 1])
 
     if V_basis is not None:
         global_loss = jnp.einsum("mid,id->m", V_basis, R_nodes)
@@ -173,8 +203,12 @@ def neumann_cell_force(coords_el: jnp.ndarray, onehot_types_el: jnp.ndarray, t3:
 
 
 def total_physical_loss(u_array: jnp.ndarray, loads: jnp.ndarray, piola_func: Any, 
-                        coords: jnp.ndarray, cells: jnp.ndarray, node_type: jnp.ndarray):
-    plpl = jax.vmap(physical_loss_per_loadstep_force_controlled, in_axes=(0, 0, None, None, None, None))
+                        coords: jnp.ndarray, cells: jnp.ndarray, node_type: jnp.ndarray,
+                        control_mode: str = "force"):
+    if control_mode == "displacement":
+        plpl = jax.vmap(physical_loss_displacement_controlled, in_axes=(0, 0, None, None, None, None))
+    else:
+        plpl = jax.vmap(physical_loss_per_loadstep_force_controlled, in_axes=(0, 0, None, None, None, None))
     free_node_residual, reaction_loss = plpl(u_array, loads, piola_func, coords, cells, node_type)
     return free_node_residual, reaction_loss
 
@@ -202,9 +236,6 @@ def physical_loss_per_loadstep_force_controlled(u: jnp.ndarray, load: jnp.ndarra
     f_neu_nodes = jnp.zeros((n_nodes, 2), dtype=jnp.float64).at[cells].add(f_neu_cells)
 
     R_nodes = f_int_nodes - f_neu_nodes
-    # is_fix_x is node_type[:, 1]
-    # is_fix_y is node_type[:, 2]
-    
     is_fix_x = (node_type[:, 1] == 1)
     is_fix_y = (node_type[:, 2] == 1)
     
@@ -241,17 +272,26 @@ def physical_loss_displacement_controlled(u: jnp.ndarray, loads: jnp.ndarray, pi
 
     f_int_nodes = jnp.zeros((n_nodes, 2), dtype=jnp.float64).at[cells].add(f_int_cell)
 
-    free_r0 = jnp.sum(f_int_nodes[node_type == 0] ** 2)
-    free_r1 = jnp.sum(f_int_nodes[node_type == 1, 1] ** 2)
-    free_r2 = jnp.sum(f_int_nodes[node_type == 2, 0] ** 2)
-    free_r3 = jnp.sum(f_int_nodes[node_type == 3, 1] ** 2)
-    free_r4 = jnp.sum(f_int_nodes[node_type == 4, 0] ** 2)
-    free_r_total = free_r0 + free_r1 + free_r2 + free_r3 + free_r4
+    is_fix_x = (node_type[:, 1] == 1)
+    is_fix_y = (node_type[:, 2] == 1)
+    is_loaded_x = (node_type[:, 3] == 1)
+    is_loaded_y = (node_type[:, 4] == 1)
 
-    fnl_left = (jnp.sum(f_int_nodes[node_type == 1, 0]) - loads[0])**2
-    fnl_bottom = (jnp.sum(f_int_nodes[node_type == 2, 1]) - loads[1])**2
-    fnl_right = (jnp.sum(f_int_nodes[node_type == 3, 0]) - loads[2])**2
-    fnl_top = (jnp.sum(f_int_nodes[node_type == 4, 1]) - loads[3])**2
+    free_x = ~(is_fix_x | is_loaded_x)
+    free_y = ~(is_fix_y | is_loaded_y)
 
-    reaction_loss = fnl_left + fnl_bottom + fnl_right + fnl_top
+    free_r_x = jnp.sum(f_int_nodes[free_x, 0] ** 2)
+    free_r_y = jnp.sum(f_int_nodes[free_y, 1] ** 2)
+    free_r_total = free_r_x + free_r_y
+
+    f_pred_x = jnp.sum(f_int_nodes[is_loaded_x, 0])
+    f_pred_y = jnp.sum(f_int_nodes[is_loaded_y, 1])
+
+    target_x = loads[0] if (loads is not None and loads.shape[0] > 0) else 0.0
+    target_y = loads[1] if (loads is not None and loads.shape[0] > 1) else 0.0
+
+    reaction_loss_x = (f_pred_x - target_x) ** 2
+    reaction_loss_y = (f_pred_y - target_y) ** 2
+    reaction_loss = reaction_loss_x + reaction_loss_y
+
     return free_r_total, reaction_loss

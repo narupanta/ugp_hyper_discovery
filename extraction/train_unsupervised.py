@@ -26,6 +26,7 @@ from core.trainer import HyperelasticGPTrainer
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 from core.datasetclass import TractionDataset, DatasetFactory
 from core.loss_function import total_stochastic_loss
+from core.fem_engine import make_plane_stress_piola
 from core.plotter import (
     plot_loss_analysis,
     plot_parameters_hist, plot_inducing_points, plot_combined_validation, plot_training_r2,
@@ -36,6 +37,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Isihara Model Dataset and Training Configuration")
 
     # Dataset & Model Config
+    parser.add_argument('--recipe', type=str, default=None, help="Path to recipe YAML configuration file")
     parser.add_argument('--material_model_name', type=str, default="isihara")
     parser.add_argument('--disp_noise', type=float, default=0.0001)
     parser.add_argument('--load_noise', type=float, default=0.01)
@@ -84,6 +86,10 @@ def parse_args():
                         help="VFM loss mode: 'linear_triangle', 'global_vf', or 'mix'")
     parser.add_argument('--vf_order', type=int, default=2,
                         help="Polynomial order for kinematically admissible virtual fields basis (default: 2)")
+    parser.add_argument('--stress_mode', type=str, default=None, choices=["plane_strain", "plane_stress"],
+                        help="Stress state assumption: 'plane_strain' or 'plane_stress'. If None, loaded from recipe or dataset.")
+    parser.add_argument('--control_mode', type=str, default=None, choices=["force", "displacement"],
+                        help="Control mode: 'force' or 'displacement'. If None, loaded from recipe or dataset.")
     return parser.parse_args()
 
 def sigma_fix_to_log_sigma_fix(sigma_fix) :
@@ -196,6 +202,15 @@ if __name__ == "__main__" :
     with open(os.path.join(save_path, "config.yaml"), "w") as f:
         yaml.dump(config_dict, f, default_flow_style=False)
 
+    # Load defaults from recipe if available
+    recipe_path = args.recipe or os.path.join("configs", "recipes", f"{material_model_name}.yaml")
+    rec = {}
+    if os.path.exists(recipe_path):
+        with open(recipe_path, "r") as f:
+            rec = yaml.safe_load(f) or {}
+        if "material_model_name" in rec and args.material_model_name == "isihara" and args.recipe is not None:
+            material_model_name = rec["material_model_name"]
+
     # load precomputed dataset
     if args.dataset_path and os.path.exists(args.dataset_path):
         prep_dataset_path = os.path.abspath(args.dataset_path)
@@ -227,30 +242,81 @@ if __name__ == "__main__" :
     dataset = DatasetFactory.create("dataset/precomputed_vfm", data_path=prep_dataset_path)
     prep_data = dataset.get_data()
 
+    # Resolve control_mode and stress_mode
+    dataset_control = prep_data.get("control_mode", None)
+    if hasattr(dataset_control, "item"):
+        dataset_control = dataset_control.item()
+    control_mode = (args.control_mode or dataset_control or rec.get("control_mode", "force"))
+    control_mode = str(control_mode).lower()
+
+    dataset_stress = prep_data.get("stress_mode", None)
+    if hasattr(dataset_stress, "item"):
+        dataset_stress = dataset_stress.item()
+    stress_mode = (args.stress_mode or dataset_stress or rec.get("stress_mode", "plane_strain"))
+    stress_mode = str(stress_mode).lower()
+
+    config_dict["control_mode"] = control_mode
+    config_dict["stress_mode"] = stress_mode
+    with open(os.path.join(save_path, "config.json"), "w") as f:
+        json.dump(config_dict, f, indent=4)
+    with open(os.path.join(save_path, "config.yaml"), "w") as f:
+        yaml.dump(config_dict, f, default_flow_style=False)
+
+    print(f"[CONFIGURATION] Active Control Mode: '{control_mode}', Stress State: '{stress_mode}'.")
+
     f2x2 = prep_data["F"][train_load_steps_indices]
     cells = prep_data["cells"]
     node_type = np.asarray(prep_data["node_type"])
     mesh_pos = np.asarray(prep_data["mesh_pos"])
     print(f"[DATASET] Dataset successfully loaded: {cells.shape[0]} elements, {node_type.shape[0]} nodes, {prep_data['F'].shape[0]} total load steps.") 
 
-    # Data use in VFM
-    f3x3 = jax.vmap(jax.vmap(fto3x3))(f2x2)
-    f_neu_nodes = prep_data["f_neu"][train_load_steps_indices] 
-    node_type = np.asarray(prep_data["node_type"])
-    dNdX = prep_data["dNdX"]
-    dA = prep_data["dA"]
-    cells = prep_data["cells"]
-    load_noise_std = prep_data["load_noise_std"]
-    load_noise_std_steps = prep_data["load_noise_std_steps"][train_load_steps_indices] 
-
     mat_kwargs = {}
     if args.angles is not None: mat_kwargs["angles"] = args.angles
     if args.dev_params is not None: mat_kwargs["dev_params"] = args.dev_params
     if args.vol_params is not None: mat_kwargs["vol_params"] = args.vol_params
     if args.aniso_params is not None: mat_kwargs["aniso_params"] = args.aniso_params
+
+    mat_p = rec.get("material_params", {})
+    if "dev_params" not in mat_kwargs and "dev_params" in mat_p:
+        mat_kwargs["dev_params"] = mat_p["dev_params"]
+    if "vol_params" not in mat_kwargs and "vol_params" in mat_p:
+        mat_kwargs["vol_params"] = mat_p["vol_params"]
+    if "aniso_params" not in mat_kwargs and "aniso_params" in mat_p:
+        mat_kwargs["aniso_params"] = mat_p["aniso_params"]
+    if "angles" not in mat_kwargs and "angles" in mat_p:
+        mat_kwargs["angles"] = mat_p["angles"]
+
     true_mat_model = get_material(material_model_name, **mat_kwargs)
     psi_true_func = lambda f: true_mat_model.psi(f)
     piola_true_func = lambda f: true_mat_model.P(f)
+
+    # Data use in VFM
+    if stress_mode == "plane_stress":
+        if "F_3d" in prep_data:
+            f3x3 = jnp.asarray(prep_data["F_3d"][train_load_steps_indices], dtype=jnp.float64)
+        elif "lam3" in prep_data:
+            lam3_train = prep_data["lam3"][train_load_steps_indices]
+            f3x3_np = np.zeros((*f2x2.shape[:-2], 3, 3), dtype=np.float64)
+            f3x3_np[:, :, :2, :2] = np.array(f2x2)
+            f3x3_np[:, :, 2, 2] = np.array(lam3_train)
+            f3x3 = jnp.asarray(f3x3_np, dtype=jnp.float64)
+        else:
+            _, solve_lambda3 = make_plane_stress_piola(true_mat_model)
+            lam3_train = jax.vmap(jax.vmap(solve_lambda3))(f2x2)
+            f3x3_np = np.zeros((*f2x2.shape[:-2], 3, 3), dtype=np.float64)
+            f3x3_np[:, :, :2, :2] = np.array(f2x2)
+            f3x3_np[:, :, 2, 2] = np.array(lam3_train)
+            f3x3 = jnp.asarray(f3x3_np, dtype=jnp.float64)
+    else:
+        f3x3 = jax.vmap(jax.vmap(fto3x3))(f2x2)
+
+    f_neu_nodes = prep_data["f_neu"][train_load_steps_indices] 
+    dNdX = prep_data["dNdX"]
+    dA = prep_data["dA"]
+    load_noise_std = prep_data["load_noise_std"]
+    load_noise_std_steps = prep_data["load_noise_std_steps"][train_load_steps_indices] 
+    loads_all = prep_data.get("reaction_forces", prep_data.get("load", None))
+    loads_train = jnp.asarray(loads_all[train_load_steps_indices], dtype=jnp.float64) if loads_all is not None else None
 
     if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
         a0_val = getattr(true_mat_model, "a0", None)
@@ -502,8 +568,8 @@ if __name__ == "__main__" :
     V_basis = None
     if args.vfm_mode in ["global_vf", "mix"]:
         from core.virtual_fields import build_kinematic_virtual_fields
-        print(f"Building kinematically admissible virtual fields (order={args.vf_order}, mode={args.vfm_mode})...")
-        V_basis = build_kinematic_virtual_fields(mesh_pos, node_type, order=args.vf_order)
+        print(f"Building kinematically admissible virtual fields (order={args.vf_order}, mode={args.vfm_mode}, control={control_mode})...")
+        V_basis = build_kinematic_virtual_fields(mesh_pos, node_type, order=args.vf_order, control_mode=control_mode)
         print(f"Constructed {V_basis.shape[0]} orthonormal virtual fields.")
 
     def loss_fn(p, k):
@@ -536,7 +602,8 @@ if __name__ == "__main__" :
         return total_stochastic_loss(
             p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA,
             k_loss, number_of_mci_sampling, args.normalize_ell,
-            vfm_mode=args.vfm_mode, V_basis=V_basis
+            vfm_mode=args.vfm_mode, V_basis=V_basis,
+            control_mode=control_mode, loads=loads_train
         )
 
     if args.final_learning_rate is not None and args.final_learning_rate != learning_rate:

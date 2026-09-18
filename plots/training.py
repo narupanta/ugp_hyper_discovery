@@ -1356,14 +1356,37 @@ def evaluate_reaction_force_calibration(
 
     apply_style()
     val_steps_idx = jnp.array(val_steps)
+
+    control_mode = prep_data.get("control_mode", "force")
+    if hasattr(control_mode, "item"):
+        control_mode = control_mode.item()
+    control_mode = str(control_mode).lower()
+
+    stress_mode = prep_data.get("stress_mode", "plane_strain")
+    if hasattr(stress_mode, "item"):
+        stress_mode = stress_mode.item()
+    stress_mode = str(stress_mode).lower()
+
     f2x2 = prep_data["F"][val_steps_idx]
-    f3x3 = jax.vmap(jax.vmap(fto3x3))(f2x2)
+    if stress_mode == "plane_stress" and "F_3d" in prep_data:
+        f3x3 = jnp.asarray(prep_data["F_3d"][val_steps_idx], dtype=jnp.float64)
+    elif stress_mode == "plane_stress" and "lam3" in prep_data:
+        f3x3_np = np.zeros((*f2x2.shape[:-2], 3, 3), dtype=np.float64)
+        f3x3_np[:, :, :2, :2] = np.array(f2x2)
+        f3x3_np[:, :, 2, 2] = np.array(prep_data["lam3"][val_steps_idx])
+        f3x3 = jnp.asarray(f3x3_np, dtype=jnp.float64)
+    else:
+        f3x3 = jax.vmap(jax.vmap(fto3x3))(f2x2)
+
     f_neu_val = prep_data["f_neu"][val_steps_idx]
     cells = prep_data["cells"]
     node_type = jnp.asarray(prep_data["node_type"])
     dNdX = prep_data["dNdX"]
     dA = prep_data["dA"]
     n_nodes = node_type.shape[0]
+
+    loads_all = prep_data.get("reaction_forces", prep_data.get("load", None))
+    loads_val = jnp.asarray(loads_all[val_steps_idx], dtype=jnp.float64) if loads_all is not None else jnp.zeros((len(val_steps), 2))
 
     load_noise_val = prep_data["load_noise_std_steps"][val_steps_idx]
     sigma_noise_x = jnp.maximum(load_noise_val[:, 0], 1e-3)
@@ -1384,14 +1407,15 @@ def evaluate_reaction_force_calibration(
     piola_steps = jax.vmap(piola_cells, in_axes=(0, None))
     piola_sampling_batch = jax.vmap(piola_steps, in_axes=(None, 0))
 
-    def eval_step_sample(p_cells_step, f_neu_step):
+    def eval_step_sample(p_cells_step, f_neu_step, load_step):
         free_x, free_y, fix_x, fix_y, _ = vfm_loss(
-            cells, n_nodes, f_neu_step, node_type, p_cells_step, dNdX, dA, None
+            cells, n_nodes, f_neu_step, node_type, p_cells_step, dNdX, dA, None,
+            control_mode=control_mode, load_step=load_step
         )
         return fix_x, fix_y
 
-    eval_sample = jax.vmap(eval_step_sample, in_axes=(0, 0))
-    eval_batch = jax.vmap(eval_sample, in_axes=(0, None))
+    eval_sample = jax.vmap(eval_step_sample, in_axes=(0, 0, 0))
+    eval_batch = jax.vmap(eval_sample, in_axes=(0, None, None))
 
     batch_size = 8
     all_fix_x = []
@@ -1399,19 +1423,23 @@ def evaluate_reaction_force_calibration(
     for b_start in range(0, n_samples, batch_size):
         b_keys = keys[b_start:b_start + batch_size]
         p_val_b = piola_sampling_batch(f3x3, b_keys)
-        fix_x_b, fix_y_b = eval_batch(p_val_b, f_neu_val)
+        fix_x_b, fix_y_b = eval_batch(p_val_b, f_neu_val, loads_val)
         all_fix_x.append(np.array(fix_x_b))
         all_fix_y.append(np.array(fix_y_b))
 
     fix_x_samples = jnp.array(np.concatenate(all_fix_x, axis=0))
     fix_y_samples = jnp.array(np.concatenate(all_fix_y, axis=0))
 
-    f_meas_x = jnp.sum(f_neu_val[:, :, 0], axis=1)
-    f_meas_y = jnp.sum(f_neu_val[:, :, 1], axis=1)
-
-    # Predicted load cell forces from equilibrium: F_pred = F_meas - R
-    f_pred_x_samples = f_meas_x[None, :] - fix_x_samples
-    f_pred_y_samples = f_meas_y[None, :] - fix_y_samples
+    if control_mode == "displacement":
+        f_meas_x = loads_val[:, 0]
+        f_meas_y = loads_val[:, 1]
+        f_pred_x_samples = fix_x_samples + f_meas_x[None, :]
+        f_pred_y_samples = fix_y_samples + f_meas_y[None, :]
+    else:
+        f_meas_x = jnp.sum(f_neu_val[:, :, 0], axis=1)
+        f_meas_y = jnp.sum(f_neu_val[:, :, 1], axis=1)
+        f_pred_x_samples = f_meas_x[None, :] - fix_x_samples
+        f_pred_y_samples = f_meas_y[None, :] - fix_y_samples
 
     mu_fx = jnp.mean(f_pred_x_samples, axis=0)
     var_fx = jnp.var(f_pred_x_samples, axis=0) + sigma_noise_x**2

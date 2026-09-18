@@ -17,7 +17,8 @@ from core.fem_engine import (
     create_default_bc_config,
     HyperElasticityProblem,
     solve_adaptive_fem,
-    export_fem_dataset
+    export_fem_dataset,
+    make_plane_stress_piola
 )
 
 import matplotlib.pyplot as plt
@@ -72,19 +73,23 @@ def plot_dataset_viz(data, dataset_name, save_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Universal Modular FEM Dataset Generator")
+    parser.add_argument('--recipe', type=str, default=None, help="Path to recipe YAML configuration file")
     parser.add_argument('--model', type=str, default="isihara")
-    parser.add_argument('--disp_noise', type=float, default=0.0)
-    parser.add_argument('--load_noise', type=float, default=0.03)
-    parser.add_argument('--target_top', type=float, default=10.0)
-    parser.add_argument('--asym', type=float, default=0.9)
-    parser.add_argument('--n_steps', type=int, default=21)
+    parser.add_argument('--disp_noise', type=float, default=None)
+    parser.add_argument('--load_noise', type=float, default=None)
+    parser.add_argument('--target_top', type=float, default=None)
+    parser.add_argument('--asym', type=float, default=None)
+    parser.add_argument('--n_steps', type=int, default=None)
     parser.add_argument('--seed', type=int, default=42, help="Random seed for data generation")
     parser.add_argument('--mesh_dir', type=str, default="mesh")
     parser.add_argument('--raw_data_dir', type=str, default="dataset/synthetic/force_control")
     parser.add_argument('--precomputed_dir', type=str, default="dataset/preprocessed/syn_f")
     parser.add_argument('--geometry', type=str, default='block')
     parser.add_argument('--mesh_size', type=float, default=0.08)
-    parser.add_argument('--control_mode', type=str, default="force", choices=["force", "displacement"])
+    parser.add_argument('--control_mode', type=str, default=None, choices=["force", "displacement"])
+    parser.add_argument('--stress_mode', type=str, default=None, choices=["plane_strain", "plane_stress"])
+    parser.add_argument('--prescribe_right', type=int, default=None, help="1 to prescribe right boundary, 0 to leave free. Default: 1 for block, 0 for holes.")
+    parser.add_argument('--clamp_top_x', type=int, default=None, help="1 to clamp top boundary in x (ux=0, rigid clamp), 0 for free roller.")
     parser.add_argument('--angles', type=float, nargs='+', default=None)
     parser.add_argument('--dev_params', type=float, nargs='+', default=None)
     parser.add_argument('--vol_params', type=float, nargs='+', default=None)
@@ -92,16 +97,34 @@ def main():
     args = parser.parse_args()
 
     material_model_name = args.model
-    disp_noise = args.disp_noise
-    load_noise = args.load_noise
-    target_load = args.target_top
-    asym_factor = args.asym
-    num_steps = args.n_steps
     mesh_dir = args.mesh_dir
     raw_data_dir = args.raw_data_dir
     precomputed_dir = args.precomputed_dir
     geometry_name = args.geometry.lower()
-    control_mode = args.control_mode.lower()
+
+    # Load defaults from recipe if available
+    recipe_path = args.recipe or os.path.join("configs", "recipes", f"{material_model_name}.yaml")
+    rec = {}
+    if os.path.exists(recipe_path):
+        import yaml
+        with open(recipe_path, "r") as f:
+            rec = yaml.safe_load(f) or {}
+        if "material_model_name" in rec and args.model == "isihara" and args.recipe is not None:
+            material_model_name = rec["material_model_name"]
+
+    control_mode = (args.control_mode or rec.get("control_mode", "force")).lower()
+    stress_mode = (args.stress_mode or rec.get("stress_mode", "plane_strain")).lower()
+    target_load = args.target_top if args.target_top is not None else float(rec.get("target_load_true_top", 10.0))
+    asym_factor = args.asym if args.asym is not None else float(rec.get("asym_factor", 0.9))
+    num_steps = args.n_steps if args.n_steps is not None else int(rec.get("n_loadsteps", 21))
+    disp_noise = args.disp_noise if args.disp_noise is not None else float(rec.get("disp_noise", 0.0))
+    load_noise = args.load_noise if args.load_noise is not None else float(rec.get("load_noise", 0.03))
+
+    clamp_top_x_val = bool(args.clamp_top_x if args.clamp_top_x is not None else rec.get("clamp_top_x", False))
+    if args.prescribe_right is not None:
+        prescribe_right = bool(args.prescribe_right)
+    else:
+        prescribe_right = bool(rec.get("prescribe_right", (geometry_name != "holes")))
 
     os.makedirs(mesh_dir, exist_ok=True)
     mesh_msh_path = os.path.join(mesh_dir, f"{geometry_name}_mesh.msh")
@@ -120,7 +143,13 @@ def main():
 
     # 2. Boundary Condition Configuration
     pred_dict = geom.get_boundary_predicates()
-    bc_config = create_default_bc_config(geometry_name=geometry_name, mode=control_mode, pred_dict=pred_dict)
+    bc_config = create_default_bc_config(
+        geometry_name=geometry_name,
+        mode=control_mode,
+        pred_dict=pred_dict,
+        prescribe_right=prescribe_right,
+        clamp_top_x=clamp_top_x_val
+    )
     dirichlet_bc_info = bc_config.get_dirichlet_info()
     surface_maps = bc_config.get_surface_maps()
     node_type = bc_config.create_node_type_array(node_coords)
@@ -132,24 +161,22 @@ def main():
     if args.vol_params is not None: mat_kwargs["vol_params"] = args.vol_params
     if args.aniso_params is not None: mat_kwargs["aniso_params"] = args.aniso_params
 
-    # If parameters not explicitly given on CLI, attempt to load defaults from recipe
-    recipe_path = os.path.join("configs", "recipes", f"{material_model_name}.yaml")
-    if os.path.exists(recipe_path):
-        import yaml
-        with open(recipe_path, "r") as f:
-            rec = yaml.safe_load(f)
-        mat_p = rec.get("material_params", {})
-        if "dev_params" not in mat_kwargs and "dev_params" in mat_p:
-            mat_kwargs["dev_params"] = mat_p["dev_params"]
-        if "vol_params" not in mat_kwargs and "vol_params" in mat_p:
-            mat_kwargs["vol_params"] = mat_p["vol_params"]
-        if "aniso_params" not in mat_kwargs and "aniso_params" in mat_p:
-            mat_kwargs["aniso_params"] = mat_p["aniso_params"]
-        if "angles" not in mat_kwargs and "angles" in mat_p:
-            mat_kwargs["angles"] = mat_p["angles"]
+    mat_p = rec.get("material_params", {})
+    if "dev_params" not in mat_kwargs and "dev_params" in mat_p:
+        mat_kwargs["dev_params"] = mat_p["dev_params"]
+    if "vol_params" not in mat_kwargs and "vol_params" in mat_p:
+        mat_kwargs["vol_params"] = mat_p["vol_params"]
+    if "aniso_params" not in mat_kwargs and "aniso_params" in mat_p:
+        mat_kwargs["aniso_params"] = mat_p["aniso_params"]
+    if "angles" not in mat_kwargs and "angles" in mat_p:
+        mat_kwargs["angles"] = mat_p["angles"]
 
     true_mat_model = get_material(material_model_name, **mat_kwargs)
-    true_piola_stress_func = lambda f: true_mat_model.P(fto3x3(f))[:2, :2]
+    if stress_mode == "plane_stress":
+        true_piola_stress_func, solve_lambda3 = make_plane_stress_piola(true_mat_model)
+    else:
+        true_piola_stress_func = lambda f: true_mat_model.P(fto3x3(f))[:2, :2]
+        solve_lambda3 = None
 
     # 4. Universal Problem Instance
     problem_true = HyperElasticityProblem(
@@ -184,14 +211,14 @@ def main():
         target_load_noisy = target_load + noise_std * jax.random.normal(key)
 
         noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1, 1)
-        if geometry_name == "holes":
+        if geometry_name == "holes" or not prescribe_right:
             noisy_load_right_base = jnp.zeros_like(noisy_load_top_base)
         else:
             noisy_load_right_base = noisy_load_top_base * asym_factor
         loads_noisy = jnp.concatenate([noisy_load_right_base, noisy_load_top_base], axis=1)
 
         loads_top_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1, 1)
-        if geometry_name == "holes":
+        if geometry_name == "holes" or not prescribe_right:
             loads_right_true = jnp.zeros_like(loads_top_true)
         else:
             loads_right_true = loads_top_true * asym_factor
@@ -202,11 +229,14 @@ def main():
         load_noise_std_steps = load_noise_std * np.linspace(0, 1, num_steps).reshape(-1, 1)
     else: # displacement
         disps_top_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1, 1)
-        disps_right_true = disps_top_true * asym_factor
-        schedule_solve = jnp.concatenate([disps_right_true, disps_top_true], axis=1)
-        loads_noisy = jnp.zeros_like(schedule_solve)
-        load_noise_std = np.zeros_like(schedule_solve)
-        load_noise_std_steps = np.zeros_like(schedule_solve)
+        if prescribe_right:
+            disps_right_true = disps_top_true * asym_factor
+            schedule_solve = jnp.concatenate([disps_right_true, disps_top_true], axis=1)
+        else:
+            schedule_solve = disps_top_true
+        loads_noisy = np.zeros((num_steps, 2))
+        load_noise_std = np.zeros((num_steps, 2))
+        load_noise_std_steps = np.zeros((num_steps, 2))
 
     # 6. Solve Adaptive FEM
     print(f"Solving forward FEM ({geometry_name}, {material_model_name}, {num_steps} steps, mode={control_mode})...")
@@ -248,7 +278,11 @@ def main():
         a0=a0,
         a1=a1,
         a2=a2,
-        mode=control_mode
+        mode=control_mode,
+        stress_mode=stress_mode,
+        solve_lambda3_fn=solve_lambda3,
+        piola_func_2d=true_piola_stress_func,
+        load_noise=load_noise
     )
 
     # Create unseeded fallback copy for standard single-seed workflows if seed in [0, 42, 1]

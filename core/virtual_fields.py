@@ -10,7 +10,8 @@ jax.config.update("jax_enable_x64", True)
 def build_kinematic_virtual_fields(
     mesh_pos: np.ndarray | jnp.ndarray,
     node_type: np.ndarray | jnp.ndarray,
-    order: int = 2
+    order: int = 2,
+    control_mode: str = "force"
 ) -> jnp.ndarray:
     """
     Constructs an orthonormal basis of kinematically admissible virtual displacement fields
@@ -21,7 +22,11 @@ def build_kinematic_virtual_fields(
         node_type: (N_nodes, >=3) boundary flags:
                    column 1: is_fix_x (Dirichlet constraint in x)
                    column 2: is_fix_y (Dirichlet constraint in y)
+                   column 3: is_loaded_x (prescribed in displacement mode, traction in force mode)
+                   column 4: is_loaded_y (prescribed in displacement mode, traction in force mode)
         order: Polynomial degree of virtual field basis (default 2 -> 12 fields).
+        control_mode: 'force' (default) or 'displacement'. In displacement mode,
+                      virtual fields vanish on both zero-fixed and prescribed displacement edges.
         
     Returns:
         V_basis: (M, N_nodes, 2) jnp.ndarray with dtype float64, satisfying:
@@ -40,8 +45,12 @@ def build_kinematic_virtual_fields(
     xn = 2.0 * (x - x.min()) / (x_span if x_span > 1e-12 else 1.0) - 1.0
     yn = 2.0 * (y - y.min()) / (y_span if y_span > 1e-12 else 1.0) - 1.0
     
-    is_fix_x = (node_type_np[:, 1] == 1)
-    is_fix_y = (node_type_np[:, 2] == 1)
+    if control_mode.lower() == "displacement":
+        is_fix_x = (node_type_np[:, 1] == 1) | (node_type_np[:, 3] == 1)
+        is_fix_y = (node_type_np[:, 2] == 1) | (node_type_np[:, 4] == 1)
+    else:
+        is_fix_x = (node_type_np[:, 1] == 1)
+        is_fix_y = (node_type_np[:, 2] == 1)
     free_x = (~is_fix_x).astype(np.float64)
     free_y = (~is_fix_y).astype(np.float64)
     
