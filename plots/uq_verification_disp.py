@@ -35,7 +35,10 @@ def plot_comprehensive_analysis(u_true, u_pred_samples, node_type, node_to_plot,
     """
     apply_style()
     # Filter for free nodes
-    free_nodes = (node_type[:, 1] != 1) & (node_type[:, 2] != 1)
+    if node_type.shape[1] >= 5:
+        free_nodes = (node_type[:, 1] != 1) & (node_type[:, 2] != 1) & (node_type[:, 3] != 1) & (node_type[:, 4] != 1)
+    else:
+        free_nodes = (node_type[:, 1] != 1) & (node_type[:, 2] != 1)
     
     u_pred_free = u_pred_samples[:, free_nodes, :]  # [Samples, Nodes, 2]
     u_true_free = u_true[free_nodes, :]             # [Nodes, 2]
@@ -362,7 +365,7 @@ import matplotlib.ticker as ticker
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sklearn.metrics import r2_score
 
-def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path):
+def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, mode_str=""):
     apply_style()
 
     # --- Data Preparation ---
@@ -433,8 +436,8 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     rmse_x = np.sqrt(np.mean((ux_med - ux_true)**2))
     rmse_y = np.sqrt(np.mean((uy_med - uy_true)**2))
 
-    ux_err = [ux_med - ux_lower, ux_upper - ux_med]
-    uy_err = [uy_med - uy_lower, uy_upper - uy_med]
+    ux_err = [np.maximum(0.0, ux_med - ux_lower), np.maximum(0.0, ux_upper - ux_med)]
+    uy_err = [np.maximum(0.0, uy_med - uy_lower), np.maximum(0.0, uy_upper - uy_med)]
 
     axes[2].errorbar(ux_true, ux_med, yerr=ux_err, fmt="x", color="#0072B2", ecolor="#0072B2",
                      alpha=0.35, label=r"$u_x$ " + f"({cov_x:.1f}%)", markersize=4, capsize=0, elinewidth=0.8)
@@ -462,7 +465,9 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
                ncol=2, frameon=False, fontsize=8.5, handlelength=1.6, borderpad=0.1)
 
     # --- Bottom Text Box Banner across figure width (centered under panels 2 & 3) ---
+    prefix = rf"$\mathbf{{[{mode_str}]}}$   $\vert$   " if mode_str else ""
     stats_banner = (
+        prefix +
         rf"$95\%\;\mathrm{{EC}}_{{u_x \cup u_y}} = \mathbf{{{cov_xy:.1f}\%}}$   $\vert$   "
         rf"$r^2_{{u_x}} = \mathbf{{{r2_x:.4f}}},\; r^2_{{u_y}} = \mathbf{{{r2_y:.4f}}}$   $\vert$   "
         rf"$\mathrm{{RMSE}}_{{u_x}} = \mathbf{{{rmse_x:.4f}}},\; \mathrm{{RMSE}}_{{u_y}} = \mathbf{{{rmse_y:.4f}}}$"
@@ -501,8 +506,8 @@ def plot_disp_r2_coverage(u_true, u_pred_med, u_pred_lower, u_pred_upper, save_p
     cov_y, r2_y = get_stats(uy_true, uy_med, uy_lower, uy_upper)
 
     # --- Error Bar Formatting ---
-    ux_err = [ux_med - ux_lower, ux_upper - ux_med]
-    uy_err = [uy_med - uy_lower, uy_upper - uy_med]
+    ux_err = [np.maximum(0.0, ux_med - ux_lower), np.maximum(0.0, ux_upper - ux_med)]
+    uy_err = [np.maximum(0.0, uy_med - uy_lower), np.maximum(0.0, uy_upper - uy_med)]
 
     # 1. Plot Displacement X (Blue, 'x' marker)
     ax.errorbar(ux_true, ux_med, yerr=ux_err, fmt='x', color='#0072B2', ecolor='#0072B2', 
@@ -690,11 +695,27 @@ if __name__ == "__main__" :
     u_p_upper_bound = np.quantile(u_pred_piola_samples_val_flat, 0.975, axis=0)
     u_p_mean = np.mean(u_pred_piola_samples_val_flat, axis=0)
 
+    # Detect control_mode and stress_mode
+    ctrl_mode = "force"
+    stress_mode = "plane_strain"
+    if consolidated_data is not None:
+        if "control_mode" in consolidated_data:
+            ctrl_mode = str(consolidated_data["control_mode"])
+        if "stress_mode" in consolidated_data:
+            stress_mode = str(consolidated_data["stress_mode"])
+    elif true_data is not None:
+        if "control_mode" in true_data:
+            ctrl_mode = str(true_data["control_mode"])
+        if "stress_mode" in true_data:
+            stress_mode = str(true_data["stress_mode"])
+    mode_display = f"{ctrl_mode.capitalize()} Control, {stress_mode.replace('_', ' ').capitalize()}"
+
     # 1x4 Consolidated Displacement Analysis Plot
     plot_disp_field(
         mesh_node_coords, mesh_cells, u_true, u_pred_piola_samples.mean(axis=0),
         u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound,
-        save_path
+        save_path,
+        mode_str=mode_display
     )
 
     plot_node_distributions(u_true, u_pred_piola_samples, u_pred_piola_traction_samples, node_indices, save_path)

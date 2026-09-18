@@ -324,7 +324,7 @@ def create_default_bc_config(
     mode: str = "force",
     pred_dict: Optional[Dict[str, Callable]] = None,
     prescribe_right: Optional[bool] = None,
-    clamp_top_x: bool = False
+    clamp_top_x: Optional[bool] = None
 ) -> BoundaryConditionConfig:
     """
     Factory helper creating standard boundary conditions for standard geometries.
@@ -339,6 +339,13 @@ def create_default_bc_config(
     if prescribe_right is None:
         # Default: block is biaxial (prescribe_right=True), holes is uniaxial tension (prescribe_right=False)
         prescribe_right = (geometry_name != "holes")
+
+    if clamp_top_x is None:
+        # Default: clamp top x only for holes in displacement mode
+        clamp_top_x = (geometry_name == "holes" and mode == "displacement")
+    elif geometry_name != "holes":
+        # Strictly enforce that clamp_top_x is never applied to block
+        clamp_top_x = False
 
     if geometry_name == "holes":
         if mode == "force":

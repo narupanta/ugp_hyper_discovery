@@ -221,6 +221,11 @@ def parse_args():
     parser.add_argument('--output_dir', type=str, default=None, help="Direct output directory for FEM validation")
     parser.add_argument('--dataset_path', type=str, default="", help="Explicit path to precomputed dataset npz file")
     parser.add_argument('--num_steps', type=int, default=None, help="Number of load steps (defaults to dataset load shape or 10)")
+    parser.add_argument('--control_mode', type=str, default=None, choices=['force', 'displacement'], help="Boundary control mode ('force' or 'displacement')")
+    parser.add_argument('--stress_mode', type=str, default=None, choices=['plane_strain', 'plane_stress'], help="Stress state assumption ('plane_strain' or 'plane_stress')")
+    parser.add_argument('--prescribe_right', type=lambda x: (str(x).lower() in ['true', '1', 'yes']), default=None, help="Prescribe right boundary")
+    parser.add_argument('--clamp_top_x', type=lambda x: (str(x).lower() in ['true', '1', 'yes']), default=None, help="Clamp top boundary in X direction")
+    parser.add_argument('--asym_factor', type=float, default=None, help="Asymmetry factor between top and right boundaries")
 
     return parser.parse_args()
 if __name__ == "__main__" :
@@ -260,51 +265,6 @@ if __name__ == "__main__" :
 
     from core.material_models import get_material_from_dir
     true_material_model = get_material_from_dir(args.distilled_dir)
-    true_piola_stress_func = lambda f : true_material_model.P(fto3x3(f))[:2, :2]
-
-    # Define constitutive relationship.
-    def eval_hyperelastic_psi(F_2d, p, a0=None, a1=None):
-        F_3d = jnp.eye(3, dtype=jnp.float64).at[:2, :2].set(F_2d)
-        C = C_func(F_3d)
-        I1 = I1_func(C)
-        I2 = I2_func(C)
-        I3 = I3_func(C)
-        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
-
-        i1_dev = I3_safe ** (-1 / 3) * I1
-        i2_dev = I3_safe ** (-2 / 3) * I2
-        J = jnp.sqrt(I3_safe)
-        i1_m3 = i1_dev - 3.0
-        i2_m3 = i2_dev - 3.0
-        J_m1 = J - 1.0
-
-        dev_p = p[:10]
-        vol_p = p[10:13]
-
-        w_dev = (
-            dev_p[0] * i1_m3 + dev_p[1] * i2_m3 + dev_p[2] * i1_m3**2 +
-            dev_p[3] * i1_m3 * i2_m3 + dev_p[4] * i2_m3**2 + dev_p[5] * i1_m3**3 +
-            dev_p[6] * (i1_m3**2) * i2_m3 + dev_p[7] * i1_m3 * (i2_m3**2) +
-            dev_p[8] * i2_m3**3 + dev_p[9] * jnp.log(jnp.maximum(i2_dev / 3.0, 1e-8))
-        )
-        w_vol = vol_p[0] * J_m1**2 + vol_p[1] * J_m1**4 + vol_p[2] * J_m1**6
-
-        w_aniso = 0.0
-        if a0 is not None:
-            C_bar = (I3_safe ** (-1 / 3))[..., None, None] * C
-            I4_bar = jnp.einsum('i,...ij,j->...', a0, C_bar, a0)
-            I4_m1 = I4_bar - 1.0
-            aniso_p = p[13:19]
-            w_aniso = aniso_p[0] * I4_m1**2 + aniso_p[1] * I4_m1**3 + aniso_p[2] * I4_m1**4
-            if a1 is not None:
-                I6_bar = jnp.einsum('i,...ij,j->...', a1, C_bar, a1)
-                I6_m1 = I6_bar - 1.0
-                w_aniso += aniso_p[3] * I6_m1**2 + aniso_p[4] * I6_m1**3 + aniso_p[5] * I6_m1**4
-
-        return w_dev + w_vol + w_aniso
-
-    def piola_stress_2d(F_2d, p, a0=None, a1=None):
-        return jax.grad(eval_hyperelastic_psi, argnums=0)(F_2d, p, a0, a1)
 
     geometry_flag = args.geometry
 
@@ -377,24 +337,125 @@ if __name__ == "__main__" :
         cells = mesh_data["cells"]
         node_type = np.zeros(node_coords.shape[0], dtype=int)
 
-    # Determine load schedule and step count
-    if prep_data is not None and "load" in prep_data:
-        loads_solve = jnp.array(prep_data["load"])
-        num_steps = loads_solve.shape[0]
-        print(f"[VAL] Using loading schedule from dataset with {num_steps} load steps.")
-    else:
-        key = jax.random.PRNGKey(42)
-        num_steps = args.num_steps if getattr(args, "num_steps", None) is not None else 10
-        noise_std = load_noise * target_load
-        target_load_noisy = target_load + noise_std * jax.random.normal(key)
+    # Determine control_mode and stress_mode
+    control_mode = args.control_mode
+    if control_mode is None and prep_data is not None and "control_mode" in prep_data:
+        control_mode = str(prep_data["control_mode"])
+    if control_mode is None:
+        control_mode = "force"
+    control_mode = control_mode.lower()
 
-        noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1, 1)
-        if geometry_flag == "holes":
-            noisy_load_right_base = jnp.zeros_like(noisy_load_top_base)
+    stress_mode = args.stress_mode
+    if stress_mode is None and prep_data is not None and "stress_mode" in prep_data:
+        stress_mode = str(prep_data["stress_mode"])
+    if stress_mode is None:
+        stress_mode = "plane_strain"
+    stress_mode = stress_mode.lower()
+
+    prescribe_right = args.prescribe_right
+    if prescribe_right is None:
+        prescribe_right = (geometry_flag != "holes")
+
+    if args.asym_factor is not None:
+        asym_factor = args.asym_factor
+
+    clamp_top_x = args.clamp_top_x
+    if clamp_top_x is None:
+        if "clamp_top_x" in rec:
+            clamp_top_x = bool(rec["clamp_top_x"])
         else:
-            noisy_load_right_base = noisy_load_top_base * asym_factor
-        loads_solve = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
-        print(f"[VAL] Generated synthetic linspace loading schedule with {num_steps} load steps.")
+            clamp_top_x = (geometry_flag == "holes" and control_mode == "displacement")
+    if geometry_flag != "holes":
+        clamp_top_x = False
+
+    print(f"[VAL] Configured validation modes: control_mode={control_mode}, stress_mode={stress_mode}, prescribe_right={prescribe_right}, clamp_top_x={clamp_top_x}")
+
+    # Set up ground truth stress function
+    if stress_mode == "plane_stress":
+        from core.fem_engine import make_plane_stress_piola
+        true_piola_stress_func, solve_lambda3_true = make_plane_stress_piola(true_material_model)
+    else:
+        true_piola_stress_func = lambda f: true_material_model.P(fto3x3(f))[:2, :2]
+        solve_lambda3_true = None
+
+    # Distilled hyperelastic energy and stress functions
+    def eval_psi_3d(F_3d, p, a0=None, a1=None):
+        C = C_func(F_3d)
+        I1 = I1_func(C)
+        I2 = I2_func(C)
+        I3 = I3_func(C)
+        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+
+        i1_dev = I3_safe ** (-1 / 3) * I1
+        i2_dev = I3_safe ** (-2 / 3) * I2
+        J = jnp.sqrt(I3_safe)
+        i1_m3 = i1_dev - 3.0
+        i2_m3 = i2_dev - 3.0
+        J_m1 = J - 1.0
+
+        dev_p = p[:10]
+        vol_p = p[10:13]
+
+        w_dev = (
+            dev_p[0] * i1_m3 + dev_p[1] * i2_m3 + dev_p[2] * i1_m3**2 +
+            dev_p[3] * i1_m3 * i2_m3 + dev_p[4] * i2_m3**2 + dev_p[5] * i1_m3**3 +
+            dev_p[6] * (i1_m3**2) * i2_m3 + dev_p[7] * i1_m3 * (i2_m3**2) +
+            dev_p[8] * i2_m3**3 + dev_p[9] * jnp.log(jnp.maximum(i2_dev / 3.0, 1e-8))
+        )
+        w_vol = vol_p[0] * J_m1**2 + vol_p[1] * J_m1**4 + vol_p[2] * J_m1**6
+
+        w_aniso = 0.0
+        if a0 is not None and len(p) > 13:
+            C_bar = (I3_safe ** (-1 / 3))[..., None, None] * C
+            I4_bar = jnp.einsum('i,...ij,j->...', a0, C_bar, a0)
+            I4_m1 = I4_bar - 1.0
+            aniso_p = p[13:19]
+            w_aniso = aniso_p[0] * I4_m1**2 + aniso_p[1] * I4_m1**3 + aniso_p[2] * I4_m1**4
+            if a1 is not None and len(p) > 16:
+                I6_bar = jnp.einsum('i,...ij,j->...', a1, C_bar, a1)
+                I6_m1 = I6_bar - 1.0
+                w_aniso += aniso_p[3] * I6_m1**2 + aniso_p[4] * I6_m1**3 + aniso_p[5] * I6_m1**4
+
+        return w_dev + w_vol + w_aniso
+
+    def p_3d_distilled(F_3d, p, a0=None, a1=None):
+        return jax.grad(eval_psi_3d, argnums=0)(F_3d, p, a0, a1)
+
+    def solve_lambda3_distilled(F_2d, p, a0=None, a1=None, max_iter=8):
+        det_2d = jnp.linalg.det(F_2d)
+        lam3_0 = 1.0 / jnp.clip(det_2d, 1e-4, 1e4)
+
+        def step_fn(i, lam):
+            def p33_val(l):
+                F_3d = jnp.array([
+                    [F_2d[0, 0], F_2d[0, 1], 0.0],
+                    [F_2d[1, 0], F_2d[1, 1], 0.0],
+                    [0.0,        0.0,        l]
+                ])
+                return p_3d_distilled(F_3d, p, a0, a1)[2, 2]
+
+            p33, dp33 = jax.value_and_grad(p33_val)(lam)
+            lam_next = lam - p33 / jnp.where(jnp.abs(dp33) < 1e-12, 1.0, dp33)
+            return jnp.clip(lam_next, 1e-3, 100.0)
+
+        return jax.lax.fori_loop(0, max_iter, step_fn, lam3_0)
+
+    def piola_stress_distilled(F_2d, p, a0=None, a1=None):
+        if stress_mode == "plane_stress":
+            lam3 = solve_lambda3_distilled(F_2d, p, a0, a1)
+            F_3d = jnp.array([
+                [F_2d[0, 0], F_2d[0, 1], 0.0],
+                [F_2d[1, 0], F_2d[1, 1], 0.0],
+                [0.0,        0.0,        lam3]
+            ])
+            return p_3d_distilled(F_3d, p, a0, a1)[:2, :2]
+        else: # plane_strain
+            F_3d = jnp.array([
+                [F_2d[0, 0], F_2d[0, 1], 0.0],
+                [F_2d[1, 0], F_2d[1, 1], 0.0],
+                [0.0,        0.0,        1.0]
+            ])
+            return p_3d_distilled(F_3d, p, a0, a1)[:2, :2]
 
     ele_type = 'TRI3'
     cell_type = get_meshio_cell_type(ele_type)
@@ -404,14 +465,69 @@ if __name__ == "__main__" :
 
     # Boundary Condition Setup
     geom = get_geometry(geometry_flag)
-    bc_config = create_default_bc_config(geometry_name=geometry_flag, mode="force", pred_dict=geom.get_boundary_predicates())
+    bc_config = create_default_bc_config(
+        geometry_name=geometry_flag,
+        mode=control_mode,
+        pred_dict=geom.get_boundary_predicates(),
+        prescribe_right=prescribe_right,
+        clamp_top_x=clamp_top_x
+    )
     dirichlet_bc_info = bc_config.get_dirichlet_info()
     surface_maps = bc_config.get_surface_maps()
     location_fns = [nbc.location_fn for nbc in bc_config.neumann_bcs]
+    node_type = bc_config.create_node_type_array(node_coords)
 
-    # If node_type was not loaded from dataset or is 1D legacy, rebuild standard 5-channel node_type
-    if "prep_dataset_path" not in locals() or prep_dataset_path is None or (isinstance(node_type, np.ndarray) and node_type.ndim == 1):
-        node_type = bc_config.create_node_type_array(node_coords)
+    # Determine load / displacement schedule and step count
+    if control_mode == "force":
+        if prep_data is not None and "load" in prep_data:
+            loads_solve = jnp.array(prep_data["load"])
+            num_steps = loads_solve.shape[0]
+            schedule_solve = loads_solve
+            print(f"[VAL] Using force loading schedule from dataset with {num_steps} load steps.")
+        else:
+            key = jax.random.PRNGKey(42)
+            num_steps = args.num_steps if getattr(args, "num_steps", None) is not None else 10
+            noise_std = load_noise * target_load
+            target_load_noisy = target_load + noise_std * jax.random.normal(key)
+
+            noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1, 1)
+            if geometry_flag == "holes" or not prescribe_right:
+                noisy_load_right_base = jnp.zeros_like(noisy_load_top_base)
+            else:
+                noisy_load_right_base = noisy_load_top_base * asym_factor
+            loads_solve = jnp.concat([noisy_load_right_base, noisy_load_top_base], axis=1)
+            schedule_solve = loads_solve
+            print(f"[VAL] Generated synthetic linspace loading schedule with {num_steps} load steps.")
+        observed_loads = loads_solve
+    else: # displacement control
+        if u_true is not None:
+            num_steps = u_true.shape[0]
+            top_mask = jax.vmap(geom.get_boundary_predicates()["top"])(node_coords)
+            disps_top_true = u_true[:, top_mask, 1].mean(axis=1, keepdims=True)
+            if prescribe_right:
+                right_mask = jax.vmap(geom.get_boundary_predicates()["right"])(node_coords)
+                disps_right_true = u_true[:, right_mask, 0].mean(axis=1, keepdims=True)
+                schedule_solve = jnp.concatenate([disps_right_true, disps_top_true], axis=1)
+            else:
+                schedule_solve = disps_top_true
+            print(f"[VAL] Extracted exact prescribed displacement schedule from u_true ({num_steps} steps).")
+        else:
+            num_steps = args.num_steps if getattr(args, "num_steps", None) is not None else 10
+            disps_top_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1, 1)
+            if prescribe_right:
+                disps_right_true = disps_top_true * asym_factor
+                schedule_solve = jnp.concatenate([disps_right_true, disps_top_true], axis=1)
+            else:
+                schedule_solve = disps_top_true
+            print(f"[VAL] Generated synthetic linspace displacement schedule ({num_steps} steps, target={target_load}).")
+
+        if prep_data is not None and "load" in prep_data:
+            observed_loads = jnp.array(prep_data["load"])
+        elif prep_data is not None and "reaction_forces" in prep_data:
+            observed_loads = jnp.array(prep_data["reaction_forces"])
+        else:
+            observed_loads = np.zeros((num_steps, 2))
+        loads_solve = observed_loads
 
     if args.output_suffix:
         file_name = f"fem_distilled_samples_{args.output_suffix}.npz"
@@ -429,8 +545,15 @@ if __name__ == "__main__" :
             existing_data = np.load(consolidated_file, allow_pickle=True)
             existing_u_pred = existing_data["u_pred"]
             existing_selected_samples = existing_data["selected_samples"]
+            cached_ctrl = str(existing_data["control_mode"]) if "control_mode" in existing_data else "force"
+            cached_stress = str(existing_data["stress_mode"]) if "stress_mode" in existing_data else "plane_strain"
             if existing_u_pred.shape[1] != num_steps:
                 print(f"[VAL] Warning: Cached u_pred has {existing_u_pred.shape[1]} steps, but expected {num_steps} steps. Discarding stale cache.")
+                existing_u_pred = None
+                existing_selected_samples = None
+                num_existing = 0
+            elif cached_ctrl != control_mode or cached_stress != stress_mode:
+                print(f"[VAL] Warning: Cached FEM mode mismatch (cached: {cached_ctrl}/{cached_stress} vs current: {control_mode}/{stress_mode}). Discarding stale cache.")
                 existing_u_pred = None
                 existing_selected_samples = None
                 num_existing = 0
@@ -510,14 +633,8 @@ if __name__ == "__main__" :
             dirichlet_bc_info=dirichlet_bc_info,
             location_fns=location_fns,
             surface_maps=surface_maps,
-            num_internal_params=19,
-            piola_func=lambda F, p: piola_stress_2d(F[:2, :2] if F.shape == (3, 3) else F, p, a0, a1)
+            piola_func=lambda F: true_piola_stress_func(F[:2, :2] if F.shape == (3, 3) else F)
         )
-        true_dev = list(getattr(true_material_model, "dev_params", []))
-        true_vol = list(getattr(true_material_model, "vol_params", []))
-        true_aniso = list(getattr(true_material_model, "aniso_params", [])) if getattr(true_material_model, "aniso_params", None) is not None else []
-        true_p_vec = to_19_param_vec(true_dev + true_vol + true_aniso)
-        problem_true.set_params(true_p_vec)
 
         petsc_options = {
             "snes_type": "newtonls",
@@ -553,8 +670,8 @@ if __name__ == "__main__" :
             print(f"[VAL] Reused and cached ground truth displacements from dataset: shape={u_true.shape}")
         else:
             os.makedirs(gt_dir, exist_ok=True)
-            print(f"[VAL] Solving adaptive FEM for ground truth with {num_steps} load steps...")
-            u_true = solve_adaptive_fem(problem_true, bc_config, loads_solve, petsc_options)
+            print(f"[VAL] Solving adaptive FEM for ground truth with {num_steps} steps (schedule shape: {schedule_solve.shape})...")
+            u_true = solve_adaptive_fem(problem_true, bc_config, schedule_solve, petsc_options)
             np.savez_compressed(gt_file, u=u_true, cells=cells, node_coords=node_coords, node_type=node_type)
 
         u_pred_samples = []
@@ -577,7 +694,7 @@ if __name__ == "__main__" :
             location_fns=location_fns,
             surface_maps=surface_maps,
             num_internal_params=19,
-            piola_func=lambda F, p: piola_stress_2d(F[:2, :2] if F.shape == (3, 3) else F, p, a0, a1)
+            piola_func=lambda F, p: piola_stress_distilled(F[:2, :2] if F.shape == (3, 3) else F, p, a0, a1)
         )
         
         while success_count < n_sample and sample_idx < len(selected_samples):
@@ -590,7 +707,7 @@ if __name__ == "__main__" :
             
             try:
                 print(f"Sample {num_existing + success_count + 1}/{target_total_samples}: Attempting realization {sample_idx}/{len(selected_samples)}...")
-                u_pred = solve_adaptive_fem(problem_pred, bc_config, loads_solve, petsc_options)
+                u_pred = solve_adaptive_fem(problem_pred, bc_config, schedule_solve, petsc_options)
                 success = True 
             except Exception as e:
                 print(f"Simulation failed on realization {sample_idx}: {e}")
@@ -619,13 +736,20 @@ if __name__ == "__main__" :
                 "node_coords": node_coords,
                 "cells": cells,
                 "node_type": node_type,
-                "loads": loads_solve,
+                "loads": observed_loads,
+                "schedule_solve": np.array(schedule_solve),
+                "control_mode": control_mode,
+                "stress_mode": stress_mode,
                 "fem_time_sec": t_fem_duration
             }
             if 'u_true' in locals() and u_true is not None:
                 save_dict["u_true"] = u_true
             if u_exp is not None:
                 save_dict["u_exp"] = u_exp
+            if prep_data is not None and "lam3" in prep_data:
+                save_dict["lam3"] = prep_data["lam3"]
+            if prep_data is not None and "lam3_true" in prep_data:
+                save_dict["lam3_true"] = prep_data["lam3_true"]
 
             np.savez_compressed(consolidated_file, **save_dict)
             print(f"🎉 Consolidated FEM dataset updated: total {combined_u.shape[0]} samples (time: {t_fem_duration:.2f}s) saved to {consolidated_file}")

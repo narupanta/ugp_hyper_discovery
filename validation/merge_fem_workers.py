@@ -21,7 +21,7 @@ def merge_worker_files(folder_path, pattern="fem_distilled_samples_worker*.npz")
             all_u_preds.append(d["u_pred"])
             all_selected_samples.append(d["selected_samples"])
             if not base_dict:
-                for k in ["node_coords", "cells", "node_type", "loads", "u_true", "u_exp"]:
+                for k in ["node_coords", "cells", "node_type", "loads", "schedule_solve", "control_mode", "stress_mode", "u_true", "u_exp", "lam3", "lam3_true"]:
                     if k in d:
                         base_dict[k] = d[k]
 

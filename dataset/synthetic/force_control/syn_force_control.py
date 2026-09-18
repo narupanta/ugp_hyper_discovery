@@ -120,7 +120,15 @@ def main():
     disp_noise = args.disp_noise if args.disp_noise is not None else float(rec.get("disp_noise", 0.0))
     load_noise = args.load_noise if args.load_noise is not None else float(rec.get("load_noise", 0.03))
 
-    clamp_top_x_val = bool(args.clamp_top_x if args.clamp_top_x is not None else rec.get("clamp_top_x", False))
+    if args.clamp_top_x is not None:
+        clamp_top_x_val = bool(args.clamp_top_x)
+    elif "clamp_top_x" in rec:
+        clamp_top_x_val = bool(rec["clamp_top_x"])
+    else:
+        clamp_top_x_val = (geometry_name == "holes" and control_mode == "displacement")
+
+    if geometry_name != "holes":
+        clamp_top_x_val = False
     if args.prescribe_right is not None:
         prescribe_right = bool(args.prescribe_right)
     else:

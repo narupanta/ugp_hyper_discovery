@@ -6,122 +6,18 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import jax
 import jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
+
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.utils import fto3x3, farthest_point_sampling, infer_material_model_name
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 
-def generate_standard_modes(num_points=32, max_gamma=1.0):
-    gamma = np.linspace(0.0, max_gamma, num_points)
-    
-    F_all = np.zeros((6, num_points, 2, 2))
-    def set_F(f11, f22, f12=0.0):
-        arr = np.zeros((num_points, 2, 2))
-        arr[:, 0, 0] = f11
-        arr[:, 1, 1] = f22
-        arr[:, 0, 1] = f12
-        return arr
-
-    F_all[0] = set_F(1 + gamma, 1.0)            
-    F_all[1] = set_F(1 + gamma, 1 + gamma)    
-    F_all[2] = set_F(1 + gamma, 1/(1 + gamma)) 
-    F_all[3] = set_F(1/(1 + gamma), 1.0)       
-    F_all[4] = set_F(1/(1 + gamma), 1/(1 + gamma)) 
-    F_all[5] = set_F(1.0, 1.0, f12=gamma)
-    
-    # We want to return a flat array (192, 2, 2)
-    return F_all.reshape(-1, 2, 2)
-
-def generate_standard_modes_interp(num_points=32, max_search_gamma=1.0, min_dev=None, max_dev=None, min_vol=None, max_vol=None):
-    search_points = 10000
-    gamma_search = np.linspace(0.0, max_search_gamma, search_points)
-    
-    def get_mode_F(mode_idx, g_arr):
-        n = len(g_arr)
-        arr = np.zeros((n, 2, 2))
-        arr[:, 0, 0] = 1.0
-        arr[:, 1, 1] = 1.0
-        if mode_idx == 0:
-            arr[:, 0, 0] = 1 + g_arr
-        elif mode_idx == 1:
-            arr[:, 0, 0] = 1 + g_arr
-            arr[:, 1, 1] = 1 + g_arr
-        elif mode_idx == 2:
-            arr[:, 0, 0] = 1 + g_arr
-            arr[:, 1, 1] = 1.0 / (1 + g_arr)
-        elif mode_idx == 3:
-            arr[:, 0, 0] = 1.0 / (1 + g_arr)
-        elif mode_idx == 4:
-            arr[:, 0, 0] = 1.0 / (1 + g_arr)
-            arr[:, 1, 1] = 1.0 / (1 + g_arr)
-        elif mode_idx == 5:
-            arr[:, 0, 1] = g_arr
-        return arr
-
-    F_sampled = np.zeros((6, num_points, 2, 2))
-    mode_names = ["Uniaxial Tension", "Equibiaxial Tension", "Pure Shear", 
-                  "Uniaxial Compression", "Equibiaxial Compression", "Simple Shear"]
-                  
-    true_min_dev = np.array(min_dev) - 1e-4
-    true_max_dev = np.array(max_dev) + 1e-4
-    true_min_vol = np.array(min_vol) - 1e-4
-    true_max_vol = np.array(max_vol) + 1e-4
-    
-    extractor = IsotropicFeatureExtractor()
-    
-    print(f"\n--- Dynamically determining interpolation transition points (gamma in [0, {max_search_gamma}]) ---")
-    for i in range(6):
-        F_search_2x2 = get_mode_F(i, gamma_search)
-        F_search_3x3 = np.zeros((search_points, 3, 3))
-        F_search_3x3[:, :2, :2] = F_search_2x2
-        F_search_3x3[:, 2, 2] = 1.0
-        
-        dev_m, vol_m = jax.vmap(extractor.extract)(jnp.array(F_search_3x3))
-        dev_m, vol_m = np.array(dev_m), np.array(vol_m)
-        
-        in_bounds_dev0 = (dev_m[:, 0] >= true_min_dev[0]) & (dev_m[:, 0] <= true_max_dev[0])
-        in_bounds_dev1 = (dev_m[:, 1] >= true_min_dev[1]) & (dev_m[:, 1] <= true_max_dev[1])
-        in_bounds_vol = (vol_m[:, 0] >= true_min_vol[0]) & (vol_m[:, 0] <= true_max_vol[0])
-        in_bounds = in_bounds_dev0 & in_bounds_dev1 & in_bounds_vol
-        
-        if not np.all(in_bounds):
-            exit_idx = np.argmax(~in_bounds)
-            trans_g = gamma_search[exit_idx]
-            if exit_idx == 0:
-                trans_g = gamma_search[1]
-            print(f"Mode {i} ({mode_names[i]}): Interpolation region ends at gamma = {trans_g:.4f}")
-        else:
-            trans_g = max_search_gamma
-            print(f"Mode {i} ({mode_names[i]}): Entirely within interpolation up to gamma = {trans_g:.4f}")
-            
-        gamma_mode = np.linspace(0.0, trans_g, num_points)
-        F_sampled[i] = get_mode_F(i, gamma_mode)
-        
-    return F_sampled.reshape(-1, 2, 2)
-
-def invariants(f):
-    F = fto3x3(f)
-    C = F.T @ F
-    I1 = jnp.trace(C)
-    I2 = 0.5 * (I1**2 - jnp.trace(C @ C))
-    J = jnp.linalg.det(F)
-    return jnp.array([I1, I2, J])
-
-jax.config.update("jax_enable_x64", True)
-
-def get_F_from_invariants(I1_bar, I2_bar, J):
-    coeffs = [1.0, -I1_bar, I2_bar, -1.0]
-    roots = np.roots(coeffs)
-    lambda_sq = np.real(roots)
-    lambda_sq = np.maximum(lambda_sq, 1e-8)
-    lambdas = np.sqrt(lambda_sq) * (J**(1/3))
-    return np.diag(lambdas)
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, required=True)
-    parser.add_argument("--max_gamma", type=float, default=0.8)
-    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all", "inducing_points"], help="Sample deformations from standard modes (with or without interpolation clipping), extraction dataset with FPS, all extraction dataset points, or directly from inducing points.")
+    parser.add_argument("--max_gamma", type=float, default=0.8, help="Retained for CLI backward compatibility.")
+    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["dataset_f", "dataset_all"], help="Sample deformations from extraction dataset with FPS (dataset_f) or all extraction dataset points (dataset_all).")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points to evaluate GP over.")
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"], help="Distillation target mode: solely Strain Energy Function (sef), joint SEF + Piola stress (sef_stress), joint SEF + Cauchy stress (sef_cauchy), or separate DEV and VOL energy (sef_split).")
     parser.add_argument("--export_subfolder", type=str, default="", help="Custom output subfolder for exported PyTorch matrices.")
@@ -224,111 +120,133 @@ def main():
                         disp_noise = sp
             
         prep_dataset_path = None
+        load_steps = None
         if args.dataset_path and os.path.exists(args.dataset_path):
             prep_dataset_path = os.path.abspath(args.dataset_path)
             print(f"[EXPORT] Using explicit dataset path: {prep_dataset_path}")
         else:
-            meta_path = os.path.join(args.saved_model_dir, "metadata.json")
-            seed_val = None
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, "r") as mf:
-                        seed_val = json.load(mf).get("seed")
-                except Exception:
-                    pass
-
-            for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
-                if os.path.exists(search_dir):
-                    if seed_val is not None:
-                        for fname in sorted(os.listdir(search_dir)):
-                            if fname.endswith(f"_{seed_val}.npz") and (fname.startswith(f"{ugp_model_name}_{disp_noise}_{load_noise}") or fname.startswith(f"{ugp_model_name}_")):
-                                prep_dataset_path = os.path.join(search_dir, fname)
-                                break
-                    if prep_dataset_path is None:
-                        for fname in sorted(os.listdir(search_dir)):
-                            if (fname.startswith(f"{ugp_model_name}_{disp_noise}_{load_noise}") or fname.startswith(f"{ugp_model_name}_")) and fname.endswith(".npz"):
-                                prep_dataset_path = os.path.join(search_dir, fname)
-                                break
+            # Check config.json in saved_model_dir or parent
+            for cdir in [args.saved_model_dir, os.path.dirname(os.path.abspath(args.saved_model_dir))]:
+                cfg_file = os.path.join(cdir, "config.json")
+                if os.path.exists(cfg_file):
+                    try:
+                        with open(cfg_file, "r") as cf:
+                            cfg_dict = json.load(cf)
+                            if "train_load_steps_indices" in cfg_dict and load_steps is None:
+                                load_steps = cfg_dict["train_load_steps_indices"]
+                            cfg_dsp = cfg_dict.get("dataset_path")
+                            if cfg_dsp:
+                                repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+                                candidates = [
+                                    cfg_dsp if os.path.isabs(cfg_dsp) else os.path.join(repo_root, cfg_dsp),
+                                    os.path.abspath(cfg_dsp)
+                                ]
+                                for cand in candidates:
+                                    if os.path.exists(cand):
+                                        prep_dataset_path = cand
+                                        print(f"[EXPORT] Found dataset path from config.json: {prep_dataset_path}")
+                                        break
+                    except Exception as e:
+                        print(f"[EXPORT] Error reading config.json: {e}")
                 if prep_dataset_path is not None:
                     break
+
+            if prep_dataset_path is None:
+                meta_path = os.path.join(args.saved_model_dir, "metadata.json")
+                seed_val = None
+                if os.path.exists(meta_path):
+                    try:
+                        with open(meta_path, "r") as mf:
+                            seed_val = json.load(mf).get("seed")
+                    except Exception:
+                        pass
+
+                for search_dir in ["dataset/preprocessed/syn_f", "dataset/precomputed_vfm"]:
+                    if os.path.exists(search_dir):
+                        if seed_val is not None:
+                            for fname in sorted(os.listdir(search_dir)):
+                                if fname.endswith(f"_{seed_val}.npz") and (fname.startswith(f"{ugp_model_name}_{disp_noise}_{load_noise}") or fname.startswith(f"{ugp_model_name}_")):
+                                    prep_dataset_path = os.path.join(search_dir, fname)
+                                    break
+                        if prep_dataset_path is None:
+                            for fname in sorted(os.listdir(search_dir)):
+                                if (fname.startswith(f"{ugp_model_name}_{disp_noise}_{load_noise}") or fname.startswith(f"{ugp_model_name}_")) and fname.endswith(".npz"):
+                                    prep_dataset_path = os.path.join(search_dir, fname)
+                                    break
+                    if prep_dataset_path is not None:
+                        break
             if prep_dataset_path is not None:
                 print(f"[EXPORT] Found matching dataset: {prep_dataset_path}")
         if prep_dataset_path is not None:
             prep_data = np.load(prep_dataset_path, allow_pickle=True)
             F_all_steps_2x2 = prep_data["F"]
+            F_all_steps_3d = prep_data.get("F_3d", None)
             
-            log_file = os.path.join(args.saved_model_dir, "optimization_log.txt")
-            load_steps = None
-            if os.path.exists(log_file):
-                with open(log_file, "r", encoding="utf-8") as lf:
-                    first_line = lf.readline()
-                    if "[" in first_line and "]" in first_line:
-                        steps_str = first_line.split("]")[0].split("[")[1].strip()
-                        if steps_str:
-                            load_steps = [int(x.strip()) for x in steps_str.split(",") if x.strip().isdigit()]
+            if load_steps is None:
+                log_file = os.path.join(args.saved_model_dir, "optimization_log.txt")
+                if os.path.exists(log_file):
+                    with open(log_file, "r", encoding="utf-8") as lf:
+                        first_line = lf.readline()
+                        if "[" in first_line and "]" in first_line:
+                            steps_str = first_line.split("]")[0].split("[")[1].strip()
+                            if steps_str:
+                                load_steps = [int(x.strip()) for x in steps_str.split(",") if x.strip().isdigit()]
             
             if load_steps and len(load_steps) > 0 and max(load_steps) < F_all_steps_2x2.shape[0]:
                 F_train_full_2x2 = F_all_steps_2x2[load_steps]
+                F_train_full_3d = F_all_steps_3d[load_steps] if F_all_steps_3d is not None else None
             else:
                 default_steps = [2, 10, 20]
                 valid_steps = [s for s in default_steps if s < F_all_steps_2x2.shape[0]]
                 F_train_full_2x2 = F_all_steps_2x2[valid_steps] if len(valid_steps) > 0 else F_all_steps_2x2
+                F_train_full_3d = F_all_steps_3d[valid_steps] if (F_all_steps_3d is not None and len(valid_steps) > 0) else F_all_steps_3d
                 
             dataset_F_flat_2x2 = F_train_full_2x2.reshape(-1, 2, 2)
+            dataset_F_flat_3d = F_train_full_3d.reshape(-1, 3, 3) if F_train_full_3d is not None else None
     except Exception as e:
         print(f"Could not load background dataset for plotting: {e}")
 
-    # Generate points
-    if args.sample_mode in ["dataset_f", "dataset_all"]:
-        if dataset_F_flat_2x2 is None:
-            raise ValueError(f"Dataset loading failed, cannot use {args.sample_mode}.")
-        F_flat_2x2 = dataset_F_flat_2x2
-        
-        if args.sample_mode == "dataset_all":
-            print(f"Using exactly ALL {len(F_flat_2x2)} observed deformation points from extraction load steps (no FPS!).")
-            f3x3_flat_2x2 = F_flat_2x2
-            export_subfolder = "pytorch_export_dataset_all"
+    f3x3_flat = None
+
+    # Generate points from extraction dataset
+    if dataset_F_flat_2x2 is None:
+        raise ValueError(f"Dataset loading failed, cannot use sample_mode '{args.sample_mode}'.")
+    F_flat_2x2 = dataset_F_flat_2x2
+
+    if args.sample_mode == "dataset_all":
+        print(f"Using exactly ALL {len(F_flat_2x2)} observed deformation points from extraction load steps (no FPS!).")
+        f3x3_flat_2x2 = F_flat_2x2
+        if dataset_F_flat_3d is not None:
+            f3x3_flat = dataset_F_flat_3d
+        default_export_subfolder = "pytorch_export_dataset_all"
+    else:  # "dataset_f"
+        print(f"Applying Farthest Point Sampling (FPS) over {len(F_flat_2x2)} observed deformations...")
+        pts = jnp.array(F_flat_2x2.reshape(-1, 4), dtype=jnp.float64)
+        if len(F_flat_2x2) <= args.num_points:
+            indices = np.arange(len(F_flat_2x2))
         else:
-            print(f"Applying Farthest Point Sampling (FPS) over {len(F_flat_2x2)} observed deformations...")
-            pts = jnp.array(F_flat_2x2.reshape(-1, 4), dtype=jnp.float64)
-            if len(F_flat_2x2) <= args.num_points:
-                indices = np.arange(len(F_flat_2x2))
-            else:
-                indices = np.array(farthest_point_sampling(pts, args.num_points))
-                
-            f3x3_flat_2x2 = F_flat_2x2[indices]
-            export_subfolder = "pytorch_export_dataset_f"
-            print(f"Sampled {len(indices)} deformations directly from extraction dataset via Farthest Point Sampling.")
-    elif args.sample_mode == "standard_interp":
-        print(f"Generating standard deformation modes strictly within GP interpolation bounds (up to gamma = {args.max_gamma})...")
-        f3x3_flat_2x2 = generate_standard_modes_interp(num_points=max(1, args.num_points // 6), max_search_gamma=args.max_gamma, min_dev=min_dev, max_dev=max_dev, min_vol=min_vol, max_vol=max_vol)
-        export_subfolder = "pytorch_export_standard_interp"
-    elif args.sample_mode == "inducing_points":
-        print(f"Generating F directly from the {len(I_z)} GP inducing points...")
-        f3x3_list = []
-        for i in range(len(I_z)):
-            I1_bar = I_z[i, 0]
-            I2_bar = I_z[i, 1]
-            J = I_z[i, 2]
-            f3x3_list.append(get_F_from_invariants(I1_bar, I2_bar, J))
-        f3x3_flat = np.stack(f3x3_list)
-        export_subfolder = "pytorch_export_inducing_points"
-    else:
-        f3x3_flat_2x2 = generate_standard_modes(num_points=max(1, args.num_points // 6), max_gamma=args.max_gamma)
-        export_subfolder = f"pytorch_export_standard_g{args.max_gamma}" if args.max_gamma != 0.8 else "pytorch_export"
-    
+            indices = np.array(farthest_point_sampling(pts, args.num_points))
+
+        f3x3_flat_2x2 = F_flat_2x2[indices]
+        if dataset_F_flat_3d is not None:
+            f3x3_flat = dataset_F_flat_3d[indices]
+        default_export_subfolder = f"pytorch_export_dataset_f_n{args.num_points}"
+        print(f"Sampled {len(indices)} deformations directly from extraction dataset via Farthest Point Sampling.")
+
     if args.export_subfolder:
         export_subfolder = args.export_subfolder
-    elif args.distill_target in ["sef_stress", "sef_cauchy"]:
-        export_subfolder = f"{export_subfolder}_{args.distill_target}"
-    
-    if args.sample_mode != "inducing_points":
-        # Pad to 3x3 Plane Strain!
+    else:
+        export_subfolder = default_export_subfolder
+        if args.distill_target in ["sef_stress", "sef_cauchy"]:
+            export_subfolder = f"{export_subfolder}_{args.distill_target}"
+
+    if f3x3_flat is None:
+        # Pad to 3x3 Plane Strain
         f3x3_flat = np.zeros((f3x3_flat_2x2.shape[0], 3, 3))
         for i in range(f3x3_flat_2x2.shape[0]):
             f3x3_flat[i, :2, :2] = f3x3_flat_2x2[i]
             f3x3_flat[i, 2, 2] = 1.0
-            
+
     f3x3_flat = jnp.array(f3x3_flat)
     
     if args.distill_target == "sef":
@@ -447,10 +365,16 @@ def main():
         # 1. Invariant Space Plot
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
         
-        if dataset_F_flat_2x2 is not None:
+        if dataset_F_flat_3d is not None:
+            ds_f3x3 = dataset_F_flat_3d
+        elif dataset_F_flat_2x2 is not None:
             ds_f3x3 = np.zeros((dataset_F_flat_2x2.shape[0], 3, 3))
             ds_f3x3[:, :2, :2] = dataset_F_flat_2x2
             ds_f3x3[:, 2, 2] = 1.0
+        else:
+            ds_f3x3 = None
+
+        if ds_f3x3 is not None:
             ds_dev, ds_vol = jax.vmap(extractor.extract)(jnp.array(ds_f3x3))
             ds_dev, ds_vol = np.array(ds_dev), np.array(ds_vol)
             
@@ -490,6 +414,7 @@ def main():
         
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, "export_invariant_space.pdf"), dpi=150)
+        fig.savefig(os.path.join(out_dir, "export_invariant_space.png"), dpi=150)
         plt.close(fig)
         
         # 2. Distribution Plot
@@ -542,6 +467,7 @@ def main():
         
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, "export_energy_distribution.pdf"), dpi=150)
+        fig.savefig(os.path.join(out_dir, "export_energy_distribution.png"), dpi=150)
         plt.close(fig)
         print("Successfully saved invariant space and energy distribution plots.")
 

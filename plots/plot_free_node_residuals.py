@@ -71,30 +71,36 @@ def compute_distilled_free_residuals(data_file: str, step: int = 16, batch_size:
     J = transformation_jacobian(coords_elems)
     dA = 0.5 * jnp.abs(jnp.linalg.det(J))
 
-    is_fix_x = (node_type[:, 1] == 1)
-    is_fix_y = (node_type[:, 2] == 1)
-
-    free_x_idx = np.where(~np.array(is_fix_x))[0]
-    free_y_idx = np.where(~np.array(is_fix_y))[0]
-    free_nodes_idx = np.where((~np.array(is_fix_x)) | (~np.array(is_fix_y)))[0]
+    control_mode = str(data["control_mode"]).lower() if "control_mode" in data else "force"
+    stress_mode = str(data["stress_mode"]).lower() if "stress_mode" in data else "plane_strain"
 
     u_step = u_obs[step_eval]
     load_step = loads[step_eval]
     disp_elems = u_step[cells]
     F_cells, dNdX = deformation_gradient_element(coords_elems, disp_elems)
 
-    # Compute external Neumann force on nodes for this step
-    onehot_types_el = node_type[cells]
-    f_neu_cells = jax.vmap(neumann_cell_force, in_axes=(0, 0, None, None))(
-        coords_elems, onehot_types_el, load_step[0], load_step[1]
-    )
-    f_neu_nodes = jnp.zeros((n_nodes, 2), dtype=jnp.float64)
-    for a in range(3):
-        f_neu_nodes = f_neu_nodes.at[cells[:, a]].add(f_neu_cells[:, a])
+    if control_mode == "displacement":
+        is_constrained_x = (node_type[:, 1] == 1) | (node_type[:, 3] == 1)
+        is_constrained_y = (node_type[:, 2] == 1) | (node_type[:, 4] == 1)
+        f_neu_nodes = jnp.zeros((n_nodes, 2), dtype=jnp.float64)
+    else:
+        is_constrained_x = (node_type[:, 1] == 1)
+        is_constrained_y = (node_type[:, 2] == 1)
+        onehot_types_el = node_type[cells]
+        f_neu_cells = jax.vmap(neumann_cell_force, in_axes=(0, 0, None, None))(
+            coords_elems, onehot_types_el, load_step[0], load_step[1]
+        )
+        f_neu_nodes = jnp.zeros((n_nodes, 2), dtype=jnp.float64)
+        for a in range(3):
+            f_neu_nodes = f_neu_nodes.at[cells[:, a]].add(f_neu_cells[:, a])
+
+    free_x_idx = np.where(~np.array(is_constrained_x))[0]
+    free_y_idx = np.where(~np.array(is_constrained_y))[0]
+    free_nodes_idx = np.where((~np.array(is_constrained_x)) | (~np.array(is_constrained_y)))[0]
 
     @jax.jit
     def eval_one_sample(p):
-        P_cells = jax.vmap(piola_stress_2d, in_axes=(0, None))(F_cells, p)
+        P_cells = jax.vmap(lambda f: piola_stress_2d(f, p, stress_mode=stress_mode))(F_cells)
         f_elem = jnp.einsum("cij,cnj->cni", P_cells, dNdX) * dA[:, None, None]
         f_int = jnp.zeros((n_nodes, 2), dtype=jnp.float64)
         for a in range(3):
@@ -199,11 +205,28 @@ def compute_gp_free_residuals(data_file: str, gp_dir: str = None, step: int = 16
             beta=1.0, covariance_mode=cov_mode
         )
 
-        is_fix_x = (node_type[:, 1] == 1)
-        is_fix_y = (node_type[:, 2] == 1)
-        free_x_idx = np.where(~is_fix_x)[0]
-        free_y_idx = np.where(~is_fix_y)[0]
-        free_nodes_idx = np.where((~is_fix_x) | (~is_fix_y))[0]
+        control_mode = str(data["control_mode"]).lower() if "control_mode" in data else "force"
+        stress_mode = str(data["stress_mode"]).lower() if "stress_mode" in data else "plane_strain"
+
+        if control_mode == "displacement":
+            is_constrained_x = (node_type[:, 1] == 1) | (node_type[:, 3] == 1)
+            is_constrained_y = (node_type[:, 2] == 1) | (node_type[:, 4] == 1)
+            f_neu_nodes = jnp.zeros((n_nodes, 2), dtype=jnp.float64)
+        else:
+            is_constrained_x = (node_type[:, 1] == 1)
+            is_constrained_y = (node_type[:, 2] == 1)
+            onehot_types_el = node_type[cells]
+            load_step = loads[step_eval]
+            f_neu_cells = jax.vmap(neumann_cell_force, in_axes=(0, 0, None, None))(
+                coords_elems, onehot_types_el, load_step[0], load_step[1]
+            )
+            f_neu_nodes = jnp.zeros((n_nodes, 2), dtype=jnp.float64)
+            for a in range(3):
+                f_neu_nodes = f_neu_nodes.at[cells[:, a]].add(f_neu_cells[:, a])
+
+        free_x_idx = np.where(~is_constrained_x)[0]
+        free_y_idx = np.where(~is_constrained_y)[0]
+        free_nodes_idx = np.where((~is_constrained_x) | (~is_constrained_y))[0]
 
         coords_elems = coords[cells]
         J = transformation_jacobian(coords_elems)
@@ -211,15 +234,11 @@ def compute_gp_free_residuals(data_file: str, gp_dir: str = None, step: int = 16
         disp_elems = u_obs[step_eval][cells]
         F_cells, dNdX = deformation_gradient_element(coords_elems, disp_elems)
         F_3d = jnp.eye(3, dtype=jnp.float64)[None, :, :].repeat(F_cells.shape[0], axis=0).at[:, :2, :2].set(F_cells)
-
-        onehot_types_el = node_type[cells]
-        load_step = loads[step_eval]
-        f_neu_cells = jax.vmap(neumann_cell_force, in_axes=(0, 0, None, None))(
-            coords_elems, onehot_types_el, load_step[0], load_step[1]
-        )
-        f_neu_nodes = jnp.zeros((n_nodes, 2), dtype=jnp.float64)
-        for a in range(3):
-            f_neu_nodes = f_neu_nodes.at[cells[:, a]].add(f_neu_cells[:, a])
+        if stress_mode == "plane_stress":
+            if "lam3" in data:
+                F_3d = F_3d.at[:, 2, 2].set(jnp.array(data["lam3"][step_eval]))
+            elif "lam3_true" in data:
+                F_3d = F_3d.at[:, 2, 2].set(jnp.array(data["lam3_true"][step_eval]))
 
         keys = jr.split(jr.PRNGKey(42), n_gp_samples)
 

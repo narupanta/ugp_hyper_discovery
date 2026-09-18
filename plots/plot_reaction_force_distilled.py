@@ -14,11 +14,10 @@ from core.utils import deformation_gradient_element, transformation_jacobian, C_
 from plots.theme import apply_style, save_figure
 
 
-def eval_hyperelastic_psi(F_2d, p, a0=None, a1=None):
+def eval_psi_3d(F_3d, p, a0=None, a1=None):
     """
     Evaluates hyperelastic strain energy density scalar psi(F) for isotropic and anisotropic models.
     """
-    F_3d = jnp.eye(3, dtype=jnp.float64).at[:2, :2].set(F_2d)
     C = C_func(F_3d)
     I1 = I1_func(C)
     I2 = I2_func(C)
@@ -58,8 +57,51 @@ def eval_hyperelastic_psi(F_2d, p, a0=None, a1=None):
     return w_dev + w_vol + w_aniso
 
 
-def piola_stress_2d(F_2d, p, a0=None, a1=None):
-    return jax.grad(eval_hyperelastic_psi, argnums=0)(F_2d, p, a0, a1)
+def eval_hyperelastic_psi(F_2d, p, a0=None, a1=None):
+    F_3d = jnp.eye(3, dtype=jnp.float64).at[:2, :2].set(F_2d)
+    return eval_psi_3d(F_3d, p, a0, a1)
+
+
+def p_3d_func(F_3d, p, a0=None, a1=None):
+    return jax.grad(eval_psi_3d, argnums=0)(F_3d, p, a0, a1)
+
+
+def solve_lambda3_distilled(F_2d, p, a0=None, a1=None, max_iter=8):
+    det_2d = jnp.linalg.det(F_2d)
+    lam3_0 = 1.0 / jnp.clip(det_2d, 1e-4, 1e4)
+
+    def step_fn(i, lam):
+        def p33_val(l):
+            F_3d = jnp.array([
+                [F_2d[0, 0], F_2d[0, 1], 0.0],
+                [F_2d[1, 0], F_2d[1, 1], 0.0],
+                [0.0,        0.0,        l]
+            ])
+            return p_3d_func(F_3d, p, a0, a1)[2, 2]
+
+        p33, dp33 = jax.value_and_grad(p33_val)(lam)
+        lam_next = lam - p33 / jnp.where(jnp.abs(dp33) < 1e-12, 1.0, dp33)
+        return jnp.clip(lam_next, 1e-3, 100.0)
+
+    return jax.lax.fori_loop(0, max_iter, step_fn, lam3_0)
+
+
+def piola_stress_2d(F_2d, p, a0=None, a1=None, stress_mode="plane_strain"):
+    if stress_mode == "plane_stress":
+        lam3 = solve_lambda3_distilled(F_2d, p, a0, a1)
+        F_3d = jnp.array([
+            [F_2d[0, 0], F_2d[0, 1], 0.0],
+            [F_2d[1, 0], F_2d[1, 1], 0.0],
+            [0.0,        0.0,        lam3]
+        ])
+        return p_3d_func(F_3d, p, a0, a1)[:2, :2]
+    else:
+        F_3d = jnp.array([
+            [F_2d[0, 0], F_2d[0, 1], 0.0],
+            [F_2d[1, 0], F_2d[1, 1], 0.0],
+            [0.0,        0.0,        1.0]
+        ])
+        return p_3d_func(F_3d, p, a0, a1)[:2, :2]
 
 
 def get_experiment_load_noise(data_file: str, default_noise: float = 0.01) -> float:
@@ -108,6 +150,9 @@ def compute_distilled_reaction_forces(data_file: str, load_noise: float = None, 
     if load_noise is None:
         load_noise = get_experiment_load_noise(data_file)
 
+    stress_mode = str(data['stress_mode']) if 'stress_mode' in data else 'plane_strain'
+    stress_mode = stress_mode.lower()
+
     n_samples = params.shape[0]
     n_steps, n_nodes, _ = u_obs.shape
     coords_elems = coords[cells] # (n_cells, 3, 2)
@@ -121,7 +166,7 @@ def compute_distilled_reaction_forces(data_file: str, load_noise: float = None, 
     def compute_step_sample(u_step, p):
         disp_elems = u_step[cells] # (n_cells, 3, 2)
         F_cells, dNdX = deformation_gradient_element(coords_elems, disp_elems)
-        P_cells = jax.vmap(piola_stress_2d, in_axes=(0, None))(F_cells, p)
+        P_cells = jax.vmap(lambda f: piola_stress_2d(f, p, stress_mode=stress_mode))(F_cells)
         f_elem = jnp.einsum('cij,cnj->cni', P_cells, dNdX) * dA[:, None, None]
         
         f_int = jnp.zeros((n_nodes, 2), dtype=jnp.float64)
@@ -495,6 +540,12 @@ def compute_gp_reaction_forces(data_file: str, gp_dir: str = None, step: int = 1
         disp_elems = u_step[cells]
         F_cells, dNdX = deformation_gradient_element(coords_elems, disp_elems)
         F_3d = jnp.eye(3, dtype=jnp.float64)[None, :, :].repeat(F_cells.shape[0], axis=0).at[:, :2, :2].set(F_cells)
+        stress_mode = str(data["stress_mode"]).lower() if "stress_mode" in data else "plane_strain"
+        if stress_mode == "plane_stress":
+            if "lam3" in data:
+                F_3d = F_3d.at[:, 2, 2].set(jnp.array(data["lam3"][step_eval]))
+            elif "lam3_true" in data:
+                F_3d = F_3d.at[:, 2, 2].set(jnp.array(data["lam3_true"][step_eval]))
 
         key = jr.PRNGKey(42)
         keys = jr.split(key, n_gp_samples)

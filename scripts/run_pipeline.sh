@@ -32,6 +32,7 @@ SKIP_FEM=false
 SKIP_VAL=false
 
 VAL_WORKERS_OVERRIDE=""
+VAL_SAMPLES_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -86,6 +87,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --workers|--val-workers)
             VAL_WORKERS_OVERRIDE="$2"
+            shift 2
+            ;;
+        --samples|--val-samples)
+            VAL_SAMPLES_OVERRIDE="$2"
             shift 2
             ;;
         -*)
@@ -227,7 +232,7 @@ VFM_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); prin
 VF_ORDER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vf_order', 2))" 2>/dev/null || echo "2")
 CONTROL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('control_mode', 'force'))" 2>/dev/null || echo "force")
 STRESS_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('stress_mode', d.get('stress_modes', 'plane_strain')))" 2>/dev/null || echo "plane_strain")
-CLAMP_TOP_X=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(1 if d.get('clamp_top_x', False) else 0)" 2>/dev/null || echo "0")
+CLAMP_TOP_X=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(1 if d.get('clamp_top_x', True) else 0)" 2>/dev/null || echo "1")
 
 # Distillation params
 DIST_MODEL=$(get_cfg "['distilled_material_model']")
@@ -248,7 +253,11 @@ if [ "$DO_SENSITIVITY" == "0" ] || [ "$DO_SENSITIVITY" == "False" ] || [ "$DO_SE
 fi
 
 # Validation params
-VAL_SAMPLES=$(get_cfg "['val_number_samples']")
+if [ -n "$VAL_SAMPLES_OVERRIDE" ]; then
+    VAL_SAMPLES="$VAL_SAMPLES_OVERRIDE"
+else
+    VAL_SAMPLES=$(get_cfg "['val_number_samples']")
+fi
 VAL_LOAD_STEPS_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(*(d.get('val_load_steps_indices', [9])))")
 TEST_LOAD_STEPS_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(*(d.get('test_load_steps_indices', [])))" 2>/dev/null || echo "")
 TEST_LOAD_STEPS_ARG=""
@@ -289,6 +298,7 @@ echo "========================================================================"
 echo "Experiment Directory: $EXPERIMENT_DIR"
 echo "Material Model:       $MODEL (Candidate: $DIST_MODEL)"
 echo "Seeds to process:     $SEEDS_LIST"
+echo "Val samples:          $VAL_SAMPLES (Workers: $VAL_WORKERS)"
 echo "Stages active:        GEN=$RUN_GEN, EXT=$RUN_EXT, DISTILL=$RUN_DISTILL, FEM=$RUN_FEM, VAL=$RUN_VAL"
 echo "========================================================================"
 
@@ -323,7 +333,7 @@ for SEED in $SEEDS_LIST; do
             --mesh_size "$MESH_SIZE" \
             --control_mode "$CONTROL_MODE" \
             --stress_mode "$STRESS_MODE" \
-            --clamp_top_x "$CLAMP_TOP_X" \
+            --clamp_top_x 0 \
             --seed "$SEED" \
             $MAT_EXTRA_ARGS
 
@@ -590,8 +600,12 @@ for SEED in $SEEDS_LIST; do
         VAL_DATASET_BLOCK="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${GEOMETRY_TRAIN}_${SEED}.npz"
         VAL_DATASET_HOLES="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD_HOLES}_${ASYM}_${GEOMETRY_VAL}_${SEED}.npz"
 
-        VAL_PIDS=()
-        # Launch workers for Block geometry
+        export OMP_NUM_THREADS=2
+        export XLA_PYTHON_CLIENT_PREALLOCATE=false
+        export XLA_PYTHON_CLIENT_MEM_FRACTION=0.40
+
+        echo "Running FEM workers for $GEOMETRY_TRAIN geometry..."
+        BLOCK_PIDS=()
         for ((w=0; w<VAL_WORKERS; w++)); do
             W_LOG="$VAL_DIR/block/worker_${w}.log"
             python3 validation/forward_fem_distilled_piola_sample.py \
@@ -602,12 +616,26 @@ for SEED in $SEEDS_LIST; do
                 --output_dir "$VAL_DIR/block" \
                 --geometry "$GEOMETRY_TRAIN" \
                 --target_load "$TOP_LOAD" \
+                --asym_factor "$ASYM" \
+                --control_mode "$CONTROL_MODE" \
+                --stress_mode "$STRESS_MODE" \
+                --clamp_top_x 0 \
                 --total_workers "$VAL_WORKERS" \
                 --worker_id "$w" > "$W_LOG" 2>&1 &
-            VAL_PIDS+=($!)
+            BLOCK_PIDS+=($!)
         done
 
-        # Launch workers for Holes geometry
+        for pid in "${BLOCK_PIDS[@]}"; do
+            wait "$pid"
+        done
+
+        if [ "$VAL_WORKERS" -gt 1 ]; then
+            echo "Merging Block worker outputs..."
+            python3 validation/merge_fem_workers.py --folder "$VAL_DIR/block"
+        fi
+
+        echo "Running FEM workers for $GEOMETRY_VAL geometry..."
+        HOLES_PIDS=()
         for ((w=0; w<VAL_WORKERS; w++)); do
             W_LOG_HOLES="$VAL_DIR/holes/worker_${w}.log"
             python3 validation/forward_fem_distilled_piola_sample.py \
@@ -618,18 +646,21 @@ for SEED in $SEEDS_LIST; do
                 --output_dir "$VAL_DIR/holes" \
                 --geometry "$GEOMETRY_VAL" \
                 --target_load "$TOP_LOAD_HOLES" \
+                --asym_factor "$ASYM" \
+                --control_mode "$CONTROL_MODE" \
+                --stress_mode "$STRESS_MODE" \
+                --clamp_top_x "$CLAMP_TOP_X" \
                 --total_workers "$VAL_WORKERS" \
                 --worker_id "$w" > "$W_LOG_HOLES" 2>&1 &
-            VAL_PIDS+=($!)
+            HOLES_PIDS+=($!)
         done
 
-        for pid in "${VAL_PIDS[@]}"; do
+        for pid in "${HOLES_PIDS[@]}"; do
             wait "$pid"
         done
 
         if [ "$VAL_WORKERS" -gt 1 ]; then
-            echo "Merging worker outputs..."
-            python3 validation/merge_fem_workers.py --folder "$VAL_DIR/block"
+            echo "Merging Holes worker outputs..."
             python3 validation/merge_fem_workers.py --folder "$VAL_DIR/holes"
         fi
 
