@@ -225,6 +225,9 @@ U_VAR_ANCHOR=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); 
 KZZ_JITTER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('kzz_jitter', '1e-8'))" 2>/dev/null || echo "1e-8")
 VFM_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vfm_mode', 'linear_triangle'))" 2>/dev/null || echo "linear_triangle")
 VF_ORDER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vf_order', 2))" 2>/dev/null || echo "2")
+CONTROL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('control_mode', 'force'))" 2>/dev/null || echo "force")
+STRESS_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('stress_mode', d.get('stress_modes', 'plane_strain')))" 2>/dev/null || echo "plane_strain")
+CLAMP_TOP_X=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(1 if d.get('clamp_top_x', False) else 0)" 2>/dev/null || echo "0")
 
 # Distillation params
 DIST_MODEL=$(get_cfg "['distilled_material_model']")
@@ -309,6 +312,7 @@ for SEED in $SEEDS_LIST; do
     if [ "$RUN_GEN" = true ]; then
         echo "--- Step 1: Data Generation (Seed: $SEED) ---"
         python3 dataset/synthetic/force_control/syn_force_control.py \
+            --recipe "$CONFIG_YAML" \
             --model "$MODEL" \
             --disp_noise "$D_NOISE" \
             --load_noise "$L_NOISE" \
@@ -317,11 +321,15 @@ for SEED in $SEEDS_LIST; do
             --n_steps "$STEPS" \
             --geometry "$GEOMETRY_TRAIN" \
             --mesh_size "$MESH_SIZE" \
+            --control_mode "$CONTROL_MODE" \
+            --stress_mode "$STRESS_MODE" \
+            --clamp_top_x "$CLAMP_TOP_X" \
             --seed "$SEED" \
             $MAT_EXTRA_ARGS
 
         if [ "$GEOMETRY_VAL" != "$GEOMETRY_TRAIN" ]; then
             python3 dataset/synthetic/force_control/syn_force_control.py \
+                --recipe "$CONFIG_YAML" \
                 --model "$MODEL" \
                 --disp_noise "$D_NOISE" \
                 --load_noise "$L_NOISE" \
@@ -330,6 +338,9 @@ for SEED in $SEEDS_LIST; do
                 --n_steps "$STEPS" \
                 --geometry "$GEOMETRY_VAL" \
                 --mesh_size "$MESH_SIZE" \
+                --control_mode "$CONTROL_MODE" \
+                --stress_mode "$STRESS_MODE" \
+                --clamp_top_x "$CLAMP_TOP_X" \
                 --seed "$SEED" \
                 $MAT_EXTRA_ARGS
         fi
@@ -354,6 +365,7 @@ for SEED in $SEEDS_LIST; do
                 echo "  ▶ Training candidate model with beta = $BETA_VAL -> $CANDIDATE_OUT"
                 mkdir -p "$CANDIDATE_OUT"
                 python3 extraction/train_unsupervised.py \
+                    --recipe "$CONFIG_YAML" \
                     --dataset_path "$TRAIN_DATASET_PATH" \
                     --material_model_name "$MODEL" \
                     --number_of_mci_sampling "$MCI_SAMPLING" \
@@ -381,6 +393,8 @@ for SEED in $SEEDS_LIST; do
                     --kzz_jitter "$KZZ_JITTER" \
                     --vfm_mode "$VFM_MODE" \
                     --vf_order "$VF_ORDER" \
+                    --control_mode "$CONTROL_MODE" \
+                    --stress_mode "$STRESS_MODE" \
                     --seed "$SEED" \
                     --batch_dir "$CANDIDATE_OUT" \
                     $MAT_EXTRA_ARGS
@@ -395,6 +409,7 @@ for SEED in $SEEDS_LIST; do
             echo "  ▶ Single Beta Training (beta = $BETA) -> $EXTRACT_DIR"
             mkdir -p "$EXTRACT_DIR"
             python3 extraction/train_unsupervised.py \
+                --recipe "$CONFIG_YAML" \
                 --dataset_path "$TRAIN_DATASET_PATH" \
                 --material_model_name "$MODEL" \
                 --number_of_mci_sampling "$MCI_SAMPLING" \
@@ -422,6 +437,8 @@ for SEED in $SEEDS_LIST; do
                 --kzz_jitter "$KZZ_JITTER" \
                 --vfm_mode "$VFM_MODE" \
                 --vf_order "$VF_ORDER" \
+                --control_mode "$CONTROL_MODE" \
+                --stress_mode "$STRESS_MODE" \
                 --seed "$SEED" \
                 --batch_dir "$EXTRACT_DIR" \
                 $MAT_EXTRA_ARGS
