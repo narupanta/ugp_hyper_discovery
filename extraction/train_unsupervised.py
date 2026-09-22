@@ -30,7 +30,7 @@ from core.fem_engine import make_plane_stress_piola
 from core.plotter import (
     plot_loss_analysis,
     plot_parameters_hist, plot_inducing_points, plot_combined_validation, plot_training_r2,
-    plot_domain_invariants, evaluate_reaction_force_calibration
+    plot_domain_invariants
 )
 
 def parse_args():
@@ -405,7 +405,12 @@ if __name__ == "__main__" :
         vol_z = farthest_point_sampling_with_fixed_point(vol_flat, n_ip, jnp.array([1.0]))
         I_z_list = [dev_z, vol_z]
         if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
-            aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, jnp.ones(aniso_flat.shape[-1]))
+            if hasattr(extractor, "a0") and hasattr(extractor, "a1"):
+                dot_val = float(jnp.dot(extractor.a0, extractor.a1))
+                aniso_anchor = jnp.array([1.0, 1.0, dot_val**2], dtype=jnp.float64)
+            else:
+                aniso_anchor = jnp.ones(aniso_flat.shape[-1], dtype=jnp.float64)
+            aniso_z = farthest_point_sampling_with_fixed_point(aniso_flat, n_ip, aniso_anchor)
             min_aniso = jnp.min(aniso_flat, axis=0)
             max_aniso = jnp.max(aniso_flat, axis=0)
             I_z_list.append(aniso_z)
@@ -699,20 +704,6 @@ if __name__ == "__main__" :
     )
     r2, rmse, coverage = r2_res[0], r2_res[1], r2_res[2]
 
-    # Evaluate reaction force calibration on holdout load steps (observable load cell readings!)
-    force_calib = {}
-    if val_load_steps_indices is not None and len(val_load_steps_indices) > 0:
-        try:
-            print("Evaluating Reaction Force Calibration on Holdout Load Steps...")
-            force_calib = evaluate_reaction_force_calibration(
-                learned_gp, prep_data, val_load_steps_indices, save_path=save_path, n_samples=32
-            )
-            print(f"✅ Force Calibration: R2_y = {force_calib.get('r2_force_y', 0):.4f}, "
-                  f"EC_total = {force_calib.get('ec_force', 0):.1f}% ({force_calib.get('total_hits', 0)}/{force_calib.get('total_count', 0)}), "
-                  f"EC_y = {force_calib.get('ec_force_y', 0):.1f}%")
-        except Exception as e:
-            print(f"Warning: Failed to evaluate reaction force calibration: {e}")
-
     # Generate domain invariants plot (showing noisy observed data and smoothness)
     try:
         print("Generating Domain Invariants Plot (Noise-added observed data)...")
@@ -739,10 +730,9 @@ if __name__ == "__main__" :
     # Capture physical parameters
     phys_params = learned_gp.load_params(best_params)
     
-    # Use observable reaction force metrics for validation R2 and EC if available
-    primary_val_r2 = force_calib.get("r2_force_y", r2_res.val_metrics.get("r2"))
-    primary_val_rmse = force_calib.get("rmse_force_y", r2_res.val_metrics.get("rmse"))
-    primary_val_ec = force_calib.get("ec_force", r2_res.val_metrics.get("ec"))
+    primary_val_r2 = r2_res.val_metrics.get("r2")
+    primary_val_rmse = r2_res.val_metrics.get("rmse")
+    primary_val_ec = r2_res.val_metrics.get("ec")
 
     metrics = {
         "seed": args.seed,
@@ -754,19 +744,10 @@ if __name__ == "__main__" :
         "r2_train": r2_res.train_metrics.get("r2"),
         "rmse_train": r2_res.train_metrics.get("rmse"),
         "ec_train": r2_res.train_metrics.get("ec"),
-        # Observable calibration metrics (used for beta selection)
+        # Validation metrics
         "r2_val": primary_val_r2,
         "rmse_val": primary_val_rmse,
         "ec_val": primary_val_ec,
-        "r2_force_y": force_calib.get("r2_force_y"),
-        "rmse_force_y": force_calib.get("rmse_force_y"),
-        "r2_force": force_calib.get("r2_force"),
-        "rmse_force": force_calib.get("rmse_force"),
-        "ec_force_y": force_calib.get("ec_force_y"),
-        "ec_force_x": force_calib.get("ec_force_x"),
-        "total_force_hits": force_calib.get("total_hits"),
-        "total_force_count": force_calib.get("total_count"),
-        "conformal_q95": force_calib.get("conformal_q95"),
         # Synthetic energy metrics (for benchmark reference only)
         "r2_energy_val": r2_res.val_metrics.get("r2"),
         "rmse_energy_val": r2_res.val_metrics.get("rmse"),

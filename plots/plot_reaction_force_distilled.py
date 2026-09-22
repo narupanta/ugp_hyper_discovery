@@ -239,31 +239,84 @@ def get_experiment_test_steps(data_file: str, n_steps: int = 20) -> list:
     return [n_steps - 2, n_steps - 1]
 
 
+def get_experiment_val_steps(data_file: str, n_steps: int = 20) -> list:
+    """Finds experiment config.yaml/json and extracts val_load_steps_indices."""
+    import yaml
+    p = Path(data_file).resolve()
+    for ancestor in [p.parent, p.parent.parent, p.parent.parent.parent, p.parent.parent.parent.parent]:
+        for fname in ["config.yaml", "config.json", "recipe_config.yaml"]:
+            cfg_p = ancestor / fname
+            if cfg_p.exists():
+                try:
+                    if fname.endswith(".yaml"):
+                        with open(cfg_p, "r") as f:
+                            d = yaml.safe_load(f)
+                    else:
+                        with open(cfg_p, "r") as f:
+                            d = json.load(f)
+                    if d and "val_load_steps_indices" in d and d["val_load_steps_indices"]:
+                        return [int(s) for s in d["val_load_steps_indices"] if int(s) < n_steps]
+                except Exception:
+                    pass
+    return [s for s in [1, 3, 5, 7] if s < n_steps]
+
+
 def plot_reaction_force_block(
     res: dict,
     save_path: str,
     test_steps: list = None,
+    val_steps: list = None,
     alpha: float = 0.05,
     make_png: bool = True
 ):
     """
-    Generates a publication figure for Block geometry plotting pointwise reaction forces (Rx, Ry)
-    specifically for the test load steps (from config) with empirical sample quantile error bars (95% CI),
-    observed load cell markers, and verification metrics.
+    Generates publication figures for Block geometry plotting pointwise reaction forces (Rx, Ry):
+    1. Raw sample 95% CI: reaction_force_distilled_block.pdf/png
+    2. Conformal calibrated 95% band: reaction_force_conformal_block.pdf/png
+    Computes reaction force conformal scale Q_force and variance budget.
     """
     apply_style()
+    from core.conformal import compute_conformal_scale, compute_variance_budget
+
     rx_all = res["rx_all"] # (n_samples, n_steps)
     ry_all = res["ry_all"] # (n_samples, n_steps)
     loads = res["loads"]   # (n_steps, 2)
+    load_noise = res.get("load_noise", 0.01)
     n_steps = res["n_steps"]
 
+    data_file = os.path.join(save_path, "fem_distilled_samples.npz")
     if test_steps is None:
-        test_steps = get_experiment_test_steps(os.path.join(save_path, "fem_distilled_samples.npz"), n_steps)
+        test_steps = get_experiment_test_steps(data_file, n_steps)
+    if val_steps is None:
+        val_steps = get_experiment_val_steps(data_file, n_steps)
     
-    # Filter to test steps
+    # Filter steps
     test_idx = np.array([int(s) for s in test_steps if int(s) < n_steps])
     if len(test_idx) == 0:
         test_idx = np.arange(n_steps)
+
+    val_idx = np.array([int(s) for s in val_steps if int(s) < n_steps])
+    if len(val_idx) == 0:
+        val_idx = np.array([s for s in [1, 3, 5, 7] if s < n_steps])
+
+    # Conformal calibration on validation load steps
+    # Combine Rx and Ry residuals across validation steps
+    r_val_true = np.stack([loads[val_idx, 0], loads[val_idx, 1]], axis=-1) # (n_val, 2)
+    r_val_pred = np.stack([rx_all[:, val_idx], ry_all[:, val_idx]], axis=-1) # (n_samples, n_val, 2)
+
+    q_force, _, std_r_param = compute_conformal_scale(r_val_true, r_val_pred, alpha=alpha)
+    sigma2_param_r = float(np.mean(std_r_param**2))
+    force_budget = compute_variance_budget(sigma2_param_r, float(load_noise)**2, q_force, alpha=alpha)
+
+    # Save conformal calibration for reaction force
+    calib_force_data = {
+        "geometry": "block",
+        "val_steps": [int(s) for s in val_idx],
+        "q_force": q_force,
+        "variance_budget": force_budget
+    }
+    with open(os.path.join(save_path, "conformal_force_calibration.json"), "w") as f:
+        json.dump(calib_force_data, f, indent=4)
 
     # 1-indexed step labels for display
     steps_display = test_idx + 1
@@ -274,100 +327,129 @@ def plot_reaction_force_block(
 
     mu_rx = np.mean(rx_all[:, test_idx], axis=0)
     mu_ry = np.mean(ry_all[:, test_idx], axis=0)
+    std_rx = np.std(rx_all[:, test_idx], axis=0)
+    std_ry = np.std(ry_all[:, test_idx], axis=0)
 
-    # Sample quantiles (95% CI)
+    # Uncalibrated sample quantiles (95% CI)
     q_low_x, q_high_x = np.quantile(rx_all[:, test_idx], [alpha / 2.0, 1.0 - alpha / 2.0], axis=0)
     q_low_y, q_high_y = np.quantile(ry_all[:, test_idx], [alpha / 2.0, 1.0 - alpha / 2.0], axis=0)
 
-    # Empirical coverage on test steps
-    hit_x = (r_obs_x >= q_low_x) & (r_obs_x <= q_high_x)
-    hit_y = (r_obs_y >= q_low_y) & (r_obs_y <= q_high_y)
+    # Calibrated Conformal bounds
+    conf_low_x = mu_rx - q_force * std_rx
+    conf_high_x = mu_rx + q_force * std_rx
+    conf_low_y = mu_ry - q_force * std_ry
+    conf_high_y = mu_ry + q_force * std_ry
 
-    ec_rx = float(np.mean(hit_x) * 100.0)
-    ec_ry = float(np.mean(hit_y) * 100.0)
-    total_hits = int(np.sum(hit_x) + np.sum(hit_y))
-    total_count = 2 * n_eval_steps
-    total_ec = float(total_hits / total_count * 100.0)
+    # Compute stats helper
+    def calc_stats(low_x, high_x, low_y, high_y):
+        hit_x = (r_obs_x >= low_x) & (r_obs_x <= high_x)
+        hit_y = (r_obs_y >= low_y) & (r_obs_y <= high_y)
+        ec_rx = float(np.mean(hit_x) * 100.0)
+        ec_ry = float(np.mean(hit_y) * 100.0)
+        total_hits = int(np.sum(hit_x) + np.sum(hit_y))
+        total_count = 2 * n_eval_steps
+        total_ec = float(total_hits / total_count * 100.0)
 
-    ss_tot_x = np.sum((r_obs_x - np.mean(r_obs_x))**2)
-    ss_res_x = np.sum((r_obs_x - mu_rx)**2)
-    r2_rx = float(1.0 - ss_res_x / (ss_tot_x + 1e-12)) if ss_tot_x > 1e-12 else 1.0
-    rmse_rx = float(np.sqrt(np.mean((r_obs_x - mu_rx)**2)))
+        ss_tot_x = np.sum((r_obs_x - np.mean(r_obs_x))**2)
+        ss_res_x = np.sum((r_obs_x - mu_rx)**2)
+        r2_rx = float(1.0 - ss_res_x / (ss_tot_x + 1e-12)) if ss_tot_x > 1e-12 else 1.0
+        rmse_rx = float(np.sqrt(np.mean((r_obs_x - mu_rx)**2)))
 
-    ss_tot_y = np.sum((r_obs_y - np.mean(r_obs_y))**2)
-    ss_res_y = np.sum((r_obs_y - mu_ry)**2)
-    r2_ry = float(1.0 - ss_res_y / (ss_tot_y + 1e-12)) if ss_tot_y > 1e-12 else 1.0
-    rmse_ry = float(np.sqrt(np.mean((r_obs_y - mu_ry)**2)))
+        ss_tot_y = np.sum((r_obs_y - np.mean(r_obs_y))**2)
+        ss_res_y = np.sum((r_obs_y - mu_ry)**2)
+        r2_ry = float(1.0 - ss_res_y / (ss_tot_y + 1e-12)) if ss_tot_y > 1e-12 else 1.0
+        rmse_ry = float(np.sqrt(np.mean((r_obs_y - mu_ry)**2)))
 
-    fig, ax = plt.subplots(figsize=(8.5, 6.2))
+        return {
+            "hit_x": hit_x, "hit_y": hit_y, "ec_rx": ec_rx, "ec_ry": ec_ry,
+            "total_hits": total_hits, "total_count": total_count, "total_ec": total_ec,
+            "r2_rx": r2_rx, "rmse_rx": rmse_rx, "r2_ry": r2_ry, "rmse_ry": rmse_ry
+        }
 
-    # Offset x slightly for side-by-side display of Rx and Ry
+    raw_stats = calc_stats(q_low_x, q_high_x, q_low_y, q_high_y)
+    conf_stats = calc_stats(conf_low_x, conf_high_x, conf_low_y, conf_high_y)
+
     dx = 0.08 if len(steps_display) <= 5 else 0.15
 
-    # --- X-direction (Rx) Pointwise ---
-    err_x = np.vstack([mu_rx - q_low_x, q_high_x - mu_rx])
-    ax.errorbar(
-        steps_display - dx, mu_rx, yerr=err_x, fmt='o',
-        color='#1f77b4', ecolor='#1f77b4', elinewidth=2.2, capsize=6.0, capthick=2.0,
-        markersize=8.0, label=r"Distilled $R_x$ (Mean $\pm$ 95% CI)"
-    )
-    ax.scatter(
-        steps_display - dx, r_obs_x, color='#084594', edgecolors='black',
-        marker='s', s=80, zorder=5, label=r"Observed $R_{\mathrm{obs}, x}$"
-    )
+    # Helper to generate plot
+    def render_block_plot(err_low_x, err_high_x, err_low_y, err_high_y, stats, filename, title_prefix, is_conformal=False):
+        fig, ax = plt.subplots(figsize=(8.5, 6.2))
+        err_x = np.vstack([mu_rx - err_low_x, err_high_x - mu_rx])
+        err_y = np.vstack([mu_ry - err_low_y, err_high_y - mu_ry])
 
-    # --- Y-direction (Ry) Pointwise ---
-    err_y = np.vstack([mu_ry - q_low_y, q_high_y - mu_ry])
-    ax.errorbar(
-        steps_display + dx, mu_ry, yerr=err_y, fmt='o',
-        color='#2ca02c', ecolor='#2ca02c', elinewidth=2.2, capsize=6.0, capthick=2.0,
-        markersize=8.0, label=r"Distilled $R_y$ (Mean $\pm$ 95% CI)"
-    )
-    ax.scatter(
-        steps_display + dx, r_obs_y, color='#006d2c', edgecolors='black',
-        marker='s', s=80, zorder=5, label=r"Observed $R_{\mathrm{obs}, y}$"
-    )
+        lbl_x = r"Conformal $R_x$ ($Q_{0.95}$ Band)" if is_conformal else r"Distilled $R_x$ (Mean $\pm$ 95% CI)"
+        lbl_y = r"Conformal $R_y$ ($Q_{0.95}$ Band)" if is_conformal else r"Distilled $R_y$ (Mean $\pm$ 95% CI)"
 
-    ax.set_xticks(steps_display)
-    ax.set_xticklabels([f"Step {s}" for s in steps_display], fontsize=12)
-    ax.set_xlabel("Test Load Steps (Extrapolation / Holdout)", fontsize=13)
-    ax.set_ylabel("Reaction Force", fontsize=13)
-    ax.set_title(r"Pointwise Distilled Reaction Force (Block Test Steps)", fontsize=14)
-    ax.grid(True, alpha=0.25, linestyle='--')
-    ax.legend(loc="upper left", fontsize=10.0, framealpha=0.92, edgecolor='#cccccc')
+        ax.errorbar(
+            steps_display - dx, mu_rx, yerr=err_x, fmt='o',
+            color='#1f77b4', ecolor='#1f77b4', elinewidth=2.2, capsize=6.0, capthick=2.0,
+            markersize=8.0, label=lbl_x
+        )
+        ax.scatter(
+            steps_display - dx, r_obs_x, color='#084594', edgecolors='black',
+            marker='s', s=80, zorder=5, label=r"Observed $R_{\mathrm{obs}, x}$"
+        )
+        ax.errorbar(
+            steps_display + dx, mu_ry, yerr=err_y, fmt='o',
+            color='#2ca02c', ecolor='#2ca02c', elinewidth=2.2, capsize=6.0, capthick=2.0,
+            markersize=8.0, label=lbl_y
+        )
+        ax.scatter(
+            steps_display + dx, r_obs_y, color='#006d2c', edgecolors='black',
+            marker='s', s=80, zorder=5, label=r"Observed $R_{\mathrm{obs}, y}$"
+        )
 
-    # Metrics Annotation Box
-    metrics_text = (
-        r"$\mathbf{Test\ Steps\ Metrics\ (95\%\ CI):}$" + "\n"
-        rf"$R^2_{{R_x}}: {r2_rx:.4f} \mid \mathrm{{RMSE}}_{{R_x}}: {format_sci(rmse_rx)}$" + "\n"
-        rf"$\mathrm{{EC}}_{{R_x}}: {int(np.sum(hit_x))}/{n_eval_steps} \ ({ec_rx:.1f}\%)$" + "\n"
-        rf"$R^2_{{R_y}}: {r2_ry:.4f} \mid \mathrm{{RMSE}}_{{R_y}}: {format_sci(rmse_ry)}$" + "\n"
-        rf"$\mathrm{{EC}}_{{R_y}}: {int(np.sum(hit_y))}/{n_eval_steps} \ ({ec_ry:.1f}\%)$" + "\n"
-        rf"$\mathrm{{Total \ EC \ (X+Y)}}: {total_hits}/{total_count} \ ({total_ec:.1f}\%)$"
-    )
-    ax.text(0.52, 0.06, metrics_text, transform=ax.transAxes,
-            verticalalignment='bottom', horizontalalignment='left',
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.92, edgecolor='#cccccc'),
-            fontsize=9.8)
+        ax.set_xticks(steps_display)
+        ax.set_xticklabels([f"Step {s}" for s in steps_display], fontsize=12)
+        ax.set_xlabel("Test Load Steps (Holdout)", fontsize=13)
+        ax.set_ylabel("Reaction Force", fontsize=13)
+        ax.set_title(rf"{title_prefix} Pointwise Distilled Reaction Force (Block)", fontsize=14)
+        ax.grid(True, alpha=0.25, linestyle='--')
+        ax.legend(loc="upper left", fontsize=10.0, framealpha=0.92, edgecolor='#cccccc')
 
-    plt.tight_layout()
-    os.makedirs(save_path, exist_ok=True)
-    out_pdf = os.path.join(save_path, "reaction_force_distilled_block.pdf")
-    save_figure(fig, out_pdf, make_png=make_png)
-    plt.close(fig)
+        q_info = f" \mid Q_{{0.95}}: {q_force:.2f}" if is_conformal else ""
+        metrics_text = (
+            rf"$\mathbf{{{title_prefix}\ Metrics\ (95\%\ CI){q_info}:}}$" + "\n"
+            rf"$R^2_{{R_x}}: {stats['r2_rx']:.4f} \mid \mathrm{{RMSE}}_{{R_x}}: {format_sci(stats['rmse_rx'])}$" + "\n"
+            rf"$\mathrm{{EC}}_{{R_x}}: {int(np.sum(stats['hit_x']))}/{n_eval_steps} \ ({stats['ec_rx']:.1f}\%)$" + "\n"
+            rf"$R^2_{{R_y}}: {stats['r2_ry']:.4f} \mid \mathrm{{RMSE}}_{{R_y}}: {format_sci(stats['rmse_ry'])}$" + "\n"
+            rf"$\mathrm{{EC}}_{{R_y}}: {int(np.sum(stats['hit_y']))}/{n_eval_steps} \ ({stats['ec_ry']:.1f}\%)$" + "\n"
+            rf"$\mathrm{{Total \ EC \ (X+Y)}}: {stats['total_hits']}/{stats['total_count']} \ ({stats['total_ec']:.1f}\%)$"
+        )
+        ax.text(0.52, 0.06, metrics_text, transform=ax.transAxes,
+                verticalalignment='bottom', horizontalalignment='left',
+                bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.92, edgecolor='#cccccc'),
+                fontsize=9.8)
+
+        plt.tight_layout()
+        os.makedirs(save_path, exist_ok=True)
+        out_pdf = os.path.join(save_path, f"{filename}.pdf")
+        save_figure(fig, out_pdf, make_png=make_png)
+        plt.close(fig)
+
+    # 1. Uncalibrated plot
+    render_block_plot(q_low_x, q_high_x, q_low_y, q_high_y, raw_stats, "reaction_force_distilled_block", "[Uncalibrated]")
+    # 2. Conformal plot
+    render_block_plot(conf_low_x, conf_high_x, conf_low_y, conf_high_y, conf_stats, "reaction_force_conformal_block", "[Conformal]", is_conformal=True)
 
     metrics = {
         "geometry": "block",
         "test_steps": [int(s) for s in test_idx],
-        "r2_force_x": r2_rx,
-        "rmse_force_x": rmse_rx,
-        "ec_force_x": ec_rx,
-        "r2_force_y": r2_ry,
-        "rmse_force_y": rmse_ry,
-        "ec_force_y": ec_ry,
-        "total_ec": total_ec,
-        "total_hits": total_hits,
-        "total_count": total_count,
+        "val_steps": [int(s) for s in val_idx],
+        "r2_force_x": raw_stats["r2_rx"],
+        "rmse_force_x": raw_stats["rmse_rx"],
+        "ec_force_x": raw_stats["ec_rx"],
+        "r2_force_y": raw_stats["r2_ry"],
+        "rmse_force_y": raw_stats["rmse_ry"],
+        "ec_force_y": raw_stats["ec_ry"],
+        "total_ec": raw_stats["total_ec"],
+        "conformal": {
+            "q_force": q_force,
+            "calibrated_ec_x": conf_stats["ec_rx"],
+            "calibrated_ec_y": conf_stats["ec_ry"],
+            "calibrated_total_ec": conf_stats["total_ec"],
+            "variance_budget": force_budget
+        },
         "n_steps": n_eval_steps,
     }
     with open(os.path.join(save_path, "reaction_force_metrics_block.json"), "w") as f:
@@ -384,77 +466,108 @@ def plot_reaction_force_holes(
     make_png: bool = True
 ):
     """
-    Generates a publication figure for Holes geometry plotting pointwise reaction force (Ry vs Load Steps 1 to 20)
-    with empirical sample quantile error bars (95% CI), observed load cell markers, and calibration metrics.
+    Generates publication figures for Holes geometry plotting pointwise reaction force (Ry vs Load Steps 1 to 20):
+    1. Raw sample 95% CI: reaction_force_distilled_holes.pdf/png
+    2. Conformal calibrated 95% band using BLOCK calibrated Q_force: reaction_force_conformal_holes.pdf/png
     """
     apply_style()
     ry_all = res["ry_all"] # (n_samples, n_steps)
     loads = res["loads"]   # (n_steps, 2)
     n_steps = res["n_steps"]
 
+    # Load block Q_force for transferability
+    p_block = Path(save_path).parent / "block" / "conformal_force_calibration.json"
+    q_force = 1.0
+    if p_block.exists():
+        try:
+            with open(p_block, "r") as f:
+                c_data = json.load(f)
+            q_force = float(c_data.get("q_force", 1.0))
+            print(f"[Conformal] Loaded Block Q_force = {q_force:.4f} for zero-shot transfer on Holes")
+        except Exception:
+            q_force = 1.0
+
     steps_display = np.arange(1, n_steps + 1)
     r_obs_y = loads[:, 1]
 
     mu_ry = np.mean(ry_all, axis=0)
+    std_ry = np.std(ry_all, axis=0)
 
     # Sample quantiles (95% CI)
     q_low_y, q_high_y = np.quantile(ry_all, [alpha / 2.0, 1.0 - alpha / 2.0], axis=0)
+    # Calibrated Conformal bounds using block Q_force
+    conf_low_y = mu_ry - q_force * std_ry
+    conf_high_y = mu_ry + q_force * std_ry
 
-    # Empirical coverage across all steps 1 to 20
-    hit_y = (r_obs_y >= q_low_y) & (r_obs_y <= q_high_y)
-    ec_ry = float(np.mean(hit_y) * 100.0)
+    def calc_holes_stats(low_y, high_y):
+        hit_y = (r_obs_y >= low_y) & (r_obs_y <= high_y)
+        ec_ry = float(np.mean(hit_y) * 100.0)
+        ss_tot_y = np.sum((r_obs_y - np.mean(r_obs_y))**2)
+        ss_res_y = np.sum((r_obs_y - mu_ry)**2)
+        r2_ry = float(1.0 - ss_res_y / (ss_tot_y + 1e-12))
+        rmse_ry = float(np.sqrt(np.mean((r_obs_y - mu_ry)**2)))
+        return {"hit_y": hit_y, "ec_ry": ec_ry, "r2_ry": r2_ry, "rmse_ry": rmse_ry}
 
-    ss_tot_y = np.sum((r_obs_y - np.mean(r_obs_y))**2)
-    ss_res_y = np.sum((r_obs_y - mu_ry)**2)
-    r2_ry = float(1.0 - ss_res_y / (ss_tot_y + 1e-12))
-    rmse_ry = float(np.sqrt(np.mean((r_obs_y - mu_ry)**2)))
+    raw_stats = calc_holes_stats(q_low_y, q_high_y)
+    conf_stats = calc_holes_stats(conf_low_y, conf_high_y)
 
-    fig, ax = plt.subplots(figsize=(9.2, 6.2))
+    def render_holes_plot(low_y, high_y, stats, filename, title_prefix, is_conformal=False):
+        fig, ax = plt.subplots(figsize=(9.2, 6.2))
+        err_y = np.vstack([mu_ry - low_y, high_y - mu_ry])
+        band_lbl = rf"Conformal 95% Band ($Q={q_force:.2f}$)" if is_conformal else r"Distilled 95% Credible Band"
+        pts_lbl = r"Conformal $R_y$" if is_conformal else r"Distilled $R_y$ (Mean $\pm$ 95% CI)"
 
-    # --- Y-direction (Ry) Pointwise (Steps 1 to 20) ---
-    err_y = np.vstack([mu_ry - q_low_y, q_high_y - mu_ry])
-    ax.plot(steps_display, mu_ry, color='#2ca02c', lw=1.5, linestyle='--', alpha=0.7)
-    ax.fill_between(steps_display, q_low_y, q_high_y, color='#2ca02c', alpha=0.12, label=r"Distilled 95% Credible Band")
-    ax.errorbar(
-        steps_display, mu_ry, yerr=err_y, fmt='o',
-        color='#2ca02c', ecolor='#2ca02c', elinewidth=1.8, capsize=4.5, capthick=1.5,
-        markersize=6.5, label=r"Distilled $R_y$ (Mean $\pm$ 95% CI)"
-    )
-    ax.scatter(
-        steps_display, r_obs_y, color='#006d2c', edgecolors='black',
-        marker='s', s=45, zorder=5, label=r"Observed $R_{\mathrm{obs}, y}$"
-    )
+        ax.plot(steps_display, mu_ry, color='#2ca02c', lw=1.5, linestyle='--', alpha=0.7)
+        ax.fill_between(steps_display, low_y, high_y, color='#2ca02c', alpha=0.12, label=band_lbl)
+        ax.errorbar(
+            steps_display, mu_ry, yerr=err_y, fmt='o',
+            color='#2ca02c', ecolor='#2ca02c', elinewidth=1.8, capsize=4.5, capthick=1.5,
+            markersize=6.5, label=pts_lbl
+        )
+        ax.scatter(
+            steps_display, r_obs_y, color='#006d2c', edgecolors='black',
+            marker='s', s=45, zorder=5, label=r"Observed $R_{\mathrm{obs}, y}$"
+        )
 
-    ax.set_xticks(steps_display)
-    ax.set_xlabel("Load Step (1 to 20)", fontsize=13)
-    ax.set_ylabel(r"Reaction Force $R_y$ ($\mathbf{R} \cdot \mathbf{e}_1$)", fontsize=13)
-    ax.set_title(r"Pointwise Distilled Reaction Force vs. Load Step (Holes)", fontsize=14)
-    ax.grid(True, alpha=0.25, linestyle='--')
-    ax.legend(loc="upper left", fontsize=10.2, framealpha=0.92, edgecolor='#cccccc')
+        ax.set_xticks(steps_display)
+        ax.set_xlabel("Load Step (1 to 20)", fontsize=13)
+        ax.set_ylabel(r"Reaction Force $R_y$ ($\mathbf{R} \cdot \mathbf{e}_1$)", fontsize=13)
+        ax.set_title(rf"{title_prefix} Pointwise Distilled Reaction Force vs. Load Step (Holes)", fontsize=14)
+        ax.grid(True, alpha=0.25, linestyle='--')
+        ax.legend(loc="upper left", fontsize=10.2, framealpha=0.92, edgecolor='#cccccc')
 
-    # Metrics Annotation Box
-    metrics_text = (
-        r"$\mathbf{Metrics \ (95\%\ CI):}$" + "\n"
-        rf"$R^2_{{R_y}}: {r2_ry:.4f}$" + "\n"
-        rf"$\mathrm{{RMSE}}_{{R_y}}: {format_sci(rmse_ry)}$" + "\n"
-        rf"$\mathrm{{EC}}_{{R_y}}: {int(np.sum(hit_y))}/{n_steps} \ ({ec_ry:.1f}\%)$"
-    )
-    ax.text(0.60, 0.06, metrics_text, transform=ax.transAxes,
-            verticalalignment='bottom', horizontalalignment='left',
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.92, edgecolor='#cccccc'),
-            fontsize=10.2)
+        q_info = f" \mid Q_{{0.95}}: {q_force:.2f}" if is_conformal else ""
+        metrics_text = (
+            rf"$\mathbf{{{title_prefix}\ Metrics\ (95\%\ CI){q_info}:}}$" + "\n"
+            rf"$R^2_{{R_y}}: {stats['r2_ry']:.4f}$" + "\n"
+            rf"$\mathrm{{RMSE}}_{{R_y}}: {format_sci(stats['rmse_ry'])}$" + "\n"
+            rf"$\mathrm{{EC}}_{{R_y}}: {int(np.sum(stats['hit_y']))}/{n_steps} \ ({stats['ec_ry']:.1f}\%)$"
+        )
+        ax.text(0.60, 0.06, metrics_text, transform=ax.transAxes,
+                verticalalignment='bottom', horizontalalignment='left',
+                bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.92, edgecolor='#cccccc'),
+                fontsize=10.2)
 
-    plt.tight_layout()
-    os.makedirs(save_path, exist_ok=True)
-    out_pdf = os.path.join(save_path, "reaction_force_distilled_holes.pdf")
-    save_figure(fig, out_pdf, make_png=make_png)
-    plt.close(fig)
+        plt.tight_layout()
+        os.makedirs(save_path, exist_ok=True)
+        out_pdf = os.path.join(save_path, f"{filename}.pdf")
+        save_figure(fig, out_pdf, make_png=make_png)
+        plt.close(fig)
+
+    # 1. Uncalibrated plot
+    render_holes_plot(q_low_y, q_high_y, raw_stats, "reaction_force_distilled_holes", "[Uncalibrated]")
+    # 2. Conformal plot
+    render_holes_plot(conf_low_y, conf_high_y, conf_stats, "reaction_force_conformal_holes", "[Conformal]", is_conformal=True)
 
     metrics = {
         "geometry": "holes",
-        "r2_force_y": r2_ry,
-        "rmse_force_y": rmse_ry,
-        "ec_force_y": ec_ry,
+        "r2_force_y": raw_stats["r2_ry"],
+        "rmse_force_y": raw_stats["rmse_ry"],
+        "ec_force_y": raw_stats["ec_ry"],
+        "conformal": {
+            "q_force": q_force,
+            "calibrated_ec_y": conf_stats["ec_ry"]
+        },
         "n_steps": n_steps,
     }
     with open(os.path.join(save_path, "reaction_force_metrics_holes.json"), "w") as f:

@@ -1322,6 +1322,8 @@ def main():
         
         # Combined invariant sensitivity (dev vs I1,I2; vol vs J)
         subprocess.run(["python3", "plots/plot_combined_invariant_sensitivity.py", "--distilled_dir", out_dir], check=False)
+        # Unified all-invariant sensitivity scatter (dev in blue, vol in orange, aniso in pink across all invariants)
+        subprocess.run(["python3", "plots/plot_all_invariant_sensitivity.py", "--distilled_dir", out_dir], check=False)
 
     except Exception as e:
         print(f"Error running invariant sensitivity plots: {e}")

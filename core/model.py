@@ -39,6 +39,11 @@ class SparseHyperelasticityGP:
             self.aniso_z = jnp.asarray(aniso_z, dtype=jnp.float64)
             self.min_aniso = jnp.asarray(min_aniso, dtype=jnp.float64)
             self.max_aniso = jnp.asarray(max_aniso, dtype=jnp.float64)
+            if hasattr(self.feature_extractor, "a0") and hasattr(self.feature_extractor, "a1"):
+                dot_val = float(jnp.dot(self.feature_extractor.a0, self.feature_extractor.a1))
+                self.aniso_anchor = jnp.array([1.0, 1.0, dot_val**2], dtype=jnp.float64)
+            else:
+                self.aniso_anchor = jnp.ones(self.aniso_z.shape[-1], dtype=jnp.float64)
 
         self.sampling_mode = sampling_mode
         self.L = L  # Number of Random Fourier Features for pathwise sampling
@@ -111,7 +116,14 @@ class SparseHyperelasticityGP:
                 aniso_var = to_f64(jax.nn.softplus(p.raw_aniso_u_var))
             
             aniso_z = to_f64(jax.nn.softplus(p.raw_aniso_z))
-            aniso_z = aniso_z.at[0].set(to_f64(jnp.ones(aniso_z.shape[-1])))
+            anchor_val = getattr(self, "aniso_anchor", None)
+            if anchor_val is None:
+                if hasattr(self.feature_extractor, "a0") and hasattr(self.feature_extractor, "a1"):
+                    dot_val = float(jnp.dot(self.feature_extractor.a0, self.feature_extractor.a1))
+                    anchor_val = jnp.array([1.0, 1.0, dot_val**2], dtype=jnp.float64)
+                else:
+                    anchor_val = jnp.ones(aniso_z.shape[-1], dtype=jnp.float64)
+            aniso_z = aniso_z.at[0].set(to_f64(anchor_val))
             aniso_u_mean = aniso_mu.at[0].set(0.0)
             if "full" in self.covariance_mode:
                 aniso_u_var = aniso_var.at[0, :].set(0.0).at[:, 0].set(0.0).at[0, 0].set(self.u_var_anchor)
@@ -274,8 +286,9 @@ class SparseHyperelasticityGP:
             return f_prior_vol(vol_feats) + jnp.dot(k_vz, v_vol_corr)
 
         if self.is_anisotropic:
+            aniso_dim = self.aniso_z.shape[-1]
             w_aniso_prior = random.normal(k9, (self.L,), dtype=jnp.float64)
-            W_aniso = random.normal(k10, (1, self.L), dtype=jnp.float64) 
+            W_aniso = random.normal(k10, (aniso_dim, self.L), dtype=jnp.float64) 
             b_aniso = random.uniform(k11, (self.L,), dtype=jnp.float64) * 2 * jnp.pi
 
             def f_prior_aniso(v):

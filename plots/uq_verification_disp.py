@@ -18,6 +18,7 @@ from core.material_models import get_material
 from core.datasetclass import BenchmarkDataset
 
 import argparse
+import json
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.tri as tri
@@ -365,7 +366,7 @@ import matplotlib.ticker as ticker
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sklearn.metrics import r2_score
 
-def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, mode_str=""):
+def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, mode_str="", filename_base="displacement_analysis", banner_prefix=""):
     apply_style()
 
     # --- Data Preparation ---
@@ -468,8 +469,9 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
                ncol=2, frameon=False, fontsize=8.5, handlelength=1.6, borderpad=0.1)
 
     # --- Bottom Text Box Banner across figure width (centered under panels 2 & 3) ---
+    prefix_str = f"{banner_prefix} " if banner_prefix else ""
     stats_banner = (
-        rf"$95\%\;\mathrm{{EC}}_{{u}} = \mathbf{{{cov_xy:.1f}\%}}$   $\vert$   "
+        rf"{prefix_str}$95\%\;\mathrm{{EC}}_{{u}} = \mathbf{{{cov_xy:.1f}\%}}$   $\vert$   "
         rf"$r^2_{{u_x}} = \mathbf{{{r2_x:.4f}}},\; r^2_{{u_y}} = \mathbf{{{r2_y:.4f}}}$   $\vert$   "
         rf"$\mathrm{{RMSE}}_{{u_x}} = \mathbf{{{rmse_x:.4f}}},\; \mathrm{{RMSE}}_{{u_y}} = \mathbf{{{rmse_y:.4f}}}$"
     )
@@ -478,8 +480,8 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
 
     plt.subplots_adjust(left=0.03, right=0.97, wspace=0.18, bottom=0.20, top=0.96)
     os.makedirs(save_path, exist_ok=True)
-    pdf_file = os.path.join(save_path, "displacement_analysis.pdf")
-    png_file = os.path.join(save_path, "displacement_analysis.png")
+    pdf_file = os.path.join(save_path, f"{filename_base}.pdf")
+    png_file = os.path.join(save_path, f"{filename_base}.png")
     plt.savefig(pdf_file, bbox_inches="tight")
     plt.savefig(png_file, bbox_inches="tight", dpi=300)
     print(f"Displacement analysis plot saved to: {pdf_file} and {png_file}")
@@ -651,12 +653,12 @@ if __name__ == "__main__" :
         mesh_node_coords = consolidated_data["node_coords"]
         mesh_cells = consolidated_data["cells"]
         true_data = consolidated_data
-        if "u_true" in consolidated_data:
+        if "u_exp" in consolidated_data:
+            u_true = consolidated_data["u_exp"][step]
+            print(f"Using experimental displacement with noise (u_exp) as observation reference for plots.")
+        elif "u_true" in consolidated_data:
             u_true = consolidated_data["u_true"][step]
             print(f"Using ground truth displacement (u_true) as reference for plots.")
-        elif "u_exp" in consolidated_data:
-            u_true = consolidated_data["u_exp"][step]
-            print(f"Using experimental displacement (u_exp) as ground truth reference for plots.")
         else:
             gt_data = np.load(pred_dir_name.parent / "gt" / "u_gt.npz")
             u_true = gt_data["u"][step]
@@ -697,7 +699,7 @@ if __name__ == "__main__" :
     print(f"Closest node indices: {node_indices}")
     node_type = true_data["node_type"]
 
-    ref_u_all = true_data["u_true"] if "u_true" in true_data else (true_data["u_exp"] if "u_exp" in true_data else true_data["u"])
+    ref_u_all = true_data["u_exp"] if "u_exp" in true_data else (true_data["u_true"] if "u_true" in true_data else true_data["u"])
     u_true_val = ref_u_all[valid_val_step_indices]
 
     if os.path.exists(consolidated_file):
@@ -732,13 +734,175 @@ if __name__ == "__main__" :
             stress_mode = str(true_data["stress_mode"])
     mode_display = f"{ctrl_mode.capitalize()} Control, {stress_mode.replace('_', ' ').capitalize()}"
 
-    # 1x4 Consolidated Displacement Analysis Plot
+    # ---------------------------------------------------------
+    # Conformal Prediction Calibration & Tuning Visualization
+    # ---------------------------------------------------------
+    from core.conformal import compute_conformal_scale, apply_conformal_band, compute_empirical_coverage, compute_variance_budget
+
+    # 1. Discover validation steps for calibration (from config or default to 1, 3, 5, 7)
+    cfg_val_steps = None
+    for ancestor in [pred_dir_name, pred_dir_name.parent, pred_dir_name.parent.parent, pred_dir_name.parent.parent.parent]:
+        for fname in ["config.yaml", "config.json", "recipe_config.yaml"]:
+            cfg_p = ancestor / fname
+            if cfg_p.exists():
+                try:
+                    import yaml
+                    with open(cfg_p, "r") as f:
+                        d = yaml.safe_load(f)
+                    if d and "val_load_steps_indices" in d and d["val_load_steps_indices"]:
+                        cfg_val_steps = [int(s) for s in d["val_load_steps_indices"] if int(s) < max_steps_avail]
+                        break
+                except Exception:
+                    pass
+        if cfg_val_steps is not None:
+            break
+
+    if cfg_val_steps is None:
+        cfg_val_steps = [s for s in [1, 3, 5, 7] if s < max_steps_avail]
+
+    is_holes = (pred_dir_name.name.lower() == "holes") or ("holes" in pred_dir_name.parts)
+    is_block = not is_holes
+    
+    conformal_info_file = pred_dir_name.parent / "block" / "conformal_calibration_metrics.json"
+    if not conformal_info_file.exists():
+        conformal_info_file = pred_dir_name / "conformal_calibration_metrics.json"
+
+    q_disp = 1.0
+    disp_budget = None
+
+    if is_block:
+        # Calibrate conformal scale Q on block validation steps
+        print(f"[Conformal] Calibrating displacement scale on Block validation steps: {cfg_val_steps}")
+        u_val_true = ref_u_all[cfg_val_steps] # (n_val, n_nodes, 2)
+        if consolidated_data is not None:
+            u_val_pred = consolidated_data["u_pred"][:, cfg_val_steps] # (n_samples, n_val, n_nodes, 2)
+        else:
+            u_val_pred = u_pred_piola_samples_val # fallback
+
+        q_disp, scores, std_param = compute_conformal_scale(u_val_true, u_val_pred, alpha=0.05)
+        print(f"[Conformal] Calibrated Block Q_0.95 (disp): {q_disp:.4f}")
+
+        # Plot tuning verification at the LAST validation step
+        last_val_step = cfg_val_steps[-1]
+        print(f"[Conformal] Generating tuning plot at last validation step {last_val_step}")
+        if consolidated_data is not None:
+            u_tune_pred_samples = consolidated_data["u_pred"][:, last_val_step]
+            u_tune_true = ref_u_all[last_val_step]
+        else:
+            u_tune_pred_samples = u_pred_piola_samples
+            u_tune_true = u_true
+
+        u_tune_mean, u_tune_low, u_tune_high = apply_conformal_band(u_tune_pred_samples, q_disp)
+        plot_disp_field(
+            mesh_node_coords, mesh_cells, u_tune_true, u_tune_mean,
+            u_tune_true.reshape(-1, 2), u_tune_mean.reshape(-1, 2),
+            u_tune_low.reshape(-1, 2), u_tune_high.reshape(-1, 2),
+            save_path, mode_str=mode_display,
+            filename_base="displacement_calibration_tuning",
+            banner_prefix=f"[Tuning Step {last_val_step}]"
+        )
+
+        # Compute variance budget on validation steps
+        sigma2_param_val = float(np.mean(std_param**2))
+        # Read disp_noise from config or default 1e-5
+        disp_noise = 1.0e-5
+        for ancestor in [pred_dir_name, pred_dir_name.parent, pred_dir_name.parent.parent]:
+            cfg_p = ancestor / "config.yaml"
+            if cfg_p.exists():
+                try:
+                    import yaml
+                    with open(cfg_p, "r") as f:
+                        d = yaml.safe_load(f)
+                    if d and "disp_noise" in d:
+                        disp_noise = float(d["disp_noise"])
+                except Exception:
+                    pass
+
+        disp_budget = compute_variance_budget(sigma2_param_val, disp_noise**2, q_disp, alpha=0.05)
+        print(f"[Conformal] Block Displacement Variance Budget: {disp_budget['status']}")
+        print(f"            sigma2_total: {disp_budget['sigma2_total']:.4e} | sigma2_param: {disp_budget['sigma2_param']:.4e} | sigma2_noise: {disp_budget['sigma2_noise']:.4e} | sigma2_discrepancy: {disp_budget['sigma2_discrepancy']:.4e}")
+
+        # Save calibration metrics
+        calib_data = {
+            "geometry": "block",
+            "val_steps": cfg_val_steps,
+            "q_disp": q_disp,
+            "variance_budget": disp_budget
+        }
+        with open(save_path / "conformal_calibration_metrics.json", "w") as f:
+            json.dump(calib_data, f, indent=4)
+    else:
+        # Holes geometry: Transfer the exact same conformal scale factor calibrated on Block
+        if conformal_info_file.exists():
+            try:
+                with open(conformal_info_file, "r") as f:
+                    calib_data = json.load(f)
+                q_disp = float(calib_data.get("q_disp", 1.0))
+                disp_budget = calib_data.get("variance_budget", None)
+                print(f"[Conformal] Loaded Block Q_0.95 = {q_disp:.4f} for zero-shot transfer on Holes")
+            except Exception as e:
+                print(f"[Conformal] Warning reading {conformal_info_file}: {e}")
+                q_disp = 1.0
+        else:
+            print(f"[Conformal] Warning: {conformal_info_file} not found. Using default q_disp = 1.0")
+
+    # ---------------------------------------------------------
+    # Generate Before-Scaling (Raw) and After-Scaling (Conformal)
+    # ---------------------------------------------------------
+    # 1. Raw uncalibrated plot on test steps (or default valid_val_step_indices)
     plot_disp_field(
         mesh_node_coords, mesh_cells, u_true, u_pred_piola_samples.mean(axis=0),
         u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound,
-        save_path,
-        mode_str=mode_display
+        save_path, mode_str=mode_display,
+        filename_base="displacement_analysis_raw",
+        banner_prefix="[Uncalibrated]"
     )
+    # Also save as standard displacement_analysis for backwards compatibility
+    plot_disp_field(
+        mesh_node_coords, mesh_cells, u_true, u_pred_piola_samples.mean(axis=0),
+        u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound,
+        save_path, mode_str=mode_display,
+        filename_base="displacement_analysis",
+        banner_prefix="[Uncalibrated]"
+    )
+
+    # 2. Calibrated Conformal plot on test steps
+    u_p_conf_mean, u_p_conf_lower, u_p_conf_upper = apply_conformal_band(u_pred_piola_samples_val_flat, q_disp)
+    plot_disp_field(
+        mesh_node_coords, mesh_cells, u_true, u_pred_piola_samples.mean(axis=0),
+        u_true_val_flat, u_p_conf_mean, u_p_conf_lower, u_p_conf_upper,
+        save_path, mode_str=mode_display,
+        filename_base="displacement_analysis_conformal",
+        banner_prefix=f"[Conformal Q={q_disp:.2f}]"
+    )
+
+    # Calculate and log calibrated coverage
+    calib_cov_xy = float(compute_empirical_coverage(u_true_val_flat, u_p_conf_lower, u_p_conf_upper))
+    print(f"[Conformal] Calibrated Test Coverage ({'Block' if is_block else 'Holes'}): {calib_cov_xy:.2f}% (Q = {q_disp:.4f})")
+
+    # Update validation_metrics.json with conformal metrics
+    val_metrics_file = save_path / "validation_metrics.json"
+    if not val_metrics_file.exists() and (save_path.parent / "validation_metrics.json").exists():
+        val_metrics_file = save_path.parent / "validation_metrics.json"
+
+    if val_metrics_file.exists():
+        try:
+            with open(val_metrics_file, "r") as f:
+                vm = json.load(f)
+            if "conformal" not in vm:
+                vm["conformal"] = {}
+            geom_key = "block" if is_block else "holes"
+            vm["conformal"][geom_key] = {
+                "q_disp": float(q_disp),
+                "calibrated_coverage_xy": float(calib_cov_xy),
+                "raw_coverage_xy": float(compute_empirical_coverage(u_true_val_flat, u_p_lower_bound, u_p_upper_bound)),
+                "variance_budget": disp_budget
+            }
+            with open(val_metrics_file, "w") as f:
+                json.dump(vm, f, indent=4)
+            print(f"[Conformal] Updated {val_metrics_file} with calibrated metrics.")
+        except Exception as e:
+            print(f"[Conformal] Warning: Failed to update {val_metrics_file}: {e}")
 
     plot_node_distributions(u_true, u_pred_piola_samples, u_pred_piola_traction_samples, node_indices, save_path)
 

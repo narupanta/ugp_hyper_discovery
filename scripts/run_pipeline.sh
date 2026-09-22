@@ -606,6 +606,7 @@ for SEED in $SEEDS_LIST; do
             fi
         done
         python3 plots/plot_combined_invariant_sensitivity.py --distilled_dir "$DISTILL_DIR" 2>/dev/null || true
+        python3 plots/plot_all_invariant_sensitivity.py --distilled_dir "$DISTILL_DIR" 2>/dev/null || true
 
         echo "✅ Step 3 (Distillation for Seed $SEED) completed."
     else

@@ -53,28 +53,54 @@ def load_seed_metrics(seed_path):
     candidates = [
         os.path.join(seed_path, "fem_validation", "validation_metrics.json"),
         os.path.join(seed_path, "distilled", "validation_metrics.json"),
-        os.path.join(seed_path, "fem_validation", "validation_metrics.json"),
         os.path.join(seed_path, "validation_metrics.json"),
     ]
+    data = None
+    found_path = None
     for c in candidates:
         if os.path.exists(c):
             try:
                 with open(c, "r") as f:
-                    return json.load(f), c
+                    data = json.load(f)
+                    found_path = c
+                    break
             except Exception as e:
                 print(f"Warning: Failed reading {c}: {e}")
-    # Also check glob for validation_metrics_*.json
-    for pattern in [
-        os.path.join(seed_path, "fem_validation", "validation_metrics_*.json"),
-        os.path.join(seed_path, "distilled", "validation_metrics_*.json"),
-    ]:
-        matches = glob.glob(pattern)
-        if matches:
-            try:
-                with open(matches[0], "r") as f:
-                    return json.load(f), matches[0]
-            except Exception:
-                pass
+    if data is None:
+        # Also check glob for validation_metrics_*.json
+        for pattern in [
+            os.path.join(seed_path, "fem_validation", "validation_metrics_*.json"),
+            os.path.join(seed_path, "distilled", "validation_metrics_*.json"),
+        ]:
+            matches = glob.glob(pattern)
+            if matches:
+                try:
+                    with open(matches[0], "r") as f:
+                        data = json.load(f)
+                        found_path = matches[0]
+                        break
+                except Exception:
+                    pass
+
+    if data is not None:
+        # Load reaction force metrics if available
+        for geom in ["block", "holes"]:
+            for cand_rf in [
+                os.path.join(seed_path, "fem_validation", geom, f"reaction_force_metrics_{geom}.json"),
+                os.path.join(seed_path, "fem_validation", f"reaction_force_metrics_{geom}.json"),
+            ]:
+                if os.path.exists(cand_rf):
+                    try:
+                        with open(cand_rf, "r") as f:
+                            rf_m = json.load(f)
+                        if "force" not in data:
+                            data["force"] = {}
+                        data["force"][geom] = rf_m
+                        break
+                    except Exception:
+                        pass
+        return data, found_path
+
     return None, None
 
 
@@ -179,6 +205,27 @@ def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
                     shutil.copyfile(cand, os.path.join(plots_dir, f"displacement_analysis_{geom}.{ext}"))
                     break
 
+            # displacement_analysis_raw
+            for base in paths:
+                cand = os.path.join(base, f"displacement_analysis_raw.{ext}")
+                if os.path.exists(cand):
+                    shutil.copyfile(cand, os.path.join(plots_dir, f"displacement_analysis_raw_{geom}.{ext}"))
+                    break
+
+            # displacement_analysis_conformal
+            for base in paths:
+                cand = os.path.join(base, f"displacement_analysis_conformal.{ext}")
+                if os.path.exists(cand):
+                    shutil.copyfile(cand, os.path.join(plots_dir, f"displacement_analysis_conformal_{geom}.{ext}"))
+                    break
+
+            # displacement_calibration_tuning
+            for base in paths:
+                cand = os.path.join(base, f"displacement_calibration_tuning.{ext}")
+                if os.path.exists(cand):
+                    shutil.copyfile(cand, os.path.join(plots_dir, f"displacement_calibration_tuning_{geom}.{ext}"))
+                    break
+
             # disp_r2_coverage_xy__piola
             for base in paths:
                 cand = os.path.join(base, f"disp_r2_coverage_xy__piola.{ext}")
@@ -191,6 +238,13 @@ def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
                 cand = os.path.join(base, f"reaction_force_distilled_{geom}.{ext}")
                 if os.path.exists(cand):
                     shutil.copyfile(cand, os.path.join(plots_dir, f"reaction_force_distilled_{geom}.{ext}"))
+                    break
+
+            # reaction_force_conformal
+            for base in paths:
+                cand = os.path.join(base, f"reaction_force_conformal_{geom}.{ext}")
+                if os.path.exists(cand):
+                    shutil.copyfile(cand, os.path.join(plots_dir, f"reaction_force_conformal_{geom}.{ext}"))
                     break
 
             # reaction_force_distribution
@@ -471,6 +525,8 @@ def fmt_val(v, decimals=4):
         val = float(v)
         if np.isnan(val):
             return "-"
+        if 0 < abs(val) < 1e-3:
+            return f"{val:.2e}"
         return f"{val:.{decimals}f}"
     except (ValueError, TypeError):
         return str(v)
@@ -507,7 +563,7 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
     top_seeds = ranked_seeds[:top_n]
     total_seeds_count = len(ranked_seeds)
 
-    # Helper to extract a scalar metric from a seed dict
+    # Helper to extract a metric or text from a seed dict
     def get_val(s, *keys):
         cur = s["metrics"]
         for k in keys:
@@ -516,11 +572,13 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
             cur = cur.get(k)
         if cur is None:
             return None
+        if isinstance(cur, str):
+            return cur
         try:
             val = float(cur)
             return val if not np.isnan(val) else None
         except (ValueError, TypeError):
-            return None
+            return str(cur)
 
     # Helper to compute Mean ± Std across all seeds
     def get_agg_stat(seeds, *keys, decimals=4, is_pct=False):
@@ -528,10 +586,15 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
         vals = [v for v in vals if v is not None]
         if not vals:
             return "-"
+        if any(isinstance(v, str) for v in vals):
+            zero_cnt = sum(1 for v in vals if "Zero" in str(v))
+            return f"{zero_cnt}/{len(vals)} Zero Discrepancy"
         mean_v = np.mean(vals)
         std_v = np.std(vals)
         if is_pct:
             return f"{mean_v:.2f} ± {std_v:.2f}"
+        if 0 < abs(mean_v) < 1e-3:
+            return f"{mean_v:.2e} ± {std_v:.2e}"
         return f"{mean_v:.{decimals}f} ± {std_v:.{decimals}f}"
 
     def get_agg_stat_tex(seeds, *keys, decimals=4, is_pct=False):
@@ -560,6 +623,22 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
             ("Disp RMSE (Block)", "Disp RMSE (Block)", ("disp", "block", "norm", "rmse"), 4, False),
             ("Disp EC (%) (Block)", r"Disp EC (\%) (Block)", ("disp", "block", "coverage_xy"), 2, True),
             ("Disp $R^2$ (Block)", r"Disp $R^2$ (Block)", ("disp", "block", "norm", "r2"), 4, False),
+        ]),
+        ("Conformal Calibration & Variance Budget", [
+            ("Disp $Q_{0.95}$ (Calibrated on Block)", r"Disp $Q_{0.95}$", ("conformal", "block", "q_disp"), 3, False),
+            ("Calibrated Disp EC (%) (Block)", r"Calib Disp EC (\%) (Block)", ("conformal", "block", "calibrated_coverage_xy"), 2, True),
+            ("Calibrated Disp EC (%) (Holes Transfer)", r"Calib Disp EC (\%) (Holes)", ("conformal", "holes", "calibrated_coverage_xy"), 2, True),
+            ("Disp $\\sigma_{\\mathrm{param}}^2$", r"Disp $\sigma_{\mathrm{param}}^2$", ("conformal", "block", "variance_budget", "sigma2_param"), 4, False),
+            ("Disp $\\sigma_{\\mathrm{DIC}}^2$", r"Disp $\sigma_{\mathrm{DIC}}^2$", ("conformal", "block", "variance_budget", "sigma2_noise"), 4, False),
+            ("Disp $\\sigma_{\\mathrm{discrepancy}}^2$", r"Disp $\sigma_{\mathrm{discrepancy}}^2$", ("conformal", "block", "variance_budget", "sigma2_discrepancy"), 4, False),
+            ("Disp Discrepancy Status", r"Disp Discrepancy Status", ("conformal", "block", "variance_budget", "status"), 0, False),
+            ("Force $Q_{0.95}$ (Calibrated on Block)", r"Force $Q_{0.95}$", ("force", "block", "conformal", "q_force"), 3, False),
+            ("Calibrated Force EC (%) (Block)", r"Calib Force EC (\%) (Block)", ("force", "block", "conformal", "calibrated_total_ec"), 2, True),
+            ("Calibrated Force EC (%) (Holes Transfer)", r"Calib Force EC (\%) (Holes)", ("force", "holes", "conformal", "calibrated_ec_y"), 2, True),
+            ("Force $\\sigma_{\\mathrm{param}}^2$", r"Force $\sigma_{\mathrm{param}}^2$", ("force", "block", "conformal", "variance_budget", "sigma2_param"), 4, False),
+            ("Force $\\sigma_{\\mathrm{loadcell}}^2$", r"Force $\sigma_{\mathrm{loadcell}}^2$", ("force", "block", "conformal", "variance_budget", "sigma2_noise"), 4, False),
+            ("Force $\\sigma_{\\mathrm{discrepancy}}^2$", r"Force $\sigma_{\mathrm{discrepancy}}^2$", ("force", "block", "conformal", "variance_budget", "sigma2_discrepancy"), 4, False),
+            ("Force Discrepancy Status", r"Force Discrepancy Status", ("force", "block", "conformal", "variance_budget", "status"), 0, False),
         ])
     ]
 
