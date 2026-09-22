@@ -428,7 +428,10 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
 
     cov_x = np.mean((ux_true >= ux_lower) & (ux_true <= ux_upper)) * 100
     cov_y = np.mean((uy_true >= uy_lower) & (uy_true <= uy_upper)) * 100
-    cov_xy = np.mean((ux_true >= ux_lower) & (ux_true <= ux_upper) & (uy_true >= uy_lower) & (uy_true <= uy_upper)) * 100
+    cov_xy = np.mean(np.concatenate([
+        (ux_true >= ux_lower) & (ux_true <= ux_upper),
+        (uy_true >= uy_lower) & (uy_true <= uy_upper)
+    ])) * 100
     
     r2_x = r2_score(ux_true, ux_med)
     r2_y = r2_score(uy_true, uy_med)
@@ -448,11 +451,11 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     limits = [all_vals.min(), all_vals.max()]
     axes[2].plot(limits, limits, "k--", linewidth=1.2, label="Isoline", zorder=5)
 
-    axes[2].set_xlabel(r"$u_{\mathrm{obs}}$", fontsize=11)
-    axes[2].set_ylabel(r"$u_{\mathrm{pred}}$", fontsize=11)
+    axes[2].set_xlabel(r"$u_{\mathrm{obs}}$", fontsize=11, labelpad=5)
+    axes[2].set_ylabel(r"$u_{\mathrm{pred}}$", fontsize=11, labelpad=3)
     axes[2].tick_params(axis="both", which="major", labelsize=8.5)
     axes[2].grid(True, linestyle=":", alpha=0.6)
-    axes[2].legend(loc="lower right", frameon=True, fontsize=8.5)
+    axes[2].legend(loc="lower right", bbox_to_anchor=(0.98, 0.04), frameon=True, facecolor="white", framealpha=0.9, edgecolor="#cccccc", fontsize=8.0)
     axes[2].xaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
     axes[2].yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
     axes[2].set_box_aspect(1)
@@ -461,21 +464,19 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     import matplotlib.lines as mlines
     obs_line = mlines.Line2D([], [], color='#444444', linestyle=':', linewidth=1.4, label=r'Observed ($\mathbf{u}_{\mathrm{obs}}$)')
     pred_line = mlines.Line2D([], [], color='#002b4d', linestyle='-', linewidth=1.4, label=r'Predicted ($\mathbf{u}_{\mathrm{pred}}$)')
-    fig.legend(handles=[obs_line, pred_line], loc='center', bbox_to_anchor=(0.18, 0.04),
+    fig.legend(handles=[obs_line, pred_line], loc='center', bbox_to_anchor=(0.18, 0.035),
                ncol=2, frameon=False, fontsize=8.5, handlelength=1.6, borderpad=0.1)
 
     # --- Bottom Text Box Banner across figure width (centered under panels 2 & 3) ---
-    prefix = rf"$\mathbf{{[{mode_str}]}}$   $\vert$   " if mode_str else ""
     stats_banner = (
-        prefix +
-        rf"$95\%\;\mathrm{{EC}}_{{u_x \cup u_y}} = \mathbf{{{cov_xy:.1f}\%}}$   $\vert$   "
+        rf"$95\%\;\mathrm{{EC}}_{{u}} = \mathbf{{{cov_xy:.1f}\%}}$   $\vert$   "
         rf"$r^2_{{u_x}} = \mathbf{{{r2_x:.4f}}},\; r^2_{{u_y}} = \mathbf{{{r2_y:.4f}}}$   $\vert$   "
         rf"$\mathrm{{RMSE}}_{{u_x}} = \mathbf{{{rmse_x:.4f}}},\; \mathrm{{RMSE}}_{{u_y}} = \mathbf{{{rmse_y:.4f}}}$"
     )
-    fig.text(0.57, 0.04, stats_banner, ha="center", va="center", fontsize=9.0,
+    fig.text(0.57, 0.035, stats_banner, ha="center", va="center", fontsize=9.0,
              bbox=dict(boxstyle="round,pad=0.35", facecolor="#f5f5f5", edgecolor="#bbbbbb", lw=0.6))
 
-    plt.subplots_adjust(left=0.03, right=0.97, wspace=0.18, bottom=0.18, top=0.96)
+    plt.subplots_adjust(left=0.03, right=0.97, wspace=0.18, bottom=0.20, top=0.96)
     os.makedirs(save_path, exist_ok=True)
     pdf_file = os.path.join(save_path, "displacement_analysis.pdf")
     png_file = os.path.join(save_path, "displacement_analysis.png")
@@ -605,7 +606,28 @@ if __name__ == "__main__" :
         max_steps_avail = 9999
 
     if validation_load_step_indices is None:
-        if max_steps_avail <= 3:
+        # Search for test_load_steps_indices from ancestor config.yaml / config.json / recipe_config.yaml
+        cfg_test_steps = None
+        for ancestor in [pred_dir_name, pred_dir_name.parent, pred_dir_name.parent.parent, pred_dir_name.parent.parent.parent, pred_dir_name.parent.parent.parent.parent]:
+            for fname in ["config.yaml", "config.json", "recipe_config.yaml"]:
+                cfg_p = ancestor / fname
+                if cfg_p.exists():
+                    try:
+                        import yaml
+                        with open(cfg_p, "r") as f:
+                            d = yaml.safe_load(f)
+                        if d and "test_load_steps_indices" in d and d["test_load_steps_indices"]:
+                            cfg_test_steps = [int(s) for s in d["test_load_steps_indices"]]
+                            break
+                    except Exception:
+                        pass
+            if cfg_test_steps is not None:
+                break
+
+        if cfg_test_steps is not None:
+            valid_val_step_indices = [s for s in cfg_test_steps if s < max_steps_avail]
+            print(f"Using test_load_steps_indices from config: {valid_val_step_indices}")
+        elif max_steps_avail <= 3:
             valid_val_step_indices = list(range(max_steps_avail))
         else:
             valid_val_step_indices = list(range(max_steps_avail - 3, max_steps_avail))

@@ -745,10 +745,12 @@ def main():
         for idx in args.aniso_params_disabled:
             global_disabled.add(num_dev + num_vol + idx)
             
+    full_param_names_master = list(model.parameter_names)
     if global_disabled:
         model.deactivate_parameters(list(global_disabled))
-        
-    full_param_names_master = model.parameter_names
+        model.reduce_to_activated_parameters()
+        print(f"Disabled parameters {list(global_disabled)}. Reduced active parameters ({model.num_parameters}): {model.parameter_names}")
+
     output_selector = EnergyOutputSelector(num_outputs=mean_psi.shape[0])
 
     from uqmodeldisc.settings import Settings
@@ -892,17 +894,14 @@ def main():
     try:
         print("\nSaving parameter distribution plot before sensitivity analysis...")
         with torch.no_grad():
-            samples_pre = distribution.sample(5000).cpu().numpy()
+            raw_samples_pre = distribution.sample(5000)
+            if raw_samples_pre.shape[1] < len(full_param_names_master):
+                full_samples_pre = torch.matmul(raw_samples_pre, model._parameter_population_matrix.T.to(raw_samples_pre.dtype))
+                samples_pre = full_samples_pre.cpu().numpy()
+            else:
+                samples_pre = raw_samples_pre.cpu().numpy()
             
-        if samples_pre.shape[1] == len(full_param_names_master):
-            full_param_names_pre = list(full_param_names_master)
-        elif samples_pre.shape[1] == len(model.parameter_names):
-            full_param_names_pre = list(model.parameter_names)
-        else:
-            full_param_names_pre = [n for i, n in enumerate(full_param_names_master) if model._parameter_mask[i].item()]
-            if len(full_param_names_pre) != samples_pre.shape[1]:
-                full_param_names_pre = [f"Param_{i}" for i in range(samples_pre.shape[1])]
-                
+        full_param_names_pre = list(full_param_names_master)
         pre_samples_path = os.path.join(out_dir, pfx("flow_samples_before_sensitivity.npy"))
         np.save(pre_samples_path, samples_pre)
         print(f"Saved pre-sensitivity parameter samples to {pre_samples_path}")

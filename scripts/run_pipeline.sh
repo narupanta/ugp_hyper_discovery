@@ -238,7 +238,7 @@ CLAMP_TOP_X=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); p
 DIST_MODEL=$(get_cfg "['distilled_material_model']")
 DIST_ITERS=$(get_cfg "['distillation_n_iterations']")
 DEV_VOL_DIST_ITERS=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('dev_vol_distillation_n_iterations', d.get('distillation_n_iterations', 5000)))" 2>/dev/null || echo "$DIST_ITERS")
-ANISO_DIST_ITERS=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('aniso_distillation_n_iterations', 10000))" 2>/dev/null || echo "10000")
+ANISO_DIST_ITERS=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); val=d.get('aniso_distillation_n_iterations'); print(val if val is not None else '')" 2>/dev/null || echo "")
 DIST_TARGET=$(get_cfg "['distill_target']")
 SAMPLE_MODE=$(get_cfg "['sample_mode']")
 NUM_POINTS=$(get_cfg "['num_points']")
@@ -250,6 +250,25 @@ SOBOL_FACTOR=$(get_cfg "['sobol_samples_factor']")
 SENSITIVITY_FLAG=""
 if [ "$DO_SENSITIVITY" == "0" ] || [ "$DO_SENSITIVITY" == "False" ] || [ "$DO_SENSITIVITY" == "false" ]; then
     SENSITIVITY_FLAG="--no_sensitivity"
+fi
+
+DEV_PARAMS_DISABLED=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); p=d.get('dev_params_disabled', []); print(*p) if isinstance(p, (list, tuple)) else (print(p) if p is not None else print(''))" 2>/dev/null || echo "")
+VOL_PARAMS_DISABLED=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); p=d.get('vol_params_disabled', []); print(*p) if isinstance(p, (list, tuple)) else (print(p) if p is not None else print(''))" 2>/dev/null || echo "")
+ANISO_PARAMS_DISABLED=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); p=d.get('aniso_params_disabled', []); print(*p) if isinstance(p, (list, tuple)) else (print(p) if p is not None else print(''))" 2>/dev/null || echo "")
+
+DEV_PARAMS_DISABLED_ARG=""
+if [ -n "$DEV_PARAMS_DISABLED" ]; then
+    DEV_PARAMS_DISABLED_ARG="--dev_params_disabled $DEV_PARAMS_DISABLED"
+fi
+
+VOL_PARAMS_DISABLED_ARG=""
+if [ -n "$VOL_PARAMS_DISABLED" ]; then
+    VOL_PARAMS_DISABLED_ARG="--vol_params_disabled $VOL_PARAMS_DISABLED"
+fi
+
+ANISO_PARAMS_DISABLED_ARG=""
+if [ -n "$ANISO_PARAMS_DISABLED" ]; then
+    ANISO_PARAMS_DISABLED_ARG="--aniso_params_disabled $ANISO_PARAMS_DISABLED"
 fi
 
 # Validation params
@@ -511,6 +530,7 @@ for SEED in $SEEDS_LIST; do
             --sobol_threshold "$SOBOL_THRESHOLD" \
             --sobol_samples_factor "$SOBOL_FACTOR" \
             --seed "$SEED" \
+            $DEV_PARAMS_DISABLED_ARG \
             $SENSITIVITY_FLAG &
             
         echo "Distilling VOL component into $DISTILL_DIR..."
@@ -528,10 +548,16 @@ for SEED in $SEEDS_LIST; do
             --sobol_threshold "$SOBOL_THRESHOLD" \
             --sobol_samples_factor "$SOBOL_FACTOR" \
             --seed "$SEED" \
+            $VOL_PARAMS_DISABLED_ARG \
             $SENSITIVITY_FLAG &
 
         if [ "$MODEL_MODE" == "anisotropic" ] || [ "$DIST_MODEL" == "gmr_aniso" ]; then
-            echo "Distilling ANISO component into $DISTILL_DIR..."
+            if [ -z "$ANISO_DIST_ITERS" ]; then
+                echo "❌ Error: 'aniso_distillation_n_iterations' is not specified in $CONFIG_YAML!"
+                echo "When running anisotropic extraction/distillation (model_mode: anisotropic or distilled_material_model: gmr_aniso), you must explicitly define 'aniso_distillation_n_iterations'."
+                exit 1
+            fi
+            echo "Distilling ANISO component into $DISTILL_DIR (n_iterations: $ANISO_DIST_ITERS)..."
             python3 distillation/distill_uqmodeldisc.py \
                 --saved_model_dir "$EXTRACT_DIR" \
                 --material_model "$DIST_MODEL" \
@@ -546,6 +572,7 @@ for SEED in $SEEDS_LIST; do
                 --sobol_threshold "$SOBOL_THRESHOLD" \
                 --sobol_samples_factor "$SOBOL_FACTOR" \
                 --seed "$SEED" \
+                $ANISO_PARAMS_DISABLED_ARG \
                 $SENSITIVITY_FLAG &
         fi
             

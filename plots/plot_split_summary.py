@@ -37,19 +37,32 @@ def to_latex(name):
 
 def get_comp_color(name):
     clean = name.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
-    if clean == "C10":
-        return "#0072B2"
-    elif clean == "C01":
-        return "#56B4E9"
-    elif clean == "D1":
-        return "#D55E00"
-    elif clean == "D2":
-        return "#E69F00"
+    dev_palette = {
+        "C10": "#1f77b4",  # deep classic blue
+        "C01": "#4ba3e3",  # sky blue
+        "C20": "#084081",  # dark navy blue
+        "C11": "#009999",  # ocean teal / cyan
+        "C02": "#7bccc4",  # soft aquamarine / light teal
+        "C30": "#2b5c8f",  # slate steel blue
+        "C21": "#41b6c4",  # medium cyan-blue
+        "C12": "#225ea8",  # royal blue
+        "C03": "#a6bddb",  # soft ice blue
+        "E":   "#02818a",  # rich deep teal
+    }
+    vol_palette = {
+        "D1": "#d95f02",   # vivid rust orange
+        "D2": "#fdbb84",   # warm amber / peach
+        "D3": "#7f2704",   # deep dark burnt orange
+    }
+    if clean in dev_palette:
+        return dev_palette[clean]
+    elif clean in vol_palette:
+        return vol_palette[clean]
     elif clean.startswith("C4") or clean.startswith("C6"):
         return "#CC79A7"
     elif clean.startswith("D"):
-        return "#D55E00"
-    return "#0072B2"
+        return "#d95f02"
+    return "#1f77b4"
 
 def get_sensitivities(out_dir, prefix, subdir):
     dfs_tot = []
@@ -625,14 +638,14 @@ def main():
     except Exception:
         pass
 
-    # 2. Unified Parameters & Invariant Sensitivity Figure (Left: Sensitivity + Violin, Right: 3 Invariant Plots)
+    # 2. Unified Parameters & Invariant Sensitivity Figure (Left: Sensitivity + Violin, Right: 3 Invariant Plots + Legend)
     fig_width_params = 7.8
-    h_params = 4.25
+    h_params = 3.5
     fig_params = plt.figure(figsize=(fig_width_params, h_params))
-    gs_master = fig_params.add_gridspec(1, 2, width_ratios=[0.77, 0.23], wspace=0.26, top=0.96, bottom=0.10, left=0.07, right=0.97)
+    gs_master = fig_params.add_gridspec(1, 2, width_ratios=[0.76, 0.24], wspace=0.22, top=0.96, bottom=0.08, left=0.07, right=0.91)
     
-    gs_left = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs_master[0, 0], height_ratios=[1, 1.05], hspace=0.55)
-    gs_right = GridSpecFromSubplotSpec(3, 1, subplot_spec=gs_master[0, 1], hspace=0.38)
+    gs_left = GridSpecFromSubplotSpec(2, 1, subplot_spec=gs_master[0, 0], height_ratios=[1, 1.0], hspace=0.14)
+    gs_right = GridSpecFromSubplotSpec(3, 1, subplot_spec=gs_master[0, 1], hspace=0.22)
     
     ax_sens = fig_params.add_subplot(gs_left[0, 0])
     x_pos = np.arange(len(sorted_params))
@@ -642,12 +655,12 @@ def main():
     for i, p in enumerate(sorted_params):
         clean_p = p.replace('$', '').replace('{', '').replace('}', '').replace('_', '')
         if clean_p in true_params_set:
-            label_gt = "Ground Truth Parameter" if not gt_label_added else ""
+            label_gt = "Ground Truth" if not gt_label_added else ""
             ax_sens.axvspan(i - 0.25, i + 0.25, color='#E0E0E0', alpha=0.8, zorder=1, label=label_gt)
             gt_label_added = True
             
         if clean_p in disabled_params_names:
-            label_dis = "Disabled Parameter" if not disabled_label_added else ""
+            label_dis = "Disabled" if not disabled_label_added else ""
             ax_sens.axvspan(i - 0.4, i + 0.4, color='red', alpha=0.15, zorder=2, label=label_dis)
             disabled_label_added = True
             
@@ -668,60 +681,27 @@ def main():
             ax_sens.bar(x_pos[i], sorted_tot_means[i], width=0.5, color=color, alpha=0.9, zorder=3)
         
     ax_sens.set_yscale('log')
-    ax_sens.set_ylim(bottom=max(1e-5, args.sobol_threshold * 0.1), top=10.0)
+    ax_sens.set_ylim(bottom=max(1e-5, args.sobol_threshold * 0.1), top=12.0)
     ax_sens.axhline(args.sobol_threshold, color='black', linestyle='--', linewidth=1.2, label=f"Threshold ({args.sobol_threshold})")
-    ax_sens.set_ylabel('Sobol Sensitivity', fontsize=7.0)
+    ax_sens.set_ylabel('Sobol Sensitivity', fontsize=6.8, labelpad=2)
     ax_sens.grid(False)
     
     ax_sens.set_xticks(x_pos)
     ax_sens.set_xticklabels([]) # Hide for sensitivity since violin shares it
-    ax_sens.tick_params(axis='y', labelsize=6.0)
-    
-    # Add estimated coverage secondary axis
-    ax2 = ax_sens.twinx()
-    ax2.plot(x_pos, est_coverage_pct, color='black', marker='o', linestyle='-', linewidth=1.2, markersize=3, label="Estimated Coverage (EC)")
-    ax2.set_ylabel('Estimated Coverage (%)', color='black', fontsize=7.0)
-    ax2.set_ylim(0, 105)
-    ax2.set_yticks([0, 20, 40, 60, 80, 100])
-    ax2.tick_params(axis='y', labelcolor='black', labelsize=6.0)
-    ax2.axhline(100, color='black', linestyle='-', linewidth=0.6, alpha=0.5)
-    ax2.axhline(95, color='black', linestyle='-', linewidth=0.6, alpha=0.5)
-    ax2.grid(False)
+    ax_sens.tick_params(axis='y', labelsize=5.8, pad=1)
     
     lines_1, labels_1 = ax_sens.get_legend_handles_labels()
-    lines_2, labels_2 = ax2.get_legend_handles_labels()
-    by_label_sens = dict(zip(labels_1 + labels_2, lines_1 + lines_2))
+    by_label_sens = dict(zip(labels_1, lines_1))
     
-    # Organize legend into 2 clean rows:
-    # Row 1: Ground Truth Parameter, Threshold
-    # Row 2: Sensitivities, Estimated Coverage (EC)
-    import matplotlib.lines as mlines
-    spacer_handle = mlines.Line2D([], [], color='none')
+    # Legend placed inside ax_sens
+    desired_sens_order = ["Ground Truth", f"Threshold ({args.sobol_threshold})", r"$\bar{S}_{\mathrm{T,d}}$", r"$\bar{S}_{\mathrm{T,v}}$", r"$\bar{S}_{\mathrm{T,a}}$", "Disabled"]
+    sens_handles = [by_label_sens[k] for k in desired_sens_order if k in by_label_sens]
+    sens_labels = [k for k in desired_sens_order if k in by_label_sens]
     
-    row1_keys = ["Ground Truth Parameter", f"Threshold ({args.sobol_threshold})", "Disabled Parameter"]
-    row2_keys = [r"$\bar{S}_{\mathrm{T,v}}$", r"$\bar{S}_{\mathrm{T,d}}$", r"$\bar{S}_{\mathrm{T,a}}$", "Estimated Coverage (EC)"]
-    
-    r1_handles = [by_label_sens[k] for k in row1_keys if k in by_label_sens]
-    r1_labels = [k for k in row1_keys if k in by_label_sens]
-    
-    r2_handles = [by_label_sens[k] for k in row2_keys if k in by_label_sens]
-    r2_labels = [k for k in row2_keys if k in by_label_sens]
-    
-    # Pad both rows to 3 items
-    while len(r1_handles) < 3:
-        r1_handles.append(spacer_handle)
-        r1_labels.append("")
-        
-    while len(r2_handles) < 3:
-        r2_handles.append(spacer_handle)
-        r2_labels.append("")
-        
-    ordered_handles = [r1_handles[0], r2_handles[0], r1_handles[1], r2_handles[1], r1_handles[2], r2_handles[2]]
-    ordered_labels = [r1_labels[0], r2_labels[0], r1_labels[1], r2_labels[1], r1_labels[2], r2_labels[2]]
-    
-    ax_sens.legend(ordered_handles, ordered_labels, fontsize=5.5,
-                   loc='upper center', bbox_to_anchor=(0.5, -0.06), ncol=3, frameon=False,
-                   handlelength=1.0, handletextpad=0.3, columnspacing=0.6)
+    ax_sens.legend(sens_handles, sens_labels, fontsize=5.0,
+                   loc='upper right', bbox_to_anchor=(0.98, 0.96), ncol=3, frameon=True,
+                   facecolor='white', framealpha=0.9, edgecolor='#cccccc',
+                   handlelength=1.0, handletextpad=0.25, columnspacing=0.5, borderpad=0.25, labelspacing=0.25)
     
     plt.setp(ax_sens.get_xticklabels(), visible=False)
 
@@ -739,7 +719,12 @@ def main():
         ci_upper = np.percentile(data, 97.5)
         true_val = true_val_dict.get(clean_p, 0.0)
         
-        color = get_comp_color(clean_p)
+        if param_types.get(p) == "dev":
+            color = "#0072B2"
+        elif param_types.get(p) == "vol":
+            color = "#D55E00"
+        else:
+            color = "#CC79A7"
         
         if clean_p in disabled_params_names:
             ax_viol.axvspan(i - 0.4, i + 0.4, color='red', alpha=0.15, zorder=0)
@@ -763,26 +748,30 @@ def main():
             ax_viol.plot([i - 0.35, i + 0.35], [true_val, true_val], color='black', lw=1.2, linestyle='--')
                 
     ax_viol.set_xticks(range(len(sorted_params)))
-    ax_viol.set_xticklabels(sorted_params, fontsize=6.8)
-    ax_viol.set_ylabel('Parameter Value', fontsize=7.0)
+    ax_viol.set_xticklabels(sorted_params, fontsize=6.2)
+    ax_viol.tick_params(axis='x', pad=1)
+    ax_viol.set_ylabel('Parameter Value', fontsize=6.8, labelpad=2)
     ax_viol.set_ylim([0, 2.05])
     ax_viol.set_yticks([0.0, 0.5, 1.0, 1.5, 2.0])
-    ax_viol.tick_params(axis='y', labelsize=6.0)
+    ax_viol.tick_params(axis='y', labelsize=5.8, pad=1)
     ax_viol.grid(False)
 
     viol_legend = [
         mpatches.Patch(color='gray', alpha=0.5, label='Density'),
-        mlines.Line2D([0], [0], color='gray', lw=1.5, label='Mean'),
-        mpatches.Patch(color='gray', alpha=0.1, label='95% CI'),
-        mlines.Line2D([0], [0], color='black', lw=1.2, linestyle='--', label='Ground Truth')
+        mlines.Line2D([0], [0], color='gray', lw=1.3, label='Mean'),
+        mpatches.Patch(color='gray', alpha=0.12, label='95% CI'),
+        mlines.Line2D([0], [0], color='black', lw=1.1, linestyle='--', label='Ground Truth')
     ]
-    ax_viol.legend(handles=viol_legend, loc='upper center', bbox_to_anchor=(0.5, -0.28), ncol=4, fontsize=5.5, frameon=False,
-                   handlelength=1.0, handletextpad=0.2, columnspacing=0.5)
+    ax_viol.legend(handles=viol_legend, loc='upper right', bbox_to_anchor=(0.98, 0.98), ncol=2, fontsize=5.2, frameon=True,
+                   facecolor='white', framealpha=0.85, edgecolor='none',
+                   handlelength=1.0, handletextpad=0.25, columnspacing=0.5, borderpad=0.25, labelspacing=0.25)
 
     # 4. Invariant-dependent Sobol Sensitivity (Right Column: 3 subplots)
     ax_inv1 = fig_params.add_subplot(gs_right[0, 0])
     ax_inv2 = fig_params.add_subplot(gs_right[1, 0])
     ax_inv3 = fig_params.add_subplot(gs_right[2, 0])
+    for ax_sub in [ax_inv1, ax_inv2, ax_inv3]:
+        ax_sub.set_box_aspect(1)
     
     f3x3 = load_f3x3_from_distilled(distilled_dir)
     if f3x3 is not None:
@@ -843,7 +832,7 @@ def main():
             ax_inv3.tick_params(axis='both', which='major', labelsize=5.5, pad=1)
             ax_inv3.grid(False)
 
-            # Unified bottom legend for invariant plots
+            # Unified right-side column legend for invariant plots
             all_inv_active = list(dict.fromkeys(active_dev_inv + active_vol_inv))
             inv_handles = []
             inv_labels = []
@@ -852,8 +841,130 @@ def main():
                 inv_handles.append(mlines.Line2D([], [], color=col, marker='o', linestyle='none', markersize=4))
                 inv_labels.append(to_latex(p))
 
-            ax_inv3.legend(handles=inv_handles, labels=inv_labels, loc='upper center', bbox_to_anchor=(0.5, -0.42),
-                           ncol=len(inv_handles), fontsize=6.0, frameon=False, handletextpad=0.2, columnspacing=0.5)
+            ax_inv2.legend(handles=inv_handles, labels=inv_labels, loc='center left', bbox_to_anchor=(1.05, 0.5),
+                           ncol=1, fontsize=6.2, frameon=False, handletextpad=0.2, labelspacing=0.5)
+
+            # --- Also generate a clean, standalone 1x3 horizontal publication figure for Invariant Sensitivities ---
+            fig_inv_horiz, axes_inv_h = plt.subplots(1, 3, figsize=(6.8, 2.3), constrained_layout=True)
+            for ax_h in axes_inv_h:
+                ax_h.set_box_aspect(1)
+                ax_h.grid(False)
+                ax_h.set_ylim(-0.05, 1.05)
+                ax_h.set_yticks([0.0, 0.5, 1.0])
+                ax_h.tick_params(axis='both', which='major', labelsize=7.0, pad=1)
+
+            for p in active_dev_inv:
+                col = get_comp_color(p)
+                axes_inv_h[0].scatter(I1_bar, df_dev_inv[p].values, color=col, alpha=0.65, s=10, edgecolors='none')
+                axes_inv_h[1].scatter(I2_bar, df_dev_inv[p].values, color=col, alpha=0.65, s=10, edgecolors='none')
+            for p in active_vol_inv:
+                col = get_comp_color(p)
+                axes_inv_h[2].scatter(J, df_vol_inv[p].values, color=col, alpha=0.65, s=10, edgecolors='none')
+
+            axes_inv_h[0].set_xlabel(r"$\bar{I}_1$", fontsize=8.5, labelpad=2)
+            axes_inv_h[0].set_ylabel(r"$S_{\mathrm{T,d}}$", fontsize=8.5, labelpad=2)
+            axes_inv_h[1].set_xlabel(r"$\bar{I}_2$", fontsize=8.5, labelpad=2)
+            axes_inv_h[1].set_ylabel(r"$S_{\mathrm{T,d}}$", fontsize=8.5, labelpad=2)
+            axes_inv_h[2].set_xlabel(r"$J$", fontsize=8.5, labelpad=2)
+            axes_inv_h[2].set_ylabel(r"$S_{\mathrm{T,v}}$", fontsize=8.5, labelpad=2)
+
+            inv_h_handles = []
+            inv_h_labels = []
+            for p in all_inv_active:
+                col = get_comp_color(p)
+                inv_h_handles.append(mlines.Line2D([], [], color=col, marker='o', linestyle='none', markersize=5))
+                inv_h_labels.append(to_latex(p))
+
+            fig_inv_horiz.legend(handles=inv_h_handles, labels=inv_h_labels, loc='lower center',
+                                 bbox_to_anchor=(0.5, -0.12), ncol=len(all_inv_active),
+                                 fontsize=7.5, frameon=False, handletextpad=0.2, columnspacing=1.0)
+
+            fig_inv_horiz.savefig(os.path.join(distilled_dir, f"invariant_sensitivities_{true_model_name}.pdf"), dpi=300, bbox_inches='tight')
+            fig_inv_horiz.savefig(os.path.join(distilled_dir, f"invariant_sensitivities_{true_model_name}.png"), dpi=300, bbox_inches='tight')
+            plt.close(fig_inv_horiz)
+
+    # Also generate a clean, standalone 2-row publication figure for Discovery & Violins only (without right column)
+    fig_standalone_params, (ax_s_sens, ax_s_viol) = plt.subplots(2, 1, figsize=(5.8, 3.4), sharex=True,
+                                                                  gridspec_kw={'height_ratios': [1, 1.0], 'hspace': 0.12})
+    
+    # Clone ax_sens bars into ax_s_sens
+    gt_label_added = False
+    disabled_label_added = False
+    for i, p in enumerate(sorted_params):
+        clean_p = p.replace('$', '').replace('{', '').replace('}', '').replace('_', '')
+        if clean_p in true_params_set:
+            label_gt = "Ground Truth" if not gt_label_added else ""
+            ax_s_sens.axvspan(i - 0.25, i + 0.25, color='#E0E0E0', alpha=0.8, zorder=1, label=label_gt)
+            gt_label_added = True
+        if clean_p in disabled_params_names:
+            label_dis = "Disabled" if not disabled_label_added else ""
+            ax_s_sens.axvspan(i - 0.4, i + 0.4, color='red', alpha=0.15, zorder=2, label=label_dis)
+            disabled_label_added = True
+        color = "#0072B2" if param_types.get(p) == "dev" else ("#D55E00" if param_types.get(p) == "vol" else "#CC79A7")
+        label = r"$\bar{S}_{\mathrm{T,d}}$" if param_types.get(p) == "dev" else (r"$\bar{S}_{\mathrm{T,v}}$" if param_types.get(p) == "vol" else r"$\bar{S}_{\mathrm{T,a}}$")
+        h_list, l_list = ax_s_sens.get_legend_handles_labels()
+        if label not in l_list:
+            ax_s_sens.bar(x_pos[i], sorted_tot_means[i], width=0.5, color=color, alpha=0.9, zorder=3, label=label)
+        else:
+            ax_s_sens.bar(x_pos[i], sorted_tot_means[i], width=0.5, color=color, alpha=0.9, zorder=3)
+            
+    ax_s_sens.set_yscale('log')
+    ax_s_sens.set_ylim(bottom=max(1e-5, args.sobol_threshold * 0.1), top=12.0)
+    ax_s_sens.axhline(args.sobol_threshold, color='black', linestyle='--', linewidth=1.2, label=f"Threshold ({args.sobol_threshold})")
+    ax_s_sens.set_ylabel('Sobol Sensitivity', fontsize=7.5, labelpad=2)
+    ax_s_sens.grid(False)
+    ax_s_sens.tick_params(axis='y', labelsize=6.8, pad=1)
+    
+    l1_s, lab1_s = ax_s_sens.get_legend_handles_labels()
+    by_label_s = dict(zip(lab1_s, l1_s))
+    order_s = ["Ground Truth", f"Threshold ({args.sobol_threshold})", r"$\bar{S}_{\mathrm{T,d}}$", r"$\bar{S}_{\mathrm{T,v}}$", r"$\bar{S}_{\mathrm{T,a}}$", "Disabled"]
+    ax_s_sens.legend([by_label_s[k] for k in order_s if k in by_label_s],
+                     [k for k in order_s if k in by_label_s], fontsize=5.8,
+                     loc='upper right', bbox_to_anchor=(0.98, 0.96), ncol=3, frameon=True,
+                     facecolor='white', framealpha=0.9, edgecolor='#cccccc',
+                     handlelength=1.0, handletextpad=0.25, columnspacing=0.6, borderpad=0.25, labelspacing=0.25)
+    plt.setp(ax_s_sens.get_xticklabels(), visible=False)
+
+    # Clone violins into ax_s_viol
+    for i, p in enumerate(sorted_params):
+        clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+        is_active = sorted_tot_means[i] > args.sobol_threshold
+        is_true = clean_p in true_params_set
+        data = df[clean_p].values
+        mean_val = np.mean(data)
+        ci_lower = np.percentile(data, 2.5)
+        ci_upper = np.percentile(data, 97.5)
+        true_val = true_val_dict.get(clean_p, 0.0)
+        color = "#0072B2" if param_types.get(p) == "dev" else ("#D55E00" if param_types.get(p) == "vol" else "#CC79A7")
+
+        if is_active:
+            ax_s_viol.axvspan(i - 0.35, i + 0.35, ymin=ci_lower/2.05, ymax=ci_upper/2.05, color=color, alpha=0.15, edgecolor='none')
+            counts, bin_edges = np.histogram(data, bins=25)
+            if np.max(counts) > 0:
+                counts = counts / np.max(counts) * 0.4
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+            b_height = bin_edges[1] - bin_edges[0]
+            ax_s_viol.barh(bin_centers, counts, height=b_height, left=i - counts/2, color=color, alpha=0.5, edgecolor='none')
+            ax_s_viol.plot([i - 0.35, i + 0.35], [mean_val, mean_val], color=color, lw=1.5)
+        if is_true:
+            ax_s_viol.plot([i - 0.35, i + 0.35], [true_val, true_val], color='black', lw=1.2, linestyle='--')
+
+    ax_s_viol.set_xticks(range(len(sorted_params)))
+    ax_s_viol.set_xticklabels(sorted_params, fontsize=7.2)
+    ax_s_viol.tick_params(axis='x', pad=1)
+    ax_s_viol.set_ylabel('Parameter Value', fontsize=7.5, labelpad=2)
+    ax_s_viol.set_ylim([0, 2.05])
+    ax_s_viol.set_yticks([0.0, 0.5, 1.0, 1.5, 2.0])
+    ax_s_viol.tick_params(axis='y', labelsize=6.8, pad=1)
+    ax_s_viol.grid(False)
+    ax_s_viol.legend(handles=viol_legend, loc='upper right', bbox_to_anchor=(0.98, 0.98), ncol=2, fontsize=6.0, frameon=True,
+                     facecolor='white', framealpha=0.85, edgecolor='none',
+                     handlelength=1.0, handletextpad=0.25, columnspacing=0.6, borderpad=0.25, labelspacing=0.25)
+
+    fig_standalone_params.tight_layout()
+    fig_standalone_params.savefig(os.path.join(distilled_dir, f"parameter_identification_{true_model_name}.pdf"), dpi=300, bbox_inches='tight')
+    fig_standalone_params.savefig(os.path.join(distilled_dir, f"parameter_identification_{true_model_name}.png"), dpi=300, bbox_inches='tight')
+    plt.close(fig_standalone_params)
     
     fig_params.savefig(os.path.join(distilled_dir, f"split_params_{true_model_name}.pdf"), dpi=300, bbox_inches='tight')
     fig_params.savefig(os.path.join(distilled_dir, f"split_params_{true_model_name}.png"), dpi=300, bbox_inches='tight')
