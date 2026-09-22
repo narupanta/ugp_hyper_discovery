@@ -38,6 +38,7 @@ class HyperelasticGPTrainer:
                 "pos_var_mean": 1,
                 "augmented_var_dist": 1,
                 "normalize_ell": getattr(self.model, "normalize_ell", 0),
+                "constraint_lengthscale": getattr(self.model, "constraint_lengthscale", 1),
                 "vfm_mode": vfm_mode
             }
             if seed is not None:

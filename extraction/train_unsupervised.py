@@ -90,6 +90,8 @@ def parse_args():
                         help="Stress state assumption: 'plane_strain' or 'plane_stress'. If None, loaded from recipe or dataset.")
     parser.add_argument('--control_mode', type=str, default=None, choices=["force", "displacement"],
                         help="Control mode: 'force' or 'displacement'. If None, loaded from recipe or dataset.")
+    parser.add_argument('--constraint_lengthscale', type=int, default=None, choices=[0, 1],
+                        help="Whether to constrain lengthscales to domain bounds (1) or unconstrained softplus (0, allows ARD pruning). If None, loaded from recipe or defaults to 1.")
     return parser.parse_args()
 
 def sigma_fix_to_log_sigma_fix(sigma_fix) :
@@ -255,8 +257,20 @@ if __name__ == "__main__" :
     stress_mode = (args.stress_mode or dataset_stress or rec.get("stress_mode", "plane_strain"))
     stress_mode = str(stress_mode).lower()
 
+    # Resolve constraint_lengthscale (default: 1 for backward compatibility)
+    constraint_lengthscale = args.constraint_lengthscale
+    if constraint_lengthscale is None:
+        rec_cl = rec.get("constraint_lengthscale", None)
+        if rec_cl is not None:
+            constraint_lengthscale = int(rec_cl)
+        else:
+            constraint_lengthscale = 1
+    else:
+        constraint_lengthscale = int(constraint_lengthscale)
+
     config_dict["control_mode"] = control_mode
     config_dict["stress_mode"] = stress_mode
+    config_dict["constraint_lengthscale"] = constraint_lengthscale
     with open(os.path.join(save_path, "config.json"), "w") as f:
         json.dump(config_dict, f, indent=4)
     with open(os.path.join(save_path, "config.yaml"), "w") as f:
@@ -564,7 +578,8 @@ if __name__ == "__main__" :
         covariance_mode=args.covariance_mode,
         normalize_ell=args.normalize_ell,
         u_var_anchor=args.u_var_anchor,
-        kzz_jitter=args.kzz_jitter
+        kzz_jitter=args.kzz_jitter,
+        constraint_lengthscale=constraint_lengthscale
     )
 
 
@@ -600,7 +615,8 @@ if __name__ == "__main__" :
                 covariance_mode=args.covariance_mode,
                 normalize_ell=args.normalize_ell,
                 u_var_anchor=args.u_var_anchor,
-                kzz_jitter=args.kzz_jitter
+                kzz_jitter=args.kzz_jitter,
+                constraint_lengthscale=constraint_lengthscale
             )
         else:
             local_model = model
@@ -674,7 +690,8 @@ if __name__ == "__main__" :
         covariance_mode=args.covariance_mode,
         normalize_ell=args.normalize_ell,
         u_var_anchor=args.u_var_anchor,
-        kzz_jitter=args.kzz_jitter
+        kzz_jitter=args.kzz_jitter,
+        constraint_lengthscale=constraint_lengthscale
     )
     F_train_full_3x3 = jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
     

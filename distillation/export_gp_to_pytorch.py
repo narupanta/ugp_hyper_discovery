@@ -90,11 +90,14 @@ def main():
             a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
             feature_extractor = AnisotropicFeatureExtractor(a0)
         
+    constraint_lengthscale = meta_dict.get("constraint_lengthscale", 1)
+
     gp_model = SparseHyperelasticityGP(
         gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
         beta=1.0, feature_extractor=feature_extractor,
         aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,
-        covariance_mode=cov_mode
+        covariance_mode=cov_mode,
+        constraint_lengthscale=constraint_lengthscale
     )
 
     

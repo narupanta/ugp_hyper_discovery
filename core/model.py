@@ -24,7 +24,8 @@ class SparseHyperelasticityGP:
                  beta: float = 1.0, L: int = 200, feature_extractor: Optional[FeatureExtractor] = None,
                  min_aniso: Optional[jnp.ndarray] = None, max_aniso: Optional[jnp.ndarray] = None, aniso_z: Optional[jnp.ndarray] = None,
                  covariance_mode: str = "diag", normalize_ell: int = 0,
-                 u_var_anchor: float = 1e-12, kzz_jitter: float = 1e-8, **kwargs):
+                 u_var_anchor: float = 1e-12, kzz_jitter: float = 1e-8,
+                 constraint_lengthscale: int = 1, **kwargs):
         self.feature_extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
         # 1. Inducing points split
         self.dev_z = jnp.asarray(I_z[:, :2], dtype=jnp.float64)
@@ -52,6 +53,7 @@ class SparseHyperelasticityGP:
         self.normalize_ell = int(normalize_ell)
         self.u_var_anchor = float(u_var_anchor)
         self.kzz_jitter = float(kzz_jitter)
+        self.constraint_lengthscale = int(constraint_lengthscale)
         
         # 2. Setup Parameters and Weights
         self.params: GPParams = self.load_params(raw_params)
@@ -130,7 +132,7 @@ class SparseHyperelasticityGP:
             else:
                 aniso_u_var = aniso_var.at[0].set(self.u_var_anchor)
             
-            if "full" not in self.covariance_mode:
+            if "full" not in self.covariance_mode and self.constraint_lengthscale:
                 aniso_ls_val = to_f64(self.max_aniso.mean() * 2 * jax.nn.sigmoid(p.raw_aniso_ls))
             else:
                 aniso_ls_val = to_f64(jax.nn.softplus(p.raw_aniso_ls))
@@ -147,7 +149,7 @@ class SparseHyperelasticityGP:
             if getattr(p, "raw_aniso_theta_var", None) is not None:
                 kwargs["aniso_theta_var"] = to_f64(jax.nn.softplus(p.raw_aniso_theta_var) + 1e-6)
 
-        if "full" not in self.covariance_mode:
+        if "full" not in self.covariance_mode and self.constraint_lengthscale:
             dev_ls_val = to_f64(self.max_dev.mean() * 2 * jax.nn.sigmoid(p.raw_dev_ls))
             vol_ls_val = to_f64(self.max_vol * 2 * jax.nn.sigmoid(p.raw_vol_ls))
         else:

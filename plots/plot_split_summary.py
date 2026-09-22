@@ -220,15 +220,19 @@ def main():
     import json
     metadata_path = os.path.join(saved_model_dir, "metadata.json")
     cov_mode = "diag"
+    constraint_lengthscale = 1
     if os.path.exists(metadata_path):
         with open(metadata_path, "r") as f:
-            cov_mode = json.load(f).get("covariance_mode", "diag")
+            _meta = json.load(f)
+            cov_mode = _meta.get("covariance_mode", "diag")
+            constraint_lengthscale = _meta.get("constraint_lengthscale", 1)
             
     learned_gp = SparseHyperelasticityGP(
         gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
         beta=1.0, feature_extractor=feature_extractor,
         aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,
-        covariance_mode=cov_mode
+        covariance_mode=cov_mode,
+        constraint_lengthscale=constraint_lengthscale
     )
     
     # Generate Data

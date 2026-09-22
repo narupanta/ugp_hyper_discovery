@@ -82,7 +82,8 @@ def load_component_params(
     covariance_mode: str = "diag",
     max_val: Optional[jnp.ndarray] = None,
     u_var_anchor: float = 1e-12,
-    is_dev: bool = False
+    is_dev: bool = False,
+    constraint_lengthscale: bool = True
 ) -> ComponentParams:
     """
     Applies physical positivity and structural anchor constraints to unconstrained raw parameters.
@@ -109,7 +110,7 @@ def load_component_params(
         u_var = to_f64(jax.nn.softplus(raw_u_var)).at[0].set(u_var_anchor)
 
     # Lengthscale & signal variance
-    if "full" not in covariance_mode and max_val is not None:
+    if "full" not in covariance_mode and max_val is not None and constraint_lengthscale:
         ls = to_f64(jnp.mean(max_val) * 2.0 * jax.nn.sigmoid(raw_ls))
     else:
         ls = to_f64(jax.nn.softplus(raw_ls))

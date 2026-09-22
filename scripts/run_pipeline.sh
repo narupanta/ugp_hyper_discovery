@@ -232,6 +232,7 @@ VFM_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); prin
 VF_ORDER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vf_order', 2))" 2>/dev/null || echo "2")
 CONTROL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('control_mode', 'force'))" 2>/dev/null || echo "force")
 STRESS_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('stress_mode', d.get('stress_modes', 'plane_strain')))" 2>/dev/null || echo "plane_strain")
+CONSTRAINT_LENGTHSCALE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(int(d.get('constraint_lengthscale', 1)))" 2>/dev/null || echo "1")
 CLAMP_TOP_X=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(1 if d.get('clamp_top_x', True) else 0)" 2>/dev/null || echo "1")
 
 # Distillation params
@@ -468,6 +469,7 @@ for SEED in $SEEDS_LIST; do
                 --vf_order "$VF_ORDER" \
                 --control_mode "$CONTROL_MODE" \
                 --stress_mode "$STRESS_MODE" \
+                --constraint_lengthscale "$CONSTRAINT_LENGTHSCALE" \
                 --seed "$SEED" \
                 --batch_dir "$EXTRACT_DIR" \
                 $MAT_EXTRA_ARGS
