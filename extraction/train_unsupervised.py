@@ -92,6 +92,8 @@ def parse_args():
                         help="Control mode: 'force' or 'displacement'. If None, loaded from recipe or dataset.")
     parser.add_argument('--constraint_lengthscale', type=int, default=None, choices=[0, 1],
                         help="Whether to constrain lengthscales to domain bounds (1) or unconstrained softplus (0, allows ARD pruning). If None, loaded from recipe or defaults to 1.")
+    parser.add_argument('--reaction_loss_weight', type=str, default=None,
+                        help="Scaling coefficient for reaction loss (fix_x, fix_y). Can be a float (e.g. '1.0'), or 'auto' / 'ratio' to scale by #free_nodes / #boundary_nodes. If None, loaded from recipe or defaults to 1.0.")
     return parser.parse_args()
 
 def sigma_fix_to_log_sigma_fix(sigma_fix) :
@@ -268,21 +270,45 @@ if __name__ == "__main__" :
     else:
         constraint_lengthscale = int(constraint_lengthscale)
 
-    config_dict["control_mode"] = control_mode
-    config_dict["stress_mode"] = stress_mode
-    config_dict["constraint_lengthscale"] = constraint_lengthscale
-    with open(os.path.join(save_path, "config.json"), "w") as f:
-        json.dump(config_dict, f, indent=4)
-    with open(os.path.join(save_path, "config.yaml"), "w") as f:
-        yaml.dump(config_dict, f, default_flow_style=False)
-
-    print(f"[CONFIGURATION] Active Control Mode: '{control_mode}', Stress State: '{stress_mode}'.")
-
     f2x2 = prep_data["F"][train_load_steps_indices]
     cells = prep_data["cells"]
     node_type = np.asarray(prep_data["node_type"])
     mesh_pos = np.asarray(prep_data["mesh_pos"])
     print(f"[DATASET] Dataset successfully loaded: {cells.shape[0]} elements, {node_type.shape[0]} nodes, {prep_data['F'].shape[0]} total load steps.") 
+
+    # Resolve reaction_loss_weight (#free_nodes / #boundary_nodes or custom scalar)
+    rlw_input = args.reaction_loss_weight if args.reaction_loss_weight is not None else rec.get("reaction_loss_weight", rec.get("reaction_loss_scale", 1.0))
+    if str(rlw_input).lower() in ["auto", "ratio", "scale", "node_ratio", "true"]:
+        # Compute ratio: #free_nodes / #boundary_nodes
+        is_fix_x = (node_type[:, 1] == 1)
+        is_fix_y = (node_type[:, 2] == 1)
+        is_loaded_x = (node_type[:, 3] == 1)
+        is_loaded_y = (node_type[:, 4] == 1)
+        if control_mode == "displacement":
+            is_boundary = (is_fix_x | is_fix_y | is_loaded_x | is_loaded_y)
+        else:
+            is_boundary = (is_fix_x | is_fix_y | (node_type[:, 3] == 1) | (node_type[:, 4] == 1))
+        n_boundary = int(np.sum(is_boundary))
+        n_free = int(np.sum(~is_boundary))
+        reaction_loss_weight = float(n_free) / float(max(n_boundary, 1))
+        print(f"[CONFIGURATION] Auto reaction loss scaling enabled: #free_nodes={n_free}, #boundary_nodes={n_boundary} -> coeff = {reaction_loss_weight:.4f}")
+    else:
+        try:
+            reaction_loss_weight = float(rlw_input)
+        except (ValueError, TypeError):
+            reaction_loss_weight = 1.0
+        print(f"[CONFIGURATION] Reaction loss weight coefficient: {reaction_loss_weight}")
+
+    config_dict["control_mode"] = control_mode
+    config_dict["stress_mode"] = stress_mode
+    config_dict["constraint_lengthscale"] = constraint_lengthscale
+    config_dict["reaction_loss_weight"] = reaction_loss_weight
+    with open(os.path.join(save_path, "config.json"), "w") as f:
+        json.dump(config_dict, f, indent=4)
+    with open(os.path.join(save_path, "config.yaml"), "w") as f:
+        yaml.dump(config_dict, f, default_flow_style=False)
+
+    print(f"[CONFIGURATION] Active Control Mode: '{control_mode}', Stress State: '{stress_mode}'.") 
 
     mat_kwargs = {}
     if args.angles is not None: mat_kwargs["angles"] = args.angles
@@ -645,7 +671,8 @@ if __name__ == "__main__" :
             p, local_model, f3x3, cells, cells.max() + 1, f_neu_nodes, node_type, dNdX, dA,
             k_loss, number_of_mci_sampling, args.normalize_ell,
             vfm_mode=args.vfm_mode, V_basis=V_basis,
-            control_mode=control_mode, loads=loads_train
+            control_mode=control_mode, loads=loads_train,
+            reaction_loss_weight=reaction_loss_weight
         )
 
     if args.final_learning_rate is not None and args.final_learning_rate != learning_rate:
