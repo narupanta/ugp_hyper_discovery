@@ -51,8 +51,8 @@ def find_seed_dirs(exp_dir):
 def load_seed_metrics(seed_path):
     """Locate and load validation_metrics.json for a given seed directory."""
     candidates = [
-        os.path.join(seed_path, "fem_validation", "validation_metrics.json"),
         os.path.join(seed_path, "distilled", "validation_metrics.json"),
+        os.path.join(seed_path, "fem_validation", "validation_metrics.json"),
         os.path.join(seed_path, "validation_metrics.json"),
     ]
     data = None
@@ -84,7 +84,7 @@ def load_seed_metrics(seed_path):
 
     if data is not None:
         # Load reaction force metrics if available
-        for geom in ["block", "holes"]:
+        for geom in ["block", "holes", "ttc"]:
             for cand_rf in [
                 os.path.join(seed_path, "fem_validation", geom, f"reaction_force_metrics_{geom}.json"),
                 os.path.join(seed_path, "fem_validation", f"reaction_force_metrics_{geom}.json"),
@@ -106,15 +106,16 @@ def load_seed_metrics(seed_path):
 
 def rank_seeds(seed_data_list):
     """
-    Rank seeds primarily by Block geometry FEM metrics:
-    1. Higher Block R2 (norm)
-    2. Lower Block RMSE (norm)
+    Rank seeds primarily by Block or TTC geometry FEM metrics:
+    1. Higher R2 (norm)
+    2. Lower RMSE (norm)
     3. Closeness of Coverage to 95%
     """
     def score_seed(item):
-        m = item["metrics"]
-        disp_b = m.get("disp", {}).get("block", {})
-        norm_b = disp_b.get("norm", {})
+        m = item.get("metrics", {})
+        disp_dict = m.get("disp", {}) if isinstance(m, dict) else {}
+        disp_b = (disp_dict.get("block") or disp_dict.get("ttc") or disp_dict.get("holes") or {}) if isinstance(disp_dict, dict) else {}
+        norm_b = disp_b.get("norm", {}) if isinstance(disp_b, dict) else {}
         
         r2 = norm_b.get("r2", -999.0)
         rmse = norm_b.get("rmse", 999.0)
@@ -182,7 +183,7 @@ def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
                 shutil.copyfile(cand, os.path.join(plots_dir, f"sobol_total_order_vs_invariants.{ext}"))
                 break
 
-    # 2. FEM Validation plots for block and holes
+    # 2. FEM Validation plots for block, holes, and ttc
     geom_sources = [
         ("block", [
             os.path.join(fem_p, "block"),
@@ -193,6 +194,11 @@ def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
             os.path.join(fem_p, "holes"),
             os.path.join(fem_p, "fem_validation_holes"),
             os.path.join(distilled_p, "fem_validation_holes"),
+        ]),
+        ("ttc", [
+            os.path.join(fem_p, "ttc"),
+            os.path.join(fem_p),
+            os.path.join(distilled_p, "fem_validation", "ttc"),
         ]),
     ]
 
@@ -271,16 +277,26 @@ def generate_accuracy_comparison_plot(ranked_seeds, exp_dir):
     seeds_num = [s["seed"] for s in ranked_seeds]
     ranks = [s["rank"] for s in ranked_seeds]
 
-    disp_block_r2 = [
-        s["metrics"].get("disp", {}).get("block", {}).get("norm", {}).get("r2", 0.0)
-        for s in ranked_seeds
-    ]
-    disp_holes_r2 = [
-        s["metrics"].get("disp", {}).get("holes", {}).get("norm", {}).get("r2", 0.0)
-        for s in ranked_seeds
-    ]
+    disp_block_r2 = []
+    disp_holes_r2 = []
+    is_ttc_exp = False
+    for s in ranked_seeds:
+        m_disp = s["metrics"].get("disp", {}) if isinstance(s.get("metrics"), dict) else {}
+        if m_disp.get("block"):
+            disp_block_r2.append(m_disp["block"].get("norm", {}).get("r2", 0.0))
+        elif m_disp.get("ttc"):
+            disp_block_r2.append(m_disp["ttc"].get("norm", {}).get("r2", 0.0))
+            is_ttc_exp = True
+        else:
+            disp_block_r2.append(0.0)
+
+        if m_disp.get("holes"):
+            disp_holes_r2.append(m_disp["holes"].get("norm", {}).get("r2", 0.0))
+        else:
+            disp_holes_r2.append(0.0)
+
     sef_r2 = [
-        s["metrics"].get("sef", {}).get("dist", {}).get("total", {}).get("r2", 0.0)
+        (s["metrics"].get("sef", {}).get("dist", {}).get("total", {}) if isinstance(s.get("metrics"), dict) else {}).get("r2", 0.0)
         for s in ranked_seeds
     ]
 
@@ -289,8 +305,10 @@ def generate_accuracy_comparison_plot(ranked_seeds, exp_dir):
 
     fig, ax = plt.subplots(figsize=(max(8, len(seeds_num) * 1.2), 4.8))
 
-    ax.bar(x - width, disp_block_r2, width, label="Train Disp $R^2$ (Block)", color=MODE_COLORS.get("UT", "#1f77b4"), alpha=0.9)
-    ax.bar(x, disp_holes_r2, width, label="Val Disp $R^2$ (Holes)", color=MODE_COLORS.get("PS", "#2ca02c"), alpha=0.9)
+    train_label = "Train Disp $R^2$ (TTC)" if is_ttc_exp else "Train Disp $R^2$ (Block)"
+    ax.bar(x - width, disp_block_r2, width, label=train_label, color=MODE_COLORS.get("UT", "#1f77b4"), alpha=0.9)
+    if any(v > 0 for v in disp_holes_r2):
+        ax.bar(x, disp_holes_r2, width, label="Val Disp $R^2$ (Holes)", color=MODE_COLORS.get("PS", "#2ca02c"), alpha=0.9)
     ax.bar(x + width, sef_r2, width, label="SEF $R^2$ (Distilled)", color=COMPONENT_COLORS.get("dev", "#ff7f0e"), alpha=0.9)
 
     ax.set_xticks(x)
@@ -569,7 +587,10 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
         for k in keys:
             if not isinstance(cur, dict):
                 return None
-            cur = cur.get(k)
+            next_cur = cur.get(k)
+            if next_cur is None and k == "block" and "ttc" in cur:
+                next_cur = cur.get("ttc")
+            cur = next_cur
         if cur is None:
             return None
         if isinstance(cur, str):
@@ -617,6 +638,9 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
             ("Distilled $\\Psi$ $R^2$", r"Distilled $\Psi$ $R^2$", ("sef", "dist", "total", "r2"), 4, False),
         ]),
         ("Displacement Field Metrics (FEM)", [
+            ("Disp RMSE (TTC)", "Disp RMSE (TTC)", ("disp", "ttc", "norm", "rmse"), 4, False),
+            ("Disp EC (%) (TTC)", r"Disp EC (\%) (TTC)", ("disp", "ttc", "coverage_xy"), 2, True),
+            ("Disp $R^2$ (TTC)", r"Disp $R^2$ (TTC)", ("disp", "ttc", "norm", "r2"), 4, False),
             ("Disp RMSE (Holes)", "Disp RMSE (Holes)", ("disp", "holes", "norm", "rmse"), 4, False),
             ("Disp EC (%) (Holes)", r"Disp EC (\%) (Holes)", ("disp", "holes", "coverage_xy"), 2, True),
             ("Disp $R^2$ (Holes)", r"Disp $R^2$ (Holes)", ("disp", "holes", "norm", "r2"), 4, False),
@@ -625,6 +649,8 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
             ("Disp $R^2$ (Block)", r"Disp $R^2$ (Block)", ("disp", "block", "norm", "r2"), 4, False),
         ]),
         ("Conformal Calibration & Variance Budget", [
+            ("Disp $Q_{0.95}$ (Calibrated on TTC)", r"Disp $Q_{0.95}$ (TTC)", ("conformal", "ttc", "q_disp"), 3, False),
+            ("Calibrated Disp EC (%) (TTC)", r"Calib Disp EC (\%) (TTC)", ("conformal", "ttc", "calibrated_coverage_xy"), 2, True),
             ("Disp $Q_{0.95}$ (Calibrated on Block)", r"Disp $Q_{0.95}$", ("conformal", "block", "q_disp"), 3, False),
             ("Calibrated Disp EC (%) (Block)", r"Calib Disp EC (\%) (Block)", ("conformal", "block", "calibrated_coverage_xy"), 2, True),
             ("Calibrated Disp EC (%) (Holes Transfer)", r"Calib Disp EC (\%) (Holes)", ("conformal", "holes", "calibrated_coverage_xy"), 2, True),

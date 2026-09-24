@@ -685,12 +685,24 @@ if __name__ == "__main__" :
     else:
         u_pred_piola_traction_samples = None
 
-    targets = np.array([
-        [0.0707, 0.0707],
-        [0.25, 0.75],
-        [0.6, 0.4],
-        [1, 1]
-    ])
+    is_ttc = (pred_dir_name.name.lower() == "ttc") or ("ttc" in pred_dir_name.parts)
+    is_holes = (pred_dir_name.name.lower() == "holes") or ("holes" in pred_dir_name.parts)
+    is_block = (not is_holes) and (not is_ttc)
+
+    if is_ttc:
+        targets = np.array([
+            [-80.0, 0.0],
+            [-56.0, 0.0],
+            [-56.0, 15.0],
+            [-30.0, 0.0]
+        ])
+    else:
+        targets = np.array([
+            [0.0707, 0.0707],
+            [0.25, 0.75],
+            [0.6, 0.4],
+            [1, 1]
+        ])
     node_indices = []
     for target in targets:
         dist = np.linalg.norm(mesh_node_coords - target, axis=1)
@@ -760,9 +772,6 @@ if __name__ == "__main__" :
     if cfg_val_steps is None:
         cfg_val_steps = [s for s in [1, 3, 5, 7] if s < max_steps_avail]
 
-    is_holes = (pred_dir_name.name.lower() == "holes") or ("holes" in pred_dir_name.parts)
-    is_block = not is_holes
-    
     conformal_info_file = pred_dir_name.parent / "block" / "conformal_calibration_metrics.json"
     if not conformal_info_file.exists():
         conformal_info_file = pred_dir_name / "conformal_calibration_metrics.json"
@@ -770,9 +779,10 @@ if __name__ == "__main__" :
     q_disp = 1.0
     disp_budget = None
 
-    if is_block:
-        # Calibrate conformal scale Q on block validation steps
-        print(f"[Conformal] Calibrating displacement scale on Block validation steps: {cfg_val_steps}")
+    if is_block or is_ttc:
+        geom_name_disp = "TTC" if is_ttc else "Block"
+        # Calibrate conformal scale Q on block/ttc validation steps
+        print(f"[Conformal] Calibrating displacement scale on {geom_name_disp} validation steps: {cfg_val_steps}")
         u_val_true = ref_u_all[cfg_val_steps] # (n_val, n_nodes, 2)
         if consolidated_data is not None:
             u_val_pred = consolidated_data["u_pred"][:, cfg_val_steps] # (n_samples, n_val, n_nodes, 2)
@@ -824,7 +834,7 @@ if __name__ == "__main__" :
 
         # Save calibration metrics
         calib_data = {
-            "geometry": "block",
+            "geometry": "ttc" if is_ttc else "block",
             "val_steps": cfg_val_steps,
             "q_disp": q_disp,
             "variance_budget": disp_budget
@@ -878,31 +888,24 @@ if __name__ == "__main__" :
 
     # Calculate and log calibrated coverage
     calib_cov_xy = float(compute_empirical_coverage(u_true_val_flat, u_p_conf_lower, u_p_conf_upper))
-    print(f"[Conformal] Calibrated Test Coverage ({'Block' if is_block else 'Holes'}): {calib_cov_xy:.2f}% (Q = {q_disp:.4f})")
+    geom_name_str = "TTC" if is_ttc else ("Block" if is_block else "Holes")
+    print(f"[Conformal] Calibrated Test Coverage ({geom_name_str}): {calib_cov_xy:.2f}% (Q = {q_disp:.4f})")
 
-    # Update validation_metrics.json with conformal metrics
-    val_metrics_file = save_path / "validation_metrics.json"
-    if not val_metrics_file.exists() and (save_path.parent / "validation_metrics.json").exists():
-        val_metrics_file = save_path.parent / "validation_metrics.json"
-
-    if val_metrics_file.exists():
-        try:
-            with open(val_metrics_file, "r") as f:
-                vm = json.load(f)
-            if "conformal" not in vm:
-                vm["conformal"] = {}
-            geom_key = "block" if is_block else "holes"
-            vm["conformal"][geom_key] = {
-                "q_disp": float(q_disp),
-                "calibrated_coverage_xy": float(calib_cov_xy),
-                "raw_coverage_xy": float(compute_empirical_coverage(u_true_val_flat, u_p_lower_bound, u_p_upper_bound)),
-                "variance_budget": disp_budget
-            }
-            with open(val_metrics_file, "w") as f:
-                json.dump(vm, f, indent=4)
-            print(f"[Conformal] Updated {val_metrics_file} with calibrated metrics.")
-        except Exception as e:
-            print(f"[Conformal] Warning: Failed to update {val_metrics_file}: {e}")
+    # Also update conformal_calibration_metrics.json with calibrated coverage
+    calib_metric_p = save_path / "conformal_calibration_metrics.json"
+    try:
+        if calib_metric_p.exists():
+            with open(calib_metric_p, "r") as f:
+                c_data = json.load(f)
+        else:
+            c_data = {}
+        c_data["q_disp"] = float(q_disp)
+        c_data["calibrated_coverage_xy"] = float(calib_cov_xy)
+        c_data["variance_budget"] = disp_budget
+        with open(calib_metric_p, "w") as f:
+            json.dump(c_data, f, indent=4)
+    except Exception as e:
+        print(f"[Conformal] Warning: Failed to update {calib_metric_p}: {e}")
 
     plot_node_distributions(u_true, u_pred_piola_samples, u_pred_piola_traction_samples, node_indices, save_path)
 

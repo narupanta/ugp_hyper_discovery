@@ -261,10 +261,12 @@ if __name__ == "__main__" :
     else:
         save_path = Path(args.distilled_dir) / args.subfolder
     save_path.mkdir(parents=True, exist_ok=True)
-    # get I_obs_all.npy
-
     from core.material_models import get_material_from_dir
-    true_material_model = get_material_from_dir(args.distilled_dir)
+    try:
+        true_material_model = get_material_from_dir(args.distilled_dir)
+    except Exception as e:
+        print(f"[VAL] Notice: Ground truth material model not found ({e}). Running without analytical GT.")
+        true_material_model = None
 
     geometry_flag = args.geometry
 
@@ -371,11 +373,15 @@ if __name__ == "__main__" :
     print(f"[VAL] Configured validation modes: control_mode={control_mode}, stress_mode={stress_mode}, prescribe_right={prescribe_right}, clamp_top_x={clamp_top_x}")
 
     # Set up ground truth stress function
-    if stress_mode == "plane_stress":
-        from core.fem_engine import make_plane_stress_piola
-        true_piola_stress_func, solve_lambda3_true = make_plane_stress_piola(true_material_model)
+    if true_material_model is not None:
+        if stress_mode == "plane_stress":
+            from core.fem_engine import make_plane_stress_piola
+            true_piola_stress_func, solve_lambda3_true = make_plane_stress_piola(true_material_model)
+        else:
+            true_piola_stress_func = lambda f: true_material_model.P(fto3x3(f))[:2, :2]
+            solve_lambda3_true = None
     else:
-        true_piola_stress_func = lambda f: true_material_model.P(fto3x3(f))[:2, :2]
+        true_piola_stress_func = None
         solve_lambda3_true = None
 
     # Distilled hyperelastic energy and stress functions
@@ -462,15 +468,16 @@ if __name__ == "__main__" :
     data_dir = os.path.join('data')
 
     mesh = Mesh(node_coords, cells)
-
-    # Boundary Condition Setup
     geom = get_geometry(geometry_flag)
+
+    u_boundary = u_exp[-1] if (u_exp is not None and len(u_exp) > 0) else None
     bc_config = create_default_bc_config(
         geometry_name=geometry_flag,
         mode=control_mode,
-        pred_dict=geom.get_boundary_predicates(),
         prescribe_right=prescribe_right,
-        clamp_top_x=clamp_top_x
+        clamp_top_x=clamp_top_x,
+        node_coords=node_coords,
+        u_boundary=u_boundary
     )
     dirichlet_bc_info = bc_config.get_dirichlet_info()
     surface_maps = bc_config.get_surface_maps()
@@ -502,23 +509,32 @@ if __name__ == "__main__" :
     else: # displacement control
         if u_true is not None:
             num_steps = u_true.shape[0]
-            top_mask = jax.vmap(geom.get_boundary_predicates()["top"])(node_coords)
-            disps_top_true = u_true[:, top_mask, 1].mean(axis=1, keepdims=True)
-            if prescribe_right:
+            if geometry_flag == "ttc":
                 right_mask = jax.vmap(geom.get_boundary_predicates()["right"])(node_coords)
                 disps_right_true = u_true[:, right_mask, 0].mean(axis=1, keepdims=True)
-                schedule_solve = jnp.concatenate([disps_right_true, disps_top_true], axis=1)
+                schedule_solve = disps_right_true
             else:
-                schedule_solve = disps_top_true
+                top_mask = jax.vmap(geom.get_boundary_predicates()["top"])(node_coords)
+                disps_top_true = u_true[:, top_mask, 1].mean(axis=1, keepdims=True)
+                if prescribe_right:
+                    right_mask = jax.vmap(geom.get_boundary_predicates()["right"])(node_coords)
+                    disps_right_true = u_true[:, right_mask, 0].mean(axis=1, keepdims=True)
+                    schedule_solve = jnp.concatenate([disps_right_true, disps_top_true], axis=1)
+                else:
+                    schedule_solve = disps_top_true
             print(f"[VAL] Extracted exact prescribed displacement schedule from u_true ({num_steps} steps).")
         else:
             num_steps = args.num_steps if getattr(args, "num_steps", None) is not None else 10
-            disps_top_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1, 1)
-            if prescribe_right:
-                disps_right_true = disps_top_true * asym_factor
-                schedule_solve = jnp.concatenate([disps_right_true, disps_top_true], axis=1)
+            if geometry_flag == "ttc":
+                disps_right_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1, 1)
+                schedule_solve = disps_right_true
             else:
-                schedule_solve = disps_top_true
+                disps_top_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1, 1)
+                if prescribe_right:
+                    disps_right_true = disps_top_true * asym_factor
+                    schedule_solve = jnp.concatenate([disps_right_true, disps_top_true], axis=1)
+                else:
+                    schedule_solve = disps_top_true
             print(f"[VAL] Generated synthetic linspace displacement schedule ({num_steps} steps, target={target_load}).")
 
         if prep_data is not None and "load" in prep_data:
@@ -625,16 +641,18 @@ if __name__ == "__main__" :
             p_arr[:p_len] = p_seq[:p_len]
             return jnp.array(p_arr)
 
-        problem_true = HyperElasticityProblem(
-            mesh=mesh,
-            vec=2,
-            dim=2,
-            ele_type=ele_type,
-            dirichlet_bc_info=dirichlet_bc_info,
-            location_fns=location_fns,
-            surface_maps=surface_maps,
-            piola_func=lambda F: true_piola_stress_func(F[:2, :2] if F.shape == (3, 3) else F)
-        )
+        problem_true = None
+        if true_material_model is not None and true_piola_stress_func is not None:
+            problem_true = HyperElasticityProblem(
+                mesh=mesh,
+                vec=2,
+                dim=2,
+                ele_type=ele_type,
+                dirichlet_bc_info=dirichlet_bc_info,
+                location_fns=location_fns,
+                surface_maps=surface_maps,
+                piola_func=lambda F: true_piola_stress_func(F[:2, :2] if F.shape == (3, 3) else F)
+            )
 
         petsc_options = {
             "snes_type": "newtonls",
@@ -668,10 +686,15 @@ if __name__ == "__main__" :
             os.makedirs(gt_dir, exist_ok=True)
             np.savez_compressed(gt_file, u=u_true, cells=cells, node_coords=node_coords, node_type=node_type)
             print(f"[VAL] Reused and cached ground truth displacements from dataset: shape={u_true.shape}")
-        else:
+        elif problem_true is not None:
             os.makedirs(gt_dir, exist_ok=True)
             print(f"[VAL] Solving adaptive FEM for ground truth with {num_steps} steps (schedule shape: {schedule_solve.shape})...")
-            u_true = solve_adaptive_fem(problem_true, bc_config, schedule_solve, petsc_options)
+            u_true = solve_adaptive_fem(problem_true, bc_config, schedule_solve, petsc_options, u_boundary_steps=u_exp)
+            np.savez_compressed(gt_file, u=u_true, cells=cells, node_coords=node_coords, node_type=node_type)
+        else:
+            print(f"[VAL] Notice: No analytical ground truth model available. Using experimental displacements as reference.")
+            os.makedirs(gt_dir, exist_ok=True)
+            u_true = u_exp if u_exp is not None else np.zeros((num_steps, node_coords.shape[0], 2))
             np.savez_compressed(gt_file, u=u_true, cells=cells, node_coords=node_coords, node_type=node_type)
 
         u_pred_samples = []
@@ -707,7 +730,7 @@ if __name__ == "__main__" :
             
             try:
                 print(f"Sample {num_existing + success_count + 1}/{target_total_samples}: Attempting realization {sample_idx}/{len(selected_samples)}...")
-                u_pred = solve_adaptive_fem(problem_pred, bc_config, schedule_solve, petsc_options)
+                u_pred = solve_adaptive_fem(problem_pred, bc_config, schedule_solve, petsc_options, u_boundary_steps=u_exp)
                 success = True 
             except Exception as e:
                 print(f"Simulation failed on realization {sample_idx}: {e}")

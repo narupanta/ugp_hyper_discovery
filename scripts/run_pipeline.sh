@@ -187,8 +187,14 @@ else
     MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('model_mode', 'isotropic'))")
     GEOM_TRAIN=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('geometry_train', d.get('geometry', 'block')))")
 
+    HAS_GT_VAL=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('has_ground_truth', True))" 2>/dev/null || echo "True")
+
     CURRENT_TIME=$(date +"%Y%m%dT%H%M%S")
-    EXP_FOLDER_NAME="${CURRENT_TIME}_${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${N_IP}_${BETA}_${MODEL_MODE}_${GEOM_TRAIN}"
+    if [ "$HAS_GT_VAL" == "False" ] || [ "$HAS_GT_VAL" == "false" ] || [ "$GEOM_TRAIN" == "ttc" ] || [ "$MODEL" == "experimental" ]; then
+        EXP_FOLDER_NAME="${CURRENT_TIME}_${GEOM_TRAIN}_${N_IP}_${BETA}_${MODEL_MODE}"
+    else
+        EXP_FOLDER_NAME="${CURRENT_TIME}_${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${N_IP}_${BETA}_${MODEL_MODE}_${GEOM_TRAIN}"
+    fi
     EXPERIMENT_DIR="$(pwd)/results/${EXP_FOLDER_NAME}"
     mkdir -p "$EXPERIMENT_DIR"
     cp "$RECIPE_FILE" "$EXPERIMENT_DIR/config.yaml"
@@ -197,32 +203,38 @@ else
 fi
 
 # Extract parameters from experiment config.yaml
-get_cfg() {
-    python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d$1)"
+get_cfg_default() {
+    python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('$1', '$2'))" 2>/dev/null || echo "$2"
 }
 
-MODEL=$(get_cfg "['material_model_name']")
-D_NOISE=$(get_cfg "['disp_noise']")
-L_NOISE=$(get_cfg "['load_noise']")
-ASYM=$(get_cfg "['asym_factor']")
-TOP_LOAD=$(get_cfg "['target_load_true_top']")
-TOP_LOAD_HOLES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('target_load_holes', d.get('target_load_true_top', $TOP_LOAD)))" 2>/dev/null || echo "$TOP_LOAD")
-STEPS=$(get_cfg "['n_loadsteps']")
+CUSTOM_DATASET_PATH=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('dataset_path', ''))" 2>/dev/null || echo "")
+HAS_GT=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('has_ground_truth', True))" 2>/dev/null || echo "True")
+if [ -n "$CUSTOM_DATASET_PATH" ] || [ "$HAS_GT" == "False" ] || [ "$HAS_GT" == "false" ]; then
+    RUN_GEN=false
+fi
+
+MODEL=$(get_cfg_default "material_model_name" "nh2")
+D_NOISE=$(get_cfg_default "disp_noise" "0.0001")
+L_NOISE=$(get_cfg_default "load_noise" "0.01")
+ASYM=$(get_cfg_default "asym_factor" "1.0")
+TOP_LOAD=$(get_cfg_default "target_load_true_top" "1.0")
+TOP_LOAD_HOLES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('target_load_holes', d.get('target_load_true_top', '$TOP_LOAD')))" 2>/dev/null || echo "$TOP_LOAD")
+STEPS=$(get_cfg_default "n_loadsteps" "1")
 MESH_SIZE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('mesh_size', '0.08'))" 2>/dev/null || echo "0.08")
 
 # Extraction params
-MCI_SAMPLING=$(get_cfg "['number_of_mci_sampling']")
-N_IP=$(get_cfg "['n_ip']")
+MCI_SAMPLING=$(get_cfg_default "number_of_mci_sampling" "1")
+N_IP=$(get_cfg_default "n_ip" "5")
 BETAS_LIST=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); b=d.get('beta_list', d.get('betas', d.get('beta', 1.0))); print(*b) if isinstance(b, (list, tuple)) else print(b)" 2>/dev/null || echo "1.0")
 BETA=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('beta', d.get('beta_list', [1.0])[0] if isinstance(d.get('beta_list'), (list, tuple)) else 1.0))" 2>/dev/null || echo "1.0")
 NUM_RFF=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('num_rff', 800))" 2>/dev/null || echo "800")
-FIXED_NOISE=$(get_cfg "['is_fixed_reaction_force_noise']")
+FIXED_NOISE=$(get_cfg_default "is_fixed_reaction_force_noise" "1")
 FIXED_IP=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('is_fixed_inducing_points', 1))" 2>/dev/null || echo "1")
-EXT_ITERS=$(get_cfg "['extraction_n_iterations']")
-EXT_LR=$(get_cfg "['extraction_learning_rate']")
+EXT_ITERS=$(get_cfg_default "extraction_n_iterations" "100")
+EXT_LR=$(get_cfg_default "extraction_learning_rate" "0.01")
 EXT_FINAL_LR=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('extraction_final_learning_rate', d.get('extraction_learning_rate')))" 2>/dev/null || echo "$EXT_LR")
 CAP_COMPRESSION=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('cap_compression', 1))" 2>/dev/null || echo "1")
-TRAIN_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(*(d['train_load_steps_indices']))")
+TRAIN_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(*(d.get('train_load_steps_indices', [0])))" 2>/dev/null || echo "0")
 MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('model_mode', 'isotropic'))" 2>/dev/null || echo "isotropic")
 COVARIANCE_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('covariance_mode', 'diag'))" 2>/dev/null || echo "diag")
 NORMALIZE_ELL=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('normalize_ell', 0))" 2>/dev/null || echo "0")
@@ -236,18 +248,18 @@ CONSTRAINT_LENGTHSCALE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG
 CLAMP_TOP_X=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(1 if d.get('clamp_top_x', True) else 0)" 2>/dev/null || echo "1")
 
 # Distillation params
-DIST_MODEL=$(get_cfg "['distilled_material_model']")
-DIST_ITERS=$(get_cfg "['distillation_n_iterations']")
+DIST_MODEL=$(get_cfg_default "distilled_material_model" "gmr")
+DIST_ITERS=$(get_cfg_default "distillation_n_iterations" "100")
 DEV_VOL_DIST_ITERS=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('dev_vol_distillation_n_iterations', d.get('distillation_n_iterations', 5000)))" 2>/dev/null || echo "$DIST_ITERS")
 ANISO_DIST_ITERS=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); val=d.get('aniso_distillation_n_iterations'); print(val if val is not None else '')" 2>/dev/null || echo "")
-DIST_TARGET=$(get_cfg "['distill_target']")
-SAMPLE_MODE=$(get_cfg "['sample_mode']")
-NUM_POINTS=$(get_cfg "['num_points']")
+DIST_TARGET=$(get_cfg_default "distill_target" "sef_split")
+SAMPLE_MODE=$(get_cfg_default "sample_mode" "standard")
+NUM_POINTS=$(get_cfg_default "num_points" "100")
 NUM_FUNC_SAMPLES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('num_func_samples', 512))" 2>/dev/null || echo "512")
-MAX_GAMMA=$(get_cfg "['max_gamma']")
-DO_SENSITIVITY=$(get_cfg "['do_sensitivity']")
-SOBOL_THRESHOLD=$(get_cfg "['sobol_threshold']")
-SOBOL_FACTOR=$(get_cfg "['sobol_samples_factor']")
+MAX_GAMMA=$(get_cfg_default "max_gamma" "1.0")
+DO_SENSITIVITY=$(get_cfg_default "do_sensitivity" "False")
+SOBOL_THRESHOLD=$(get_cfg_default "sobol_threshold" "0.0001")
+SOBOL_FACTOR=$(get_cfg_default "sobol_samples_factor" "2")
 SENSITIVITY_FLAG=""
 if [ "$DO_SENSITIVITY" == "0" ] || [ "$DO_SENSITIVITY" == "False" ] || [ "$DO_SENSITIVITY" == "false" ]; then
     SENSITIVITY_FLAG="--no_sensitivity"
@@ -276,7 +288,7 @@ fi
 if [ -n "$VAL_SAMPLES_OVERRIDE" ]; then
     VAL_SAMPLES="$VAL_SAMPLES_OVERRIDE"
 else
-    VAL_SAMPLES=$(get_cfg "['val_number_samples']")
+    VAL_SAMPLES=$(get_cfg_default "val_number_samples" "8")
 fi
 VAL_LOAD_STEPS_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(*(d.get('val_load_steps_indices', [9])))")
 TEST_LOAD_STEPS_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(*(d.get('test_load_steps_indices', [])))" 2>/dev/null || echo "")
@@ -338,6 +350,12 @@ for SEED in $SEEDS_LIST; do
 
     mkdir -p "$SEED_DIR"
 
+    if [ -n "$CUSTOM_DATASET_PATH" ]; then
+        TRAIN_DATASET_PATH="$CUSTOM_DATASET_PATH"
+    else
+        TRAIN_DATASET_PATH="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${GEOMETRY_TRAIN}_${SEED}.npz"
+    fi
+
     # --- STEP 1: DATA GENERATION ---
     if [ "$RUN_GEN" = true ]; then
         echo "--- Step 1: Data Generation (Seed: $SEED) ---"
@@ -382,7 +400,6 @@ for SEED in $SEEDS_LIST; do
     # --- STEP 2: EXTRACTION ---
     if [ "$RUN_EXT" = true ]; then
         echo "--- Step 2: UGP Extraction (Seed: $SEED) ---"
-        TRAIN_DATASET_PATH="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${GEOMETRY_TRAIN}_${SEED}.npz"
         
         NUM_BETAS=$(echo "$BETAS_LIST" | wc -w)
         if [ "$NUM_BETAS" -gt 1 ]; then
@@ -627,71 +644,109 @@ for SEED in $SEEDS_LIST; do
             exit 1
         fi
 
-        VAL_DATASET_BLOCK="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${GEOMETRY_TRAIN}_${SEED}.npz"
-        VAL_DATASET_HOLES="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD_HOLES}_${ASYM}_${GEOMETRY_VAL}_${SEED}.npz"
-
         export OMP_NUM_THREADS=2
         export XLA_PYTHON_CLIENT_PREALLOCATE=false
         export XLA_PYTHON_CLIENT_MEM_FRACTION=0.40
 
-        echo "Running FEM workers for $GEOMETRY_TRAIN geometry..."
-        BLOCK_PIDS=()
-        for ((w=0; w<VAL_WORKERS; w++)); do
-            W_LOG="$VAL_DIR/block/worker_${w}.log"
-            python3 validation/forward_fem_distilled_piola_sample.py \
-                --distilled_dir "$DISTILL_DIR" \
-                --material_model "$DIST_MODEL" \
-                --dataset_path "$VAL_DATASET_BLOCK" \
-                --n_sample "$VAL_SAMPLES" \
-                --output_dir "$VAL_DIR/block" \
-                --geometry "$GEOMETRY_TRAIN" \
-                --target_load "$TOP_LOAD" \
-                --asym_factor "$ASYM" \
-                --control_mode "$CONTROL_MODE" \
-                --stress_mode "$STRESS_MODE" \
-                --clamp_top_x 0 \
-                --total_workers "$VAL_WORKERS" \
-                --worker_id "$w" > "$W_LOG" 2>&1 &
-            BLOCK_PIDS+=($!)
-        done
+        if [ "$GEOMETRY_TRAIN" == "ttc" ] || [ "$GEOMETRY_VAL" == "ttc" ]; then
+            mkdir -p "$VAL_DIR/ttc"
+            VAL_DATASET_TTC="${TRAIN_DATASET_PATH}"
 
-        for pid in "${BLOCK_PIDS[@]}"; do
-            wait "$pid"
-        done
+            echo "Running FEM workers for ttc geometry..."
+            TTC_PIDS=()
+            for ((w=0; w<VAL_WORKERS; w++)); do
+                W_LOG="$VAL_DIR/ttc/worker_${w}.log"
+                python3 validation/forward_fem_distilled_piola_sample.py \
+                    --distilled_dir "$DISTILL_DIR" \
+                    --material_model "$DIST_MODEL" \
+                    --dataset_path "$VAL_DATASET_TTC" \
+                    --n_sample "$VAL_SAMPLES" \
+                    --output_dir "$VAL_DIR/ttc" \
+                    --geometry "ttc" \
+                    --target_load "$TOP_LOAD" \
+                    --asym_factor "$ASYM" \
+                    --control_mode "$CONTROL_MODE" \
+                    --stress_mode "$STRESS_MODE" \
+                    --clamp_top_x 0 \
+                    --total_workers "$VAL_WORKERS" \
+                    --worker_id "$w" > "$W_LOG" 2>&1 &
+                TTC_PIDS+=($!)
+            done
 
-        if [ "$VAL_WORKERS" -gt 1 ]; then
-            echo "Merging Block worker outputs..."
-            python3 validation/merge_fem_workers.py --folder "$VAL_DIR/block"
-        fi
+            for pid in "${TTC_PIDS[@]}"; do
+                wait "$pid"
+            done
 
-        echo "Running FEM workers for $GEOMETRY_VAL geometry..."
-        HOLES_PIDS=()
-        for ((w=0; w<VAL_WORKERS; w++)); do
-            W_LOG_HOLES="$VAL_DIR/holes/worker_${w}.log"
-            python3 validation/forward_fem_distilled_piola_sample.py \
-                --distilled_dir "$DISTILL_DIR" \
-                --material_model "$DIST_MODEL" \
-                --dataset_path "$VAL_DATASET_HOLES" \
-                --n_sample "$VAL_SAMPLES" \
-                --output_dir "$VAL_DIR/holes" \
-                --geometry "$GEOMETRY_VAL" \
-                --target_load "$TOP_LOAD_HOLES" \
-                --asym_factor "$ASYM" \
-                --control_mode "$CONTROL_MODE" \
-                --stress_mode "$STRESS_MODE" \
-                --clamp_top_x "$CLAMP_TOP_X" \
-                --total_workers "$VAL_WORKERS" \
-                --worker_id "$w" > "$W_LOG_HOLES" 2>&1 &
-            HOLES_PIDS+=($!)
-        done
+            if [ "$VAL_WORKERS" -gt 1 ]; then
+                echo "Merging TTC worker outputs..."
+                python3 validation/merge_fem_workers.py --folder "$VAL_DIR/ttc"
+            fi
+        else
+            mkdir -p "$VAL_DIR/block"
+            mkdir -p "$VAL_DIR/holes"
 
-        for pid in "${HOLES_PIDS[@]}"; do
-            wait "$pid"
-        done
+            VAL_DATASET_BLOCK="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${GEOMETRY_TRAIN}_${SEED}.npz"
+            VAL_DATASET_HOLES="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD_HOLES}_${ASYM}_${GEOMETRY_VAL}_${SEED}.npz"
 
-        if [ "$VAL_WORKERS" -gt 1 ]; then
-            echo "Merging Holes worker outputs..."
-            python3 validation/merge_fem_workers.py --folder "$VAL_DIR/holes"
+            echo "Running FEM workers for $GEOMETRY_TRAIN geometry..."
+            BLOCK_PIDS=()
+            for ((w=0; w<VAL_WORKERS; w++)); do
+                W_LOG="$VAL_DIR/block/worker_${w}.log"
+                python3 validation/forward_fem_distilled_piola_sample.py \
+                    --distilled_dir "$DISTILL_DIR" \
+                    --material_model "$DIST_MODEL" \
+                    --dataset_path "$VAL_DATASET_BLOCK" \
+                    --n_sample "$VAL_SAMPLES" \
+                    --output_dir "$VAL_DIR/block" \
+                    --geometry "$GEOMETRY_TRAIN" \
+                    --target_load "$TOP_LOAD" \
+                    --asym_factor "$ASYM" \
+                    --control_mode "$CONTROL_MODE" \
+                    --stress_mode "$STRESS_MODE" \
+                    --clamp_top_x 0 \
+                    --total_workers "$VAL_WORKERS" \
+                    --worker_id "$w" > "$W_LOG" 2>&1 &
+                BLOCK_PIDS+=($!)
+            done
+
+            for pid in "${BLOCK_PIDS[@]}"; do
+                wait "$pid"
+            done
+
+            if [ "$VAL_WORKERS" -gt 1 ]; then
+                echo "Merging Block worker outputs..."
+                python3 validation/merge_fem_workers.py --folder "$VAL_DIR/block"
+            fi
+
+            echo "Running FEM workers for $GEOMETRY_VAL geometry..."
+            HOLES_PIDS=()
+            for ((w=0; w<VAL_WORKERS; w++)); do
+                W_LOG_HOLES="$VAL_DIR/holes/worker_${w}.log"
+                python3 validation/forward_fem_distilled_piola_sample.py \
+                    --distilled_dir "$DISTILL_DIR" \
+                    --material_model "$DIST_MODEL" \
+                    --dataset_path "$VAL_DATASET_HOLES" \
+                    --n_sample "$VAL_SAMPLES" \
+                    --output_dir "$VAL_DIR/holes" \
+                    --geometry "$GEOMETRY_VAL" \
+                    --target_load "$TOP_LOAD_HOLES" \
+                    --asym_factor "$ASYM" \
+                    --control_mode "$CONTROL_MODE" \
+                    --stress_mode "$STRESS_MODE" \
+                    --clamp_top_x "$CLAMP_TOP_X" \
+                    --total_workers "$VAL_WORKERS" \
+                    --worker_id "$w" > "$W_LOG_HOLES" 2>&1 &
+                HOLES_PIDS+=($!)
+            done
+
+            for pid in "${HOLES_PIDS[@]}"; do
+                wait "$pid"
+            done
+
+            if [ "$VAL_WORKERS" -gt 1 ]; then
+                echo "Merging Holes worker outputs..."
+                python3 validation/merge_fem_workers.py --folder "$VAL_DIR/holes"
+            fi
         fi
 
         echo "✅ Step 4 (FEM Forward Simulation for Seed $SEED) completed."
@@ -708,7 +763,7 @@ for SEED in $SEEDS_LIST; do
             FEM_VAL_STEPS="${TEST_LOAD_STEPS_INDICES:-$VAL_LOAD_STEPS_INDICES}"
 
             # If worker files exist but consolidated fem_distilled_samples.npz doesn't exist, merge them
-            for GEOM_DIR in "$VAL_DIR/block" "$VAL_DIR/holes"; do
+            for GEOM_DIR in "$VAL_DIR/block" "$VAL_DIR/holes" "$VAL_DIR/ttc"; do
                 if [ -d "$GEOM_DIR" ] && [ ! -f "$GEOM_DIR/fem_distilled_samples.npz" ]; then
                     if ls "$GEOM_DIR"/fem_distilled_samples_worker*.npz 1> /dev/null 2>&1; then
                         echo "Merging worker outputs in $GEOM_DIR..."
@@ -716,6 +771,14 @@ for SEED in $SEEDS_LIST; do
                     fi
                 fi
             done
+
+            if [ -d "$VAL_DIR/ttc" ] && [ -f "$VAL_DIR/ttc/fem_distilled_samples.npz" ]; then
+                echo "Generating UQ displacement verification plots for TTC (evaluating steps: $FEM_VAL_STEPS)..."
+                python3 plots/uq_verification_disp.py \
+                    --model_path "$VAL_DIR/ttc" \
+                    --validation_load_step_indices $FEM_VAL_STEPS \
+                    --n_sample "$VAL_SAMPLES" || true
+            fi
 
             if [ -d "$VAL_DIR/block" ] && [ -f "$VAL_DIR/block/fem_distilled_samples.npz" ]; then
                 echo "Generating UQ displacement verification plots for Block (evaluating steps: $FEM_VAL_STEPS)..."

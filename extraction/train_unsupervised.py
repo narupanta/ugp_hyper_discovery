@@ -300,9 +300,22 @@ if __name__ == "__main__" :
     if "angles" not in mat_kwargs and "angles" in mat_p:
         mat_kwargs["angles"] = mat_p["angles"]
 
-    true_mat_model = get_material(material_model_name, **mat_kwargs)
-    psi_true_func = lambda f: true_mat_model.psi(f)
-    piola_true_func = lambda f: true_mat_model.P(f)
+    has_gt = bool(rec.get("has_ground_truth", True))
+    if material_model_name in ["experimental", "none", "unknown"] or not has_gt:
+        print("[DATASET] Running in experimental mode without analytical ground-truth material.")
+        true_mat_model = None
+        psi_true_func = None
+        piola_true_func = None
+    else:
+        try:
+            true_mat_model = get_material(material_model_name, **mat_kwargs)
+            psi_true_func = lambda f: true_mat_model.psi(f)
+            piola_true_func = lambda f: true_mat_model.P(f)
+        except Exception as e:
+            print(f"[DATASET] Notice: Could not instantiate material '{material_model_name}' ({e}); setting true_mat_model = None.")
+            true_mat_model = None
+            psi_true_func = None
+            piola_true_func = None
 
     # Data use in VFM
     if stress_mode == "plane_stress":
@@ -314,9 +327,17 @@ if __name__ == "__main__" :
             f3x3_np[:, :, :2, :2] = np.array(f2x2)
             f3x3_np[:, :, 2, 2] = np.array(lam3_train)
             f3x3 = jnp.asarray(f3x3_np, dtype=jnp.float64)
-        else:
+        elif true_mat_model is not None:
             _, solve_lambda3 = make_plane_stress_piola(true_mat_model)
             lam3_train = jax.vmap(jax.vmap(solve_lambda3))(f2x2)
+            f3x3_np = np.zeros((*f2x2.shape[:-2], 3, 3), dtype=np.float64)
+            f3x3_np[:, :, :2, :2] = np.array(f2x2)
+            f3x3_np[:, :, 2, 2] = np.array(lam3_train)
+            f3x3 = jnp.asarray(f3x3_np, dtype=jnp.float64)
+        else:
+            # Fallback to incompressible plane stress: lambda3 = 1 / det(F_2D)
+            det_f2d = jnp.linalg.det(f2x2)
+            lam3_train = 1.0 / jnp.clip(det_f2d, 1e-4, 1e4)
             f3x3_np = np.zeros((*f2x2.shape[:-2], 3, 3), dtype=np.float64)
             f3x3_np[:, :, :2, :2] = np.array(f2x2)
             f3x3_np[:, :, 2, 2] = np.array(lam3_train)
@@ -657,6 +678,17 @@ if __name__ == "__main__" :
         seed=args.seed,
         vfm_mode=args.vfm_mode
     )
+
+    meta_path = os.path.join(save_path, "metadata.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r") as mf:
+                mdata = json.load(mf)
+            mdata["dataset_path"] = prep_dataset_path
+            with open(meta_path, "w") as mf:
+                json.dump(mdata, mf, indent=4)
+        except Exception:
+            pass
 
     log_info_str = f"{train_load_steps_indices}, {material_model_name}"
     import time

@@ -50,8 +50,14 @@ def main():
     max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
 
     from core.material_models import get_material_from_dir
-    true_model = get_material_from_dir(args.saved_model_dir, jit_P=False)
-    true_model_name = infer_material_model_name(args.saved_model_dir)
+    try:
+        true_model = get_material_from_dir(args.saved_model_dir, jit_P=False)
+    except Exception:
+        true_model = None
+    try:
+        true_model_name = infer_material_model_name(args.saved_model_dir)
+    except Exception:
+        true_model_name = "experimental"
 
     import json
     metadata_path = os.path.join(args.saved_model_dir, "metadata.json")

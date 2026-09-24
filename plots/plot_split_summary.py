@@ -138,9 +138,15 @@ def main():
     from core.material_models import get_material_from_dir
     try:
         true_model = get_material_from_dir(saved_model_dir, jit_P=False)
-    except FileNotFoundError:
-        true_model = get_material_from_dir(distilled_dir, jit_P=False)
-    true_model_name = infer_material_model_name(saved_model_dir)
+    except Exception:
+        try:
+            true_model = get_material_from_dir(distilled_dir, jit_P=False)
+        except Exception:
+            true_model = None
+    try:
+        true_model_name = infer_material_model_name(saved_model_dir)
+    except Exception:
+        true_model_name = "experimental"
     
     best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
     gp_params = GPRawParams(**best_params_dict)
@@ -242,7 +248,7 @@ def main():
     
     extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
 
-    psi_true = jax.vmap(true_model.psi)(F_all)
+    psi_true = jax.vmap(true_model.psi)(F_all) if true_model is not None else None
     psi_dist_mean = [learned_gp.psi_dist(F_all[mode]).mean for mode in range(len(mode_names))]
     psi_dist_var = [learned_gp.psi_dist(F_all[mode]).var for mode in range(len(mode_names))]
 
@@ -406,16 +412,19 @@ def main():
                                 theta_aniso[idx] = mean_val
                     
             # Compute RMSE across all modes
-            total_sq_err = 0.0
-            total_pts = 0
-            for mode in range(len(mode_names)):
-                if has_aniso:
-                    s_psi = get_distilled_energy_stress_split_3(theta_dev, theta_vol, theta_aniso, F_all[mode])
-                else:
-                    s_psi = get_distilled_energy_stress_split(theta_dev, theta_vol, F_all[mode])
-                total_sq_err += np.sum((s_psi - psi_true[mode])**2)
-                total_pts += len(s_psi)
-            rmse = np.sqrt(total_sq_err / total_pts)
+            if psi_true is not None:
+                total_sq_err = 0.0
+                total_pts = 0
+                for mode in range(len(mode_names)):
+                    if has_aniso:
+                        s_psi = get_distilled_energy_stress_split_3(theta_dev, theta_vol, theta_aniso, F_all[mode])
+                    else:
+                        s_psi = get_distilled_energy_stress_split(theta_dev, theta_vol, F_all[mode])
+                    total_sq_err += np.sum((s_psi - psi_true[mode])**2)
+                    total_pts += len(s_psi)
+                rmse = np.sqrt(total_sq_err / total_pts)
+            else:
+                rmse = 0.0
             rmse_history.append(float(rmse))
     else:
         rmse_history = [0.0] * len(sorted_params)
@@ -460,17 +469,13 @@ def main():
     for i, name in enumerate(mode_names):
         row, col = divmod(i, 2)
         ax_psi = fig_energy.add_subplot(gs_top[row, col])
-        ax_psi.set_box_aspect(1)
-        ax_psi.plot(gamma, psi_true[i], 'k--', lw=1.2, label="Ground Truth", zorder=5)
+        has_gt = psi_true is not None and i < len(psi_true) and psi_true[i] is not None
+        if has_gt:
+            ax_psi.plot(gamma, psi_true[i], 'k--', lw=1.2, label="Ground Truth", zorder=5)
         gp_psi_lower = psi_dist_mean[i] - 1.96 * jnp.sqrt(psi_dist_var[i])
         gp_psi_upper = psi_dist_mean[i] + 1.96 * jnp.sqrt(psi_dist_var[i])
         ax_psi.fill_between(gamma, gp_psi_lower, gp_psi_upper, color='gray', alpha=0.3, label="GP 95% CI")
         ax_psi.plot(gamma, psi_dist_mean[i], color='gray', lw=1.2, ls='-', label="GP mean", zorder=4)
-        
-        gp_cov_psi = jnp.mean((psi_true[i] >= gp_psi_lower) & (psi_true[i] <= gp_psi_upper))
-        rmse_psi_gp = jnp.sqrt(jnp.mean((psi_dist_mean[i] - psi_true[i]) ** 2))
-        ss_tot_psi = jnp.sum((psi_true[i] - jnp.mean(psi_true[i])) ** 2)
-        r2_psi_gp = 1 - jnp.sum((psi_true[i] - psi_dist_mean[i]) ** 2) / (ss_tot_psi + 1e-12)
         
         nf_psi_lower = jnp.percentile(dist_psi_samples[i], 2.5, axis=0)
         nf_psi_upper = jnp.percentile(dist_psi_samples[i], 97.5, axis=0)
@@ -480,9 +485,15 @@ def main():
         ax_psi.plot(gamma, dist_psi_samples[i].T, color=dist_color, lw=0.4, alpha=0.1, zorder=1)
         ax_psi.plot(gamma, dist_psi_mean, color=dist_color, lw=1.5, label="Distilled Mean", zorder=3)
         
-        nf_cov_psi = jnp.mean((psi_true[i] >= nf_psi_lower) & (psi_true[i] <= nf_psi_upper))
-        rmse_psi = jnp.sqrt(jnp.mean((dist_psi_mean - psi_true[i]) ** 2))
-        r2_psi = 1 - jnp.sum((psi_true[i] - dist_psi_mean) ** 2) / (ss_tot_psi + 1e-12)
+        if has_gt:
+            gp_cov_psi = jnp.mean((psi_true[i] >= gp_psi_lower) & (psi_true[i] <= gp_psi_upper))
+            rmse_psi_gp = jnp.sqrt(jnp.mean((psi_dist_mean[i] - psi_true[i]) ** 2))
+            ss_tot_psi = jnp.sum((psi_true[i] - jnp.mean(psi_true[i])) ** 2)
+            r2_psi_gp = 1 - jnp.sum((psi_true[i] - psi_dist_mean[i]) ** 2) / (ss_tot_psi + 1e-12)
+            
+            nf_cov_psi = jnp.mean((psi_true[i] >= nf_psi_lower) & (psi_true[i] <= nf_psi_upper))
+            rmse_psi = jnp.sqrt(jnp.mean((dist_psi_mean - psi_true[i]) ** 2))
+            r2_psi = 1 - jnp.sum((psi_true[i] - dist_psi_mean) ** 2) / (ss_tot_psi + 1e-12)
         
         if col == 0:
             ax_psi.set_ylabel(r"$\Psi$", fontsize=7.5, labelpad=2)
@@ -510,9 +521,10 @@ def main():
         ax_psi.set_ylim(bottom=-0.04 * y_span, top=cur_ylim[1] + 0.05 * y_span)
             
         # Top-left r^2 box for distilled model
-        ax_psi.text(0.06, 0.92, rf"$r^2 = {r2_psi:.3f}$", transform=ax_psi.transAxes,
-                    ha='left', va='top', fontsize=5.8,
-                    bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="#bbbbbb", lw=0.4, alpha=0.90), zorder=6)
+        if has_gt:
+            ax_psi.text(0.06, 0.92, rf"$r^2 = {r2_psi:.3f}$", transform=ax_psi.transAxes,
+                        ha='left', va='top', fontsize=5.8,
+                        bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="#bbbbbb", lw=0.4, alpha=0.90), zorder=6)
         
         # Interpolation Limit boundary
         feats_ext = jax.vmap(extractor.extract)(F_all[i])
@@ -578,43 +590,44 @@ def main():
             vdata["sef"] = {}
         
         # Calculate overall averages
-        gp_rmses = []
-        gp_covs = []
-        gp_r2s = []
-        dist_rmses = []
-        dist_covs = []
-        dist_r2s = []
-        for i in range(len(mode_names)):
-            gp_l = psi_dist_mean[i] - 1.96 * jnp.sqrt(psi_dist_var[i])
-            gp_u = psi_dist_mean[i] + 1.96 * jnp.sqrt(psi_dist_var[i])
-            gp_covs.append(float(jnp.mean((psi_true[i] >= gp_l) & (psi_true[i] <= gp_u)) * 100.0))
-            gp_rmses.append(float(jnp.sqrt(jnp.mean((psi_dist_mean[i] - psi_true[i]) ** 2))))
-            ss_tot = jnp.sum((psi_true[i] - jnp.mean(psi_true[i])) ** 2)
-            gp_r2s.append(float(1 - jnp.sum((psi_true[i] - psi_dist_mean[i]) ** 2) / (ss_tot + 1e-12)))
+        if psi_true is not None:
+            gp_rmses = []
+            gp_covs = []
+            gp_r2s = []
+            dist_rmses = []
+            dist_covs = []
+            dist_r2s = []
+            for i in range(len(mode_names)):
+                gp_l = psi_dist_mean[i] - 1.96 * jnp.sqrt(psi_dist_var[i])
+                gp_u = psi_dist_mean[i] + 1.96 * jnp.sqrt(psi_dist_var[i])
+                gp_covs.append(float(jnp.mean((psi_true[i] >= gp_l) & (psi_true[i] <= gp_u)) * 100.0))
+                gp_rmses.append(float(jnp.sqrt(jnp.mean((psi_dist_mean[i] - psi_true[i]) ** 2))))
+                ss_tot = jnp.sum((psi_true[i] - jnp.mean(psi_true[i])) ** 2)
+                gp_r2s.append(float(1 - jnp.sum((psi_true[i] - psi_dist_mean[i]) ** 2) / (ss_tot + 1e-12)))
 
-            nf_l = jnp.percentile(dist_psi_samples[i], 2.5, axis=0)
-            nf_u = jnp.percentile(dist_psi_samples[i], 97.5, axis=0)
-            dist_m = dist_psi_samples[i].mean(axis=0)
-            dist_covs.append(float(jnp.mean((psi_true[i] >= nf_l) & (psi_true[i] <= nf_u)) * 100.0))
-            dist_rmses.append(float(jnp.sqrt(jnp.mean((dist_m - psi_true[i]) ** 2))))
-            dist_r2s.append(float(1 - jnp.sum((psi_true[i] - dist_m) ** 2) / (ss_tot + 1e-12)))
+                nf_l = jnp.percentile(dist_psi_samples[i], 2.5, axis=0)
+                nf_u = jnp.percentile(dist_psi_samples[i], 97.5, axis=0)
+                dist_m = dist_psi_samples[i].mean(axis=0)
+                dist_covs.append(float(jnp.mean((psi_true[i] >= nf_l) & (psi_true[i] <= nf_u)) * 100.0))
+                dist_rmses.append(float(jnp.sqrt(jnp.mean((dist_m - psi_true[i]) ** 2))))
+                dist_r2s.append(float(1 - jnp.sum((psi_true[i] - dist_m) ** 2) / (ss_tot + 1e-12)))
 
-        vdata["sef"]["gp"] = {
-            "total": {
-                "rmse": float(np.mean(gp_rmses)),
-                "coverage": float(np.mean(gp_covs)),
-                "r2": float(np.mean(gp_r2s))
+            vdata["sef"]["gp"] = {
+                "total": {
+                    "rmse": float(np.mean(gp_rmses)),
+                    "coverage": float(np.mean(gp_covs)),
+                    "r2": float(np.mean(gp_r2s))
+                }
             }
-        }
-        vdata["sef"]["dist"] = {
-            "total": {
-                "rmse": float(np.mean(dist_rmses)),
-                "coverage": float(np.mean(dist_covs)),
-                "r2": float(np.mean(dist_r2s))
+            vdata["sef"]["dist"] = {
+                "total": {
+                    "rmse": float(np.mean(dist_rmses)),
+                    "coverage": float(np.mean(dist_covs)),
+                    "r2": float(np.mean(dist_r2s))
+                }
             }
-        }
-        with open(val_json_path, "w") as f:
-            json.dump(vdata, f, indent=4)
+            with open(val_json_path, "w") as f:
+                json.dump(vdata, f, indent=4)
         
         # Also sync to fem_validation and seed_dir if they exist
         for parent_sub in ["fem_validation", ".."]:

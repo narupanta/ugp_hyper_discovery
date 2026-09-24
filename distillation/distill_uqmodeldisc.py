@@ -695,8 +695,10 @@ def main():
     test_cases[is_zero_strain] = 2 # test_case_identifier_biaxial_tension
 
     from core.material_models import get_material_from_dir
-    true_model_name = infer_material_model_name(args.saved_model_dir)
-    true_model = get_material_from_dir(args.saved_model_dir, jit_P=False)
+    try:
+        true_model = get_material_from_dir(args.saved_model_dir, jit_P=False)
+    except Exception:
+        true_model = None
 
     theta1 = np.pi / 4.0
     theta2 = -np.pi / 4.0

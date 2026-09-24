@@ -181,9 +181,36 @@ class HolesGeometry(BaseGeometry):
         convert_msh_to_npz(msh_path, npz_path)
 
 
+class TTCGeometry(BaseGeometry):
+    """
+    Tensile test specimen TTc with 3 circular holes (Abbasi et al. 2026, EUCLID experimental data).
+    Physical bounds: X in [-90.33, -22.25] mm, Y in [-25.74, 23.89] mm.
+    Left clamp at X <= -90.0 mm (bcx=1), Right clamp at X >= -22.9 mm (bcx=2).
+    """
+    def __init__(self, mesh_npz: str = "mesh/ttc_mesh.npz"):
+        self.mesh_npz = mesh_npz
+
+    def generate_mesh(self, msh_path: str, npz_path: str) -> None:
+        if os.path.exists(self.mesh_npz):
+            import shutil
+            os.makedirs(os.path.dirname(os.path.abspath(npz_path)), exist_ok=True)
+            shutil.copyfile(self.mesh_npz, npz_path)
+        else:
+            raise FileNotFoundError(f"TTC reference mesh not found at {self.mesh_npz}. Please run dataset/convert_ttc_to_pipeline_npz.py first.")
+
+    def get_boundary_predicates(self) -> Dict[str, Callable[[jnp.ndarray], jnp.ndarray]]:
+        return {
+            "left": lambda pt: pt[0] <= -90.0,
+            "right": lambda pt: pt[0] >= -22.9,
+            "bottom": lambda pt: pt[1] <= -25.5,
+            "top": lambda pt: pt[1] >= 23.5,
+        }
+
+
 _GEOMETRY_REGISTRY: Dict[str, Callable[..., BaseGeometry]] = {
     "block": BlockGeometry,
     "holes": HolesGeometry,
+    "ttc": TTCGeometry,
 }
 
 def get_geometry(name: str, **kwargs) -> BaseGeometry:
@@ -324,7 +351,9 @@ def create_default_bc_config(
     mode: str = "force",
     pred_dict: Optional[Dict[str, Callable]] = None,
     prescribe_right: Optional[bool] = None,
-    clamp_top_x: Optional[bool] = None
+    clamp_top_x: Optional[bool] = None,
+    node_coords: Optional[jnp.ndarray] = None,
+    u_boundary: Optional[jnp.ndarray] = None
 ) -> BoundaryConditionConfig:
     """
     Factory helper creating standard boundary conditions for standard geometries.
@@ -369,6 +398,47 @@ def create_default_bc_config(
                 dirichlet_bcs.append(DirichletBC("right_x", pred_dict["right"], dof=0, val=0.0, is_prescribed=True, schedule_index=sched_idx))
                 sched_idx += 1
             dirichlet_bcs.append(DirichletBC("top_y", pred_dict["top"], dof=1, val=0.0, is_prescribed=True, schedule_index=sched_idx))
+            neumann_bcs = []
+    elif geometry_name == "ttc":
+        # TTc tensile specimen with 3 holes
+        # Left boundary (X <= -90.0) is clamped grip (bcx == 1)
+        # Right boundary (X >= -22.9) is loaded / pulled grip (bcx == 2)
+        if node_coords is not None and u_boundary is not None:
+            ref_pts = jnp.asarray(node_coords)
+            u_pts = jnp.asarray(u_boundary)
+
+            def make_val_fn(dof):
+                def val_fn(point):
+                    dists = jnp.sum((ref_pts - point)**2, axis=-1)
+                    idx = jnp.argmin(dists)
+                    return u_pts[idx, dof]
+                return val_fn
+
+            val_left_x = make_val_fn(0)
+            val_left_y = make_val_fn(1)
+            val_right_x = make_val_fn(0)
+            val_right_y = make_val_fn(1)
+        else:
+            val_left_x = 0.0
+            val_left_y = 0.0
+            val_right_x = 0.0
+            val_right_y = 0.0
+
+        if mode == "force":
+            dirichlet_bcs = [
+                DirichletBC("left_x", pred_dict["left"], dof=0, val=val_left_x),
+                DirichletBC("left_y", pred_dict["left"], dof=1, val=val_left_y)
+            ]
+            neumann_bcs = [
+                NeumannBC("right", pred_dict["right"], direction=(-1.0, 0.0), load_index=0)
+            ]
+        else: # displacement
+            dirichlet_bcs = [
+                DirichletBC("left_x", pred_dict["left"], dof=0, val=val_left_x, is_prescribed=False),
+                DirichletBC("left_y", pred_dict["left"], dof=1, val=val_left_y, is_prescribed=False),
+                DirichletBC("right_x", pred_dict["right"], dof=0, val=val_right_x, is_prescribed=True, schedule_index=0),
+                DirichletBC("right_y", pred_dict["right"], dof=1, val=val_right_y, is_prescribed=False)
+            ]
             neumann_bcs = []
     else: # default "block"
         if mode == "force":
@@ -480,8 +550,10 @@ def solve_adaptive_fem(
     problem: Problem,
     bc_config: BoundaryConditionConfig,
     schedule: jnp.ndarray,
-    petsc_options: dict,
-    max_substeps: int = 32
+    petsc_options: Optional[Dict] = None,
+    max_substeps: int = 32,
+    initial_substeps: int = 4,
+    u_boundary_steps: Optional[jnp.ndarray] = None
 ) -> jnp.ndarray:
     """
     Solves nonlinear hyperelastic FEM over an incremental schedule (loads or displacements)
@@ -493,6 +565,8 @@ def solve_adaptive_fem(
         schedule: (num_steps, n_dims) array of loads or displacements.
         petsc_options: solver dictionary.
         max_substeps: maximum substep divisions.
+        initial_substeps: initial number of substeps per schedule increment (default: 4).
+        u_boundary_steps: optional (num_steps, num_nodes, 2) array of full boundary displacement fields.
     Returns:
         u_array: (num_steps, num_nodes, 2)
     """
@@ -509,11 +583,13 @@ def solve_adaptive_fem(
             if dbc.is_prescribed:
                 prescribed_dof_map.append((i, dbc.schedule_index))
 
+    base_vals_list = [jnp.array(v) for v in problem.fes[0].vals_list]
+
     for step_idx in range(n_steps):
         target = schedule[step_idx]
         success = False
         current_u = u
-        num_substeps = 1
+        num_substeps = initial_substeps
 
         while not success:
             try:
@@ -532,12 +608,31 @@ def solve_adaptive_fem(
                             surface_vars.append([jnp.full(fill_value=val_k, shape=shape_k)])
                         problem.internal_vars_surfaces = surface_vars
                     elif bc_config.mode == "displacement":
-                        # Apply prescribed Dirichlet displacement
-                        for val_idx, s_idx in prescribed_dof_map:
-                            disp_val = interm[s_idx] if (hasattr(interm, '__getitem__') and interm.ndim > 0) else interm
-                            problem.fes[0].vals_list[val_idx] = jnp.full_like(
-                                problem.fes[0].vals_list[val_idx], disp_val
-                            )
+                        if u_boundary_steps is not None and u_boundary_steps.ndim == 3 and len(u_boundary_steps) == n_steps:
+                            # Direct multi-step experimental boundary ramping from step k-1 to step k
+                            fe = problem.fes[0]
+                            for i_dbc, dbc in enumerate(bc_config.dirichlet_bcs):
+                                n_inds = fe.node_inds_list[i_dbc]
+                                dof = fe.vec_inds_list[i_dbc][0]
+                                curr_b = u_boundary_steps[step_idx, n_inds, dof]
+                                prev_b = u_boundary_steps[step_idx - 1, n_inds, dof] if step_idx > 0 else jnp.zeros_like(curr_b)
+                                fe.vals_list[i_dbc] = prev_b + frac * (curr_b - prev_b)
+                        else:
+                            # Apply prescribed Dirichlet displacement
+                            for val_idx, s_idx in prescribed_dof_map:
+                                disp_val = interm[s_idx] if (hasattr(interm, '__getitem__') and interm.ndim > 0) else interm
+                                base_v = base_vals_list[val_idx]
+                                if jnp.all(base_v == 0.0):
+                                    problem.fes[0].vals_list[val_idx] = jnp.full_like(base_v, disp_val)
+                                else:
+                                    problem.fes[0].vals_list[val_idx] = base_v * frac
+
+                            # Scale non-zero non-prescribed Dirichlet boundaries (e.g. experimental clamps)
+                            for i_dbc, dbc in enumerate(bc_config.dirichlet_bcs):
+                                if not dbc.is_prescribed:
+                                    base_v = base_vals_list[i_dbc]
+                                    if not jnp.all(base_v == 0.0):
+                                        problem.fes[0].vals_list[i_dbc] = base_v * frac
 
                     u_sol = solver(problem, solver_options={
                         'petsc_solver': petsc_options,

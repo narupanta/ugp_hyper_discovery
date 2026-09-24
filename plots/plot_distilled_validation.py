@@ -47,9 +47,15 @@ def main():
     from core.material_models import get_material_from_dir
     try:
         true_model = get_material_from_dir(saved_model_dir, jit_P=False)
-    except FileNotFoundError:
-        true_model = get_material_from_dir(distilled_dir, jit_P=False)
-    true_model_name = infer_material_model_name(saved_model_dir)
+    except Exception:
+        try:
+            true_model = get_material_from_dir(distilled_dir, jit_P=False)
+        except Exception:
+            true_model = None
+    try:
+        true_model_name = infer_material_model_name(saved_model_dir)
+    except Exception:
+        true_model_name = "experimental"
     
     # 2. Load GP Model
     best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
@@ -169,8 +175,12 @@ def main():
         transitions.append(trans_g)
 
     # 5. Evaluate True and GP
-    psi_true = jax.vmap(true_model.psi)(F_all)
-    P_true = jax.vmap(jax.vmap(true_model.P))(F_all)
+    if true_model is not None:
+        psi_true = jax.vmap(true_model.psi)(F_all)
+        P_true = jax.vmap(jax.vmap(true_model.P))(F_all)
+    else:
+        psi_true = None
+        P_true = None
     
     psi_dist_mean = [learned_gp.psi_dist(F_all[mode]).mean for mode in range(len(mode_names))]
     psi_dist_var = [learned_gp.psi_dist(F_all[mode]).var for mode in range(len(mode_names))]
@@ -190,18 +200,19 @@ def main():
     aniso_names = ["$C_{42}$", "$C_{43}$", "$C_{44}$", "$C_{62}$", "$C_{63}$", "$C_{64}$"]
     
     true_params = {}
-    if hasattr(true_model, "dev_params"):
-        for name, val in zip(dev_names, true_model.dev_params):
-            if abs(val) > 1e-12:
-                true_params[name] = float(val)
-    if hasattr(true_model, "vol_params"):
-        for name, val in zip(vol_names, true_model.vol_params):
-            if abs(val) > 1e-12:
-                true_params[name] = float(val)
-    if hasattr(true_model, "aniso_params"):
-        for name, val in zip(aniso_names, true_model.aniso_params):
-            if abs(val) > 1e-12:
-                true_params[name] = float(val)
+    if true_model is not None:
+        if hasattr(true_model, "dev_params") and true_model.dev_params is not None:
+            for name, val in zip(dev_names, true_model.dev_params):
+                if abs(val) > 1e-12:
+                    true_params[name] = float(val)
+        if hasattr(true_model, "vol_params") and true_model.vol_params is not None:
+            for name, val in zip(vol_names, true_model.vol_params):
+                if abs(val) > 1e-12:
+                    true_params[name] = float(val)
+        if hasattr(true_model, "aniso_params") and true_model.aniso_params is not None:
+            for name, val in zip(aniso_names, true_model.aniso_params):
+                if abs(val) > 1e-12:
+                    true_params[name] = float(val)
 
     if args.distill_target == "sef_split":
         # Load samples for components
@@ -324,18 +335,20 @@ def main():
             row, col = i // 2, i % 2
             ax_psi = axes_psi[row, col]
             
-            # 1. Plot ground truth
-            ax_psi.plot(gamma, true_psi_list[i], 'k--', lw=1.5, label="Ground Truth", zorder=5)
+            has_gt = true_psi_list is not None and i < len(true_psi_list) and true_psi_list[i] is not None
+            # 1. Plot ground truth if available
+            if has_gt:
+                ax_psi.plot(gamma, true_psi_list[i], 'k--', lw=1.5, label="Ground Truth", zorder=5)
             
             # 2. Plot GP posterior if provided
             if gp_mean_list is not None and gp_var_list is not None:
                 gp_psi_lower = gp_mean_list[i] - 1.96 * jnp.sqrt(gp_var_list[i])
                 gp_psi_upper = gp_mean_list[i] + 1.96 * jnp.sqrt(gp_var_list[i])
-                gp_cov_psi = jnp.mean((true_psi_list[i] >= gp_psi_lower) & (true_psi_list[i] <= gp_psi_upper))
-                
-                rmse_psi_gp = jnp.sqrt(jnp.mean((gp_mean_list[i] - true_psi_list[i]) ** 2))
-                ss_tot_psi = jnp.sum((true_psi_list[i] - jnp.mean(true_psi_list[i])) ** 2)
-                r2_psi_gp = 1 - jnp.sum((true_psi_list[i] - gp_mean_list[i]) ** 2) / (ss_tot_psi + 1e-12)
+                if has_gt:
+                    gp_cov_psi = jnp.mean((true_psi_list[i] >= gp_psi_lower) & (true_psi_list[i] <= gp_psi_upper))
+                    rmse_psi_gp = jnp.sqrt(jnp.mean((gp_mean_list[i] - true_psi_list[i]) ** 2))
+                    ss_tot_psi = jnp.sum((true_psi_list[i] - jnp.mean(true_psi_list[i])) ** 2)
+                    r2_psi_gp = 1 - jnp.sum((true_psi_list[i] - gp_mean_list[i]) ** 2) / (ss_tot_psi + 1e-12)
                 
                 ax_psi.fill_between(gamma, gp_psi_lower, gp_psi_upper, color='gray', alpha=0.3, label="GP 95% CI")
                 ax_psi.plot(gamma, gp_mean_list[i], color='gray', lw=1.5, ls='-', label="GP mean", zorder=4)
@@ -347,45 +360,52 @@ def main():
             # Since GP metrics aren't separated in plotting, we just plot true and distilled samples for dev/vol
             nf_psi_lower = jnp.percentile(samples_list[i], 2.5, axis=0)
             nf_psi_upper = jnp.percentile(samples_list[i], 97.5, axis=0)
-            nf_cov_psi = jnp.mean((true_psi_list[i] >= nf_psi_lower) & (true_psi_list[i] <= nf_psi_upper))
-            
             dist_psi_mean = samples_list[i].mean(axis=0)
-            rmse_psi = jnp.sqrt(jnp.mean((dist_psi_mean - true_psi_list[i]) ** 2))
-            ss_tot_psi = jnp.sum((true_psi_list[i] - jnp.mean(true_psi_list[i])) ** 2)
-            r2_psi = 1 - jnp.sum((true_psi_list[i] - dist_psi_mean) ** 2) / (ss_tot_psi + 1e-12)
+            if has_gt:
+                nf_cov_psi = jnp.mean((true_psi_list[i] >= nf_psi_lower) & (true_psi_list[i] <= nf_psi_upper))
+                rmse_psi = jnp.sqrt(jnp.mean((dist_psi_mean - true_psi_list[i]) ** 2))
+                ss_tot_psi = jnp.sum((true_psi_list[i] - jnp.mean(true_psi_list[i])) ** 2)
+                r2_psi = 1 - jnp.sum((true_psi_list[i] - dist_psi_mean) ** 2) / (ss_tot_psi + 1e-12)
             
             ax_psi.fill_between(gamma, nf_psi_lower, nf_psi_upper, color=dist_color, alpha=0.15, label="Distilled 95%CI", zorder=2)
             ax_psi.plot(gamma, samples_list[i].T, color=dist_color, lw=0.6, alpha=0.1, zorder=1)
             ax_psi.plot([], [], color=dist_color, lw=0.6, alpha=0.5, label="Distilled Samples")
             ax_psi.plot(gamma, dist_psi_mean, color=dist_color, lw=2.0, label="Distilled Mean", zorder=3)
             
-            annotation_dist_psi = (
-                "Distilled Samples\n" +
-                fr"$\mathrm{{EC}}_{{95\%}}$: {nf_cov_psi:.1%}" + "\n" + 
-                f"RMSE: {rmse_psi:.4f}\n" +
-                fr"$R^2$: {r2_psi:.4f}"
-            )
-            
-            if gp_mean_list is not None and gp_var_list is not None:
-                annotation_gp_psi = (
-                    "GP Extraction\n" +
-                    fr"$\mathrm{{EC}}_{{95\%}}$: {gp_cov_psi:.1%}" + "\n" + 
-                    f"RMSE: {rmse_psi_gp:.4f}\n" +
-                    fr"$R^2$: {r2_psi_gp:.4f}"
+            if has_gt:
+                annotation_dist_psi = (
+                    "Distilled Samples\n" +
+                    fr"$\mathrm{{EC}}_{{95\%}}$: {nf_cov_psi:.1%}" + "\n" + 
+                    f"RMSE: {rmse_psi:.4f}\n" +
+                    fr"$R^2$: {r2_psi:.4f}"
                 )
-                ax_psi.annotate(annotation_gp_psi, xy=(0.02, 0.95), xycoords='axes fraction', 
-                                ha='left', va='top', fontsize=9, fontweight='bold',
-                                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", lw=1.5, alpha=0.8), zorder=6)
                 
-                ax_psi.annotate(annotation_dist_psi, xy=(0.42, 0.95), xycoords='axes fraction', 
-                                ha='left', va='top', fontsize=9, fontweight='bold',
-                                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=dist_color, lw=1.5, alpha=0.8), zorder=6)
-            else:
-                ax_psi.annotate(annotation_dist_psi, xy=(0.02, 0.95), xycoords='axes fraction', 
-                                ha='left', va='top', fontsize=9, fontweight='bold',
-                                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=dist_color, lw=1.5, alpha=0.8), zorder=6)
+                if gp_mean_list is not None and gp_var_list is not None:
+                    annotation_gp_psi = (
+                        "GP Extraction\n" +
+                        fr"$\mathrm{{EC}}_{{95\%}}$: {gp_cov_psi:.1%}" + "\n" + 
+                        f"RMSE: {rmse_psi_gp:.4f}\n" +
+                        fr"$R^2$: {r2_psi_gp:.4f}"
+                    )
+                    ax_psi.annotate(annotation_gp_psi, xy=(0.02, 0.95), xycoords='axes fraction', 
+                                    ha='left', va='top', fontsize=9, fontweight='bold',
+                                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", lw=1.5, alpha=0.8), zorder=6)
+                    
+                    ax_psi.annotate(annotation_dist_psi, xy=(0.42, 0.95), xycoords='axes fraction', 
+                                    ha='left', va='top', fontsize=9, fontweight='bold',
+                                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=dist_color, lw=1.5, alpha=0.8), zorder=6)
+                else:
+                    ax_psi.annotate(annotation_dist_psi, xy=(0.02, 0.95), xycoords='axes fraction', 
+                                    ha='left', va='top', fontsize=9, fontweight='bold',
+                                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=dist_color, lw=1.5, alpha=0.8), zorder=6)
 
-            y_min_psi, y_max_psi = jnp.min(true_psi_list[i]), jnp.max(true_psi_list[i])
+            if has_gt:
+                y_min_psi, y_max_psi = jnp.min(true_psi_list[i]), jnp.max(true_psi_list[i])
+            elif gp_mean_list is not None and gp_var_list is not None:
+                y_min_psi = min(float(jnp.min(gp_psi_lower)), float(jnp.min(nf_psi_lower)))
+                y_max_psi = max(float(jnp.max(gp_psi_upper)), float(jnp.max(nf_psi_upper)))
+            else:
+                y_min_psi, y_max_psi = float(jnp.min(nf_psi_lower)), float(jnp.max(nf_psi_upper))
             pad_psi = (y_max_psi - y_min_psi) * 0.1 if y_max_psi != y_min_psi else 1.0
             ax_psi.set_ylim(y_min_psi - pad_psi, y_max_psi + pad_psi)
             ax_psi.set_xlim(0, gamma.max())
@@ -420,30 +440,34 @@ def main():
         print(f"Validation {title_prefix} plot saved to: {save_file}")
 
     if args.distill_target == "sef_split":
-        psi_true_dev = []
-        psi_true_vol = []
-        psi_true_aniso = []
-        for F_mode in F_all:
-            if hasattr(true_model, 'psi_dev') and hasattr(true_model, 'psi_vol'):
-                psi_true_dev.append(jax.vmap(true_model.psi_dev)(F_mode))
-                psi_true_vol.append(jax.vmap(true_model.psi_vol)(F_mode))
-            elif hasattr(true_model, 'dev_params') and hasattr(true_model, 'vol_params'):
-                td = list(true_model.dev_params)
-                tv = list(true_model.vol_params)
-                t_dev = get_material(true_model_name, dev_params=td, vol_params=[0,0,0], jit_P=False)
-                t_vol = get_material(true_model_name, dev_params=[0]*9, vol_params=tv, jit_P=False)
-                psi_true_dev.append(jax.vmap(t_dev.psi)(F_mode))
-                psi_true_vol.append(jax.vmap(t_vol.psi)(F_mode))
-            else:
-                # Fallback to total energy if model cannot be split
-                psi_true_dev.append(jax.vmap(true_model.psi)(F_mode))
-                psi_true_vol.append(jax.vmap(true_model.psi)(F_mode))
-                
-            if has_aniso and hasattr(true_model, 'psi_aniso'):
-                psi_true_aniso.append(jax.vmap(true_model.psi_aniso)(F_mode))
-            elif has_aniso:
-                psi_true_aniso.append(jnp.zeros(len(F_mode)))
-
+        if true_model is not None:
+            psi_true_dev = []
+            psi_true_vol = []
+            psi_true_aniso = []
+            for F_mode in F_all:
+                if hasattr(true_model, 'psi_dev') and hasattr(true_model, 'psi_vol'):
+                    psi_true_dev.append(jax.vmap(true_model.psi_dev)(F_mode))
+                    psi_true_vol.append(jax.vmap(true_model.psi_vol)(F_mode))
+                elif hasattr(true_model, 'dev_params') and hasattr(true_model, 'vol_params'):
+                    td = list(true_model.dev_params)
+                    tv = list(true_model.vol_params)
+                    t_dev = get_material(true_model_name, dev_params=td, vol_params=[0,0,0], jit_P=False)
+                    t_vol = get_material(true_model_name, dev_params=[0]*9, vol_params=tv, jit_P=False)
+                    psi_true_dev.append(jax.vmap(t_dev.psi)(F_mode))
+                    psi_true_vol.append(jax.vmap(t_vol.psi)(F_mode))
+                else:
+                    # Fallback to total energy if model cannot be split
+                    psi_true_dev.append(jax.vmap(true_model.psi)(F_mode))
+                    psi_true_vol.append(jax.vmap(true_model.psi)(F_mode))
+                    
+                if has_aniso and hasattr(true_model, 'psi_aniso'):
+                    psi_true_aniso.append(jax.vmap(true_model.psi_aniso)(F_mode))
+                elif has_aniso:
+                    psi_true_aniso.append(jnp.zeros(len(F_mode)))
+        else:
+            psi_true_dev = None
+            psi_true_vol = None
+            psi_true_aniso = None
         aniso_psi_dist_mean = [learned_gp.aniso_psi_dist(F_all[mode]).mean for mode in range(len(mode_names))]
         aniso_psi_dist_var = [learned_gp.aniso_psi_dist(F_all[mode]).var for mode in range(len(mode_names))]
 
@@ -542,49 +566,54 @@ def main():
             idx_comp = (0, 0); label_P = r"$P_{11}$"
 
         # --- ENERGY PLOT (ax_psi) ---
-        ax_psi.plot(gamma, psi_true[i], 'k--', lw=1.5, label="Ground Truth", zorder=5)
+        has_gt_psi = psi_true is not None and i < len(psi_true) and psi_true[i] is not None
+        if has_gt_psi:
+            ax_psi.plot(gamma, psi_true[i], 'k--', lw=1.5, label="Ground Truth", zorder=5)
         
         gp_psi_lower = psi_dist_mean[i] - 1.96 * jnp.sqrt(psi_dist_var[i])
         gp_psi_upper = psi_dist_mean[i] + 1.96 * jnp.sqrt(psi_dist_var[i])
-        gp_cov_psi = jnp.mean((psi_true[i] >= gp_psi_lower) & (psi_true[i] <= gp_psi_upper))
         
         nf_psi_lower = jnp.percentile(dist_psi_samples[i], 2.5, axis=0)
         nf_psi_upper = jnp.percentile(dist_psi_samples[i], 97.5, axis=0)
-        nf_cov_psi = jnp.mean((psi_true[i] >= nf_psi_lower) & (psi_true[i] <= nf_psi_upper))
-        
         dist_psi_mean = dist_psi_samples[i].mean(axis=0)
-        rmse_psi = jnp.sqrt(jnp.mean((dist_psi_mean - psi_true[i]) ** 2))
-        ss_tot_psi = jnp.sum((psi_true[i] - jnp.mean(psi_true[i])) ** 2)
-        r2_psi = 1 - jnp.sum((psi_true[i] - dist_psi_mean) ** 2) / (ss_tot_psi + 1e-12)
-        
-        rmse_psi_gp = jnp.sqrt(jnp.mean((psi_dist_mean[i] - psi_true[i]) ** 2))
-        r2_psi_gp = 1 - jnp.sum((psi_true[i] - psi_dist_mean[i]) ** 2) / (ss_tot_psi + 1e-12)
         
         ax_psi.plot(gamma, dist_psi_samples[i].T, color="blue", lw=0.6, alpha=0.35, zorder=2)
         ax_psi.plot([], [], color="blue", lw=2.0, label=f"Distilled Samples ({args.material_model.upper()})")
         ax_psi.plot(gamma, psi_dist_mean[i], color="gray", lw=1.5, label="GP Mean", zorder=4)
         ax_psi.fill_between(gamma, gp_psi_lower, gp_psi_upper, color="gray", alpha=0.3, zorder=3, label="GP Posterior (95% CI)")
         
-        annotation_gp_psi = (
-            "GP Extraction\n" +
-            fr"$\mathrm{{EC}}_{{95\%}}$: {gp_cov_psi:.1%}" + "\n" + 
-            f"RMSE: {rmse_psi_gp:.4f}\n" +
-            fr"$R^2$: {r2_psi_gp:.4f}"
-        )
-        annotation_dist_psi = (
-            "Distilled Samples\n" +
-            fr"$\mathrm{{EC}}_{{95\%}}$: {nf_cov_psi:.1%}" + "\n" + 
-            f"RMSE: {rmse_psi:.4f}\n" +
-            fr"$R^2$: {r2_psi:.4f}"
-        )
-        ax_psi.annotate(annotation_gp_psi, xy=(0.02, 0.95), xycoords='axes fraction', 
-                        ha='left', va='top', fontsize=9, fontweight='bold',
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", lw=1.5, alpha=0.8), zorder=6)
-        ax_psi.annotate(annotation_dist_psi, xy=(0.42, 0.95), xycoords='axes fraction', 
-                        ha='left', va='top', fontsize=9, fontweight='bold',
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="blue", lw=1.5, alpha=0.8), zorder=6)
-        
-        y_min, y_max = jnp.min(psi_true[i]), jnp.max(psi_true[i])
+        if has_gt_psi:
+            gp_cov_psi = jnp.mean((psi_true[i] >= gp_psi_lower) & (psi_true[i] <= gp_psi_upper))
+            nf_cov_psi = jnp.mean((psi_true[i] >= nf_psi_lower) & (psi_true[i] <= nf_psi_upper))
+            rmse_psi = jnp.sqrt(jnp.mean((dist_psi_mean - psi_true[i]) ** 2))
+            ss_tot_psi = jnp.sum((psi_true[i] - jnp.mean(psi_true[i])) ** 2)
+            r2_psi = 1 - jnp.sum((psi_true[i] - dist_psi_mean) ** 2) / (ss_tot_psi + 1e-12)
+            rmse_psi_gp = jnp.sqrt(jnp.mean((psi_dist_mean[i] - psi_true[i]) ** 2))
+            r2_psi_gp = 1 - jnp.sum((psi_true[i] - psi_dist_mean[i]) ** 2) / (ss_tot_psi + 1e-12)
+            
+            annotation_gp_psi = (
+                "GP Extraction\n" +
+                fr"$\mathrm{{EC}}_{{95\%}}$: {gp_cov_psi:.1%}" + "\n" + 
+                f"RMSE: {rmse_psi_gp:.4f}\n" +
+                fr"$R^2$: {r2_psi_gp:.4f}"
+            )
+            annotation_dist_psi = (
+                "Distilled Samples\n" +
+                fr"$\mathrm{{EC}}_{{95\%}}$: {nf_cov_psi:.1%}" + "\n" + 
+                f"RMSE: {rmse_psi:.4f}\n" +
+                fr"$R^2$: {r2_psi:.4f}"
+            )
+            ax_psi.annotate(annotation_gp_psi, xy=(0.02, 0.95), xycoords='axes fraction', 
+                            ha='left', va='top', fontsize=9, fontweight='bold',
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", lw=1.5, alpha=0.8), zorder=6)
+            ax_psi.annotate(annotation_dist_psi, xy=(0.42, 0.95), xycoords='axes fraction', 
+                            ha='left', va='top', fontsize=9, fontweight='bold',
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="blue", lw=1.5, alpha=0.8), zorder=6)
+            y_min, y_max = jnp.min(psi_true[i]), jnp.max(psi_true[i])
+        else:
+            y_min = min(float(jnp.min(gp_psi_lower)), float(jnp.min(nf_psi_lower)))
+            y_max = max(float(jnp.max(gp_psi_upper)), float(jnp.max(nf_psi_upper)))
+
         pad = (y_max - y_min) * 0.1 if y_max != y_min else 0.1
         ax_psi.set_ylim(y_min - pad, y_max + pad)
         ax_psi.set_xlim(0, gamma.max())
@@ -593,54 +622,56 @@ def main():
             ax_psi.set_ylabel(r"$\Psi$", fontsize=11)
 
         # --- STRESS PLOT (ax_p) ---
-        p_true_comp = P_true[i, :, idx_comp[0], idx_comp[1]]
         p_mean_comp = P_dist_mean[i][:, idx_comp[0], idx_comp[1]]
         p_std_comp = jnp.sqrt(P_dist_var[i][:, idx_comp[0], idx_comp[1]])
         p_samples_comp = dist_p_samples[i][:, :, idx_comp[0], idx_comp[1]]
-
-        ax_p.plot(gamma, p_true_comp, 'k--', lw=1.5, label="Ground Truth", zorder=5)
-        
         gp_p_lower = p_mean_comp - 1.96 * p_std_comp
         gp_p_upper = p_mean_comp + 1.96 * p_std_comp
-        gp_cov_p = jnp.mean((p_true_comp >= gp_p_lower) & (p_true_comp <= gp_p_upper))
-        
         nf_p_lower = jnp.percentile(p_samples_comp, 2.5, axis=0)
         nf_p_upper = jnp.percentile(p_samples_comp, 97.5, axis=0)
-        nf_cov_p = jnp.mean((p_true_comp >= nf_p_lower) & (p_true_comp <= nf_p_upper))
-        
         dist_p_mean = p_samples_comp.mean(axis=0)
-        rmse_p = jnp.sqrt(jnp.mean((dist_p_mean - p_true_comp) ** 2))
-        ss_tot_p = jnp.sum((p_true_comp - jnp.mean(p_true_comp)) ** 2)
-        r2_p = 1 - jnp.sum((p_true_comp - dist_p_mean) ** 2) / (ss_tot_p + 1e-12)
-        
-        rmse_p_gp = jnp.sqrt(jnp.mean((p_mean_comp - p_true_comp) ** 2))
-        r2_p_gp = 1 - jnp.sum((p_true_comp - p_mean_comp) ** 2) / (ss_tot_p + 1e-12)
-        
+
+        has_gt_p = P_true is not None and i < len(P_true)
+        if has_gt_p:
+            p_true_comp = P_true[i, :, idx_comp[0], idx_comp[1]]
+            ax_p.plot(gamma, p_true_comp, 'k--', lw=1.5, label="Ground Truth", zorder=5)
+
+            gp_cov_p = jnp.mean((p_true_comp >= gp_p_lower) & (p_true_comp <= gp_p_upper))
+            nf_cov_p = jnp.mean((p_true_comp >= nf_p_lower) & (p_true_comp <= nf_p_upper))
+            rmse_p = jnp.sqrt(jnp.mean((dist_p_mean - p_true_comp) ** 2))
+            ss_tot_p = jnp.sum((p_true_comp - jnp.mean(p_true_comp)) ** 2)
+            r2_p = 1 - jnp.sum((p_true_comp - dist_p_mean) ** 2) / (ss_tot_p + 1e-12)
+            rmse_p_gp = jnp.sqrt(jnp.mean((p_mean_comp - p_true_comp) ** 2))
+            r2_p_gp = 1 - jnp.sum((p_true_comp - p_mean_comp) ** 2) / (ss_tot_p + 1e-12)
+            
+            annotation_gp_p = (
+                "GP Extraction\n" +
+                fr"$\mathrm{{EC}}_{{95\%}}$: {gp_cov_p:.1%}" + "\n" + 
+                f"RMSE: {rmse_p_gp:.4f}\n" +
+                fr"$R^2$: {r2_p_gp:.4f}"
+            )
+            annotation_dist_p = (
+                "Distilled Samples\n" +
+                fr"$\mathrm{{EC}}_{{95\%}}$: {nf_cov_p:.1%}" + "\n" + 
+                f"RMSE: {rmse_p:.4f}\n" +
+                fr"$R^2$: {r2_p:.4f}"
+            )
+            ax_p.annotate(annotation_gp_p, xy=(0.02, 0.95), xycoords='axes fraction', 
+                            ha='left', va='top', fontsize=9, fontweight='bold',
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", lw=1.5, alpha=0.8), zorder=6)
+            ax_p.annotate(annotation_dist_p, xy=(0.42, 0.95), xycoords='axes fraction', 
+                            ha='left', va='top', fontsize=9, fontweight='bold',
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="blue", lw=1.5, alpha=0.8), zorder=6)
+            y_min_p, y_max_p = jnp.min(p_true_comp), jnp.max(p_true_comp)
+        else:
+            y_min_p = min(float(jnp.min(gp_p_lower)), float(jnp.min(nf_p_lower)))
+            y_max_p = max(float(jnp.max(gp_p_upper)), float(jnp.max(nf_p_upper)))
+
         ax_p.plot(gamma, p_samples_comp.T, color="blue", lw=0.6, alpha=0.35, zorder=2)
         ax_p.plot([], [], color="blue", lw=2.0, label=f"Distilled Samples ({args.material_model.upper()})")
         ax_p.plot(gamma, p_mean_comp, color="gray", lw=1.5, label="GP Mean", zorder=4)
         ax_p.fill_between(gamma, gp_p_lower, gp_p_upper, color="gray", alpha=0.3, zorder=3, label="GP Posterior (95% CI)")
-                         
-        annotation_gp_p = (
-            "GP Extraction\n" +
-            fr"$\mathrm{{EC}}_{{95\%}}$: {gp_cov_p:.1%}" + "\n" + 
-            f"RMSE: {rmse_p_gp:.4f}\n" +
-            fr"$R^2$: {r2_p_gp:.4f}"
-        )
-        annotation_dist_p = (
-            "Distilled Samples\n" +
-            fr"$\mathrm{{EC}}_{{95\%}}$: {nf_cov_p:.1%}" + "\n" + 
-            f"RMSE: {rmse_p:.4f}\n" +
-            fr"$R^2$: {r2_p:.4f}"
-        )
-        ax_p.annotate(annotation_gp_p, xy=(0.02, 0.95), xycoords='axes fraction', 
-                        ha='left', va='top', fontsize=9, fontweight='bold',
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", lw=1.5, alpha=0.8), zorder=6)
-        ax_p.annotate(annotation_dist_p, xy=(0.42, 0.95), xycoords='axes fraction', 
-                        ha='left', va='top', fontsize=9, fontweight='bold',
-                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="blue", lw=1.5, alpha=0.8), zorder=6)
 
-        y_min_p, y_max_p = jnp.min(p_true_comp), jnp.max(p_true_comp)
         pad_p = (y_max_p - y_min_p) * 0.1 if y_max_p != y_min_p else 1.0
         ax_p.set_ylim(y_min_p - pad_p, y_max_p + pad_p)
         ax_p.set_xlim(0, gamma.max())

@@ -217,17 +217,21 @@ def update_metrics(distilled_dir, step_idx=9, train_steps=None):
             except Exception:
                 pass
 
-    # 2. Displacement Field metrics (Block and Holes)
+    # 2. Displacement Field metrics (Block, Holes, and TTC)
     disp_block = compute_displacement_metrics(distilled_dir, "fem_validation", step_indices=val_steps)
     disp_holes = compute_displacement_metrics(distilled_dir, "fem_validation_holes", step_indices=val_steps)
+    disp_ttc = compute_displacement_metrics(distilled_dir, "ttc", step_indices=val_steps)
 
     disp_block_train = compute_displacement_metrics(distilled_dir, "fem_validation", step_indices=train_steps) if train_steps else None
     disp_holes_train = compute_displacement_metrics(distilled_dir, "fem_validation_holes", step_indices=train_steps) if train_steps else None
+    disp_ttc_train = compute_displacement_metrics(distilled_dir, "ttc", step_indices=train_steps) if train_steps else None
 
     if disp_block and disp_block_train:
         disp_block["train_steps"] = disp_block_train
     if disp_holes and disp_holes_train:
         disp_holes["train_steps"] = disp_holes_train
+    if disp_ttc and disp_ttc_train:
+        disp_ttc["train_steps"] = disp_ttc_train
 
     # 3. Discovered Model Structure (only survived parameters with 95ci)
     model_struct = extract_model_structure(distilled_dir)
@@ -305,6 +309,13 @@ def update_metrics(distilled_dir, step_idx=9, train_steps=None):
                 os.path.join(distilled_dir, "..", "fem_validation_holes"),
                 os.path.join(distilled_dir, "..", "holes"),
             ])
+        elif folder_name in ["ttc", "fem_validation/ttc"]:
+            candidates.extend([
+                os.path.join(distilled_dir, "fem_validation", "ttc"),
+                os.path.join(distilled_dir, "ttc"),
+                os.path.join(distilled_dir, "..", "fem_validation", "ttc"),
+                os.path.join(distilled_dir, "..", "ttc"),
+            ])
 
         fem_dir = None
         for cand in candidates:
@@ -340,10 +351,12 @@ def update_metrics(distilled_dir, step_idx=9, train_steps=None):
 
     block_time = parse_fem_time("fem_validation")
     holes_time = parse_fem_time("fem_validation_holes")
+    ttc_time = parse_fem_time("ttc") or parse_fem_time("fem_validation/ttc")
     fem_time = {
         "block_sec": block_time,
         "holes_sec": holes_time,
-        "total_sec": max([t for t in [block_time, holes_time] if t is not None] or [0.0])
+        "ttc_sec": ttc_time,
+        "total_sec": max([t for t in [block_time, holes_time, ttc_time] if t is not None] or [0.0])
     }
 
     time_taken = {
@@ -357,12 +370,43 @@ def update_metrics(distilled_dir, step_idx=9, train_steps=None):
         "block": disp_block,
         "holes": disp_holes
     }
+    if disp_ttc:
+        disp_dict["ttc"] = disp_ttc
     if train_steps:
         disp_dict["train"] = {
             "block": disp_block_train,
             "holes": disp_holes_train,
+            "ttc": disp_ttc_train,
             "steps": train_steps
         }
+
+    # Collect conformal calibration metrics if available
+    conformal_dict = {}
+    for g in ["block", "holes", "ttc"]:
+        for cand in [
+            os.path.join(distilled_dir, "..", "fem_validation", g, "conformal_calibration_metrics.json"),
+            os.path.join(distilled_dir, "fem_validation", g, "conformal_calibration_metrics.json"),
+            os.path.join(distilled_dir, g, "conformal_calibration_metrics.json"),
+        ]:
+            if os.path.exists(cand):
+                try:
+                    with open(cand, "r") as f:
+                        conformal_dict[g] = json.load(f)
+                    break
+                except Exception:
+                    pass
+
+    # Also preserve any existing conformal section if already present in val_json_path
+    if os.path.exists(val_json_path):
+        try:
+            with open(val_json_path, "r") as f:
+                old_data = json.load(f)
+                if "conformal" in old_data and isinstance(old_data["conformal"], dict):
+                    for k, v in old_data["conformal"].items():
+                        if k not in conformal_dict:
+                            conformal_dict[k] = v
+        except Exception:
+            pass
 
     unified_dict = {
         "time_taken": time_taken,
@@ -370,6 +414,8 @@ def update_metrics(distilled_dir, step_idx=9, train_steps=None):
         "disp": disp_dict,
         "model_structure": model_struct
     }
+    if conformal_dict:
+        unified_dict["conformal"] = conformal_dict
 
     # Save to validation_metrics_{material}.json
     with open(val_json_path, "w") as f:
@@ -381,6 +427,17 @@ def update_metrics(distilled_dir, step_idx=9, train_steps=None):
     if generic_path != val_json_path:
         with open(generic_path, "w") as f:
             json.dump(unified_dict, f, indent=4)
+
+    for sync_target in [
+        os.path.join(distilled_dir, "..", "fem_validation", "validation_metrics.json"),
+        os.path.join(distilled_dir, "..", "validation_metrics.json"),
+    ]:
+        try:
+            if os.path.exists(os.path.dirname(sync_target)):
+                with open(sync_target, "w") as f:
+                    json.dump(unified_dict, f, indent=4)
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

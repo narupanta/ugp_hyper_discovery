@@ -19,6 +19,16 @@ from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 from core.utils import infer_material_model_name, deformation_gradient_element
 
 def find_dataset_path(saved_model_dir, true_model_name):
+    meta_path = os.path.join(saved_model_dir, "metadata.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r") as mf:
+                mdata = json.load(mf)
+                if "dataset_path" in mdata and os.path.exists(mdata["dataset_path"]):
+                    return mdata["dataset_path"]
+        except Exception:
+            pass
+
     saved_dir_abs = os.path.abspath(saved_model_dir)
     all_parts = saved_dir_abs.split(os.sep)
 
@@ -93,12 +103,23 @@ def main():
                 raise ValueError("saved_model_dir must be provided or available in source_extraction_dir.txt.")
 
     saved_model_dir = os.path.abspath(saved_model_dir)
-    true_model_name = infer_material_model_name(saved_model_dir)
+    try:
+        true_model_name = infer_material_model_name(saved_model_dir)
+    except Exception:
+        true_model_name = "experimental"
+
     from core.material_models import get_material_from_dir
     try:
         true_model = get_material_from_dir(saved_model_dir, jit_P=False)
-    except FileNotFoundError:
-        true_model = get_material_from_dir(distilled_dir, jit_P=False)
+    except Exception:
+        try:
+            true_model = get_material_from_dir(distilled_dir, jit_P=False)
+        except Exception:
+            true_model = None
+
+    if true_model is None:
+        print(f"Skipping plot_distilled_r2_energy: No analytical ground truth model found (experimental mode).")
+        return
 
     # 1. Load Dataset F field
     dataset_path = find_dataset_path(saved_model_dir, true_model_name)

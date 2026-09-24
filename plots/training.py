@@ -554,8 +554,13 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
     psi_vmap = jax.vmap(jax.vmap(learned_gp.psi, in_axes=(0, None)), in_axes=(0, None))
     piola_vmap = jax.vmap(jax.vmap(learned_gp.piola, in_axes=(0, None)), in_axes=(0, None))
 
-    psi_true = jax.vmap(true_model.psi)(F_all)
-    P_true = jax.vmap(jax.vmap(true_model.P))(F_all)
+    if true_model is not None:
+        psi_true = jax.vmap(true_model.psi)(F_all)
+        P_true = jax.vmap(jax.vmap(true_model.P))(F_all)
+    else:
+        psi_true = None
+        P_true = None
+
     psi_dist_mean = [learned_gp.psi_dist(F_all[mode]).mean for mode in range(len(mode_names))]
     psi_dist_var = [learned_gp.psi_dist(F_all[mode]).var for mode in range(len(mode_names))]
 
@@ -583,7 +588,13 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
 
         # Column 0: Energy
         ax_psi = axes[i, 0]
-        ax_psi.plot(gamma, psi_true[i], **CURVE_STYLES["gt"])
+        if psi_true is not None:
+            ax_psi.plot(gamma, psi_true[i], **CURVE_STYLES["gt"])
+            y_min, y_max = jnp.min(psi_true[i]), jnp.max(psi_true[i])
+        else:
+            y_min = jnp.min(psi_dist_mean[i] - 1.96 * jnp.sqrt(jnp.maximum(1e-12, psi_dist_var[i])))
+            y_max = jnp.max(psi_dist_mean[i] + 1.96 * jnp.sqrt(jnp.maximum(1e-12, psi_dist_var[i])))
+
         ax_psi.plot(gamma, psi_dets[i], color="red", lw=0.8, alpha=0.3, zorder=1)
         ax_psi.plot(gamma, psi_samples[:, i, :].T, color="lightblue", lw=0.8, alpha=0.3, zorder=1)
         ax_psi.plot(gamma, psi_dist_mean[i], **CURVE_STYLES["gp"])
@@ -591,27 +602,31 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
         ax_psi.fill_between(gamma, psi_dist_mean[i] - 1.96 * psi_std_i,
                             psi_dist_mean[i] + 1.96 * psi_std_i, **CURVE_STYLES["gp_ci"])
 
-        y_min, y_max = jnp.min(psi_true[i]), jnp.max(psi_true[i])
-        pad = (y_max - y_min) * 0.1
+        pad = (y_max - y_min) * 0.1 if y_max != y_min else 1.0
         ax_psi.set_ylim(y_min - pad, y_max + pad)
         ax_psi.set_xlim(0, gamma.max())
 
         # Column 1: Stress
         ax_p = axes[i, 1]
-        p_true_comp = P_true[i, :, idx_comp[0], idx_comp[1]]
         p_mean_comp = P_dist_mean[i][:, idx_comp[0], idx_comp[1]]
         p_std_comp = jnp.sqrt(jnp.maximum(1e-12, P_dist_var[i][:, idx_comp[0], idx_comp[1]]))
         p_samples_comp = P_samples[:, i, :, idx_comp[0], idx_comp[1]]
         p_det_comp = P_dets[i][:, idx_comp[0], idx_comp[1]]
 
-        ax_p.plot(gamma, p_true_comp, **CURVE_STYLES["gt"])
+        if P_true is not None:
+            p_true_comp = P_true[i, :, idx_comp[0], idx_comp[1]]
+            ax_p.plot(gamma, p_true_comp, **CURVE_STYLES["gt"])
+            y_min_p, y_max_p = jnp.min(p_true_comp), jnp.max(p_true_comp)
+        else:
+            y_min_p = jnp.min(p_mean_comp - 1.96 * p_std_comp)
+            y_max_p = jnp.max(p_mean_comp + 1.96 * p_std_comp)
+
         ax_p.plot(gamma, p_det_comp, color="red", lw=0.8, alpha=0.3, zorder=1)
         ax_p.plot(gamma, p_samples_comp.T, color="lightblue", lw=0.8, alpha=0.3, zorder=1)
         ax_p.plot(gamma, p_mean_comp, **CURVE_STYLES["gp"])
         ax_p.fill_between(gamma, p_mean_comp - 1.96 * p_std_comp,
                           p_mean_comp + 1.96 * p_std_comp, **CURVE_STYLES["gp_ci"])
 
-        y_min_p, y_max_p = jnp.min(p_true_comp), jnp.max(p_true_comp)
         pad_p = (y_max_p - y_min_p) * 0.1 if y_max_p != y_min_p else 1.0
         ax_p.set_ylim(y_min_p - pad_p, y_max_p + pad_p)
         ax_p.set_xlim(0, gamma.max())
@@ -668,22 +683,26 @@ def plot_stress_validation(gp_model, true_model, save_path):
         P_lower_bound = P_mean - 1.96 * P_std
         P_upper_bound = P_mean + 1.96 * P_std
 
-        P_true = jax.vmap(true_model.P)(F_stack)
+        if true_model is not None:
+            P_true = jax.vmap(true_model.P)(F_stack)
+        else:
+            P_true = None
+
         if mode_name == "Pure Shear":
             y_pred = P_mean[:, 1, 1]
-            y_true = P_true[:, 1, 1]
+            y_true = P_true[:, 1, 1] if P_true is not None else None
             lower = P_lower_bound[:, 1, 1]
             upper = P_upper_bound[:, 1, 1]
             label = r"$P_{22}$"
         elif mode_name == "Simple Shear":
             y_pred = P_mean[:, 0, 1]
-            y_true = P_true[:, 0, 1]
+            y_true = P_true[:, 0, 1] if P_true is not None else None
             lower = P_lower_bound[:, 0, 1]
             upper = P_upper_bound[:, 0, 1]
             label = r"$P_{12}$"
         else:
             y_pred = P_mean[:, 0, 0]
-            y_true = P_true[:, 0, 0]
+            y_true = P_true[:, 0, 0] if P_true is not None else None
             lower = P_lower_bound[:, 0, 0]
             upper = P_upper_bound[:, 0, 0]
             label = r"$P_{11}$"
@@ -691,7 +710,8 @@ def plot_stress_validation(gp_model, true_model, save_path):
         gamma_pts = jnp.linspace(0, 1, len(F_stack))
         axes[i].plot(gamma_pts, y_pred, color='#1f77b4', lw=2.0, label='GP Mean')
         axes[i].fill_between(gamma_pts, lower, upper, color='#1f77b4', alpha=0.2, label='95% CI')
-        axes[i].plot(gamma_pts, y_true, 'k--', lw=1.8, label='True')
+        if y_true is not None:
+            axes[i].plot(gamma_pts, y_true, 'k--', lw=1.8, label='True')
 
         axes[i].set_title(mode_name)
         axes[i].set_ylabel(label)
@@ -731,13 +751,19 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
 
     mode_names = MODE_NAMES
 
-    psi_true_tot = jax.vmap(jax.vmap(true_model.psi))(F_all)
-    psi_true_dev = jax.vmap(jax.vmap(true_model.psi_dev))(F_all)
-    psi_true_vol = jax.vmap(jax.vmap(true_model.psi_vol))(F_all)
-    if hasattr(true_model, 'psi_aniso'):
-        psi_true_aniso = jax.vmap(jax.vmap(true_model.psi_aniso))(F_all)
+    if true_model is not None:
+        psi_true_tot = jax.vmap(jax.vmap(true_model.psi))(F_all)
+        psi_true_dev = jax.vmap(jax.vmap(true_model.psi_dev))(F_all)
+        psi_true_vol = jax.vmap(jax.vmap(true_model.psi_vol))(F_all)
+        if hasattr(true_model, 'psi_aniso'):
+            psi_true_aniso = jax.vmap(jax.vmap(true_model.psi_aniso))(F_all)
+        else:
+            psi_true_aniso = jnp.zeros_like(psi_true_tot)
     else:
-        psi_true_aniso = jnp.zeros_like(psi_true_tot)
+        psi_true_tot = None
+        psi_true_dev = None
+        psi_true_vol = None
+        psi_true_aniso = None
 
     dist_tot = jax.vmap(learned_gp.psi_dist)(F_all)
     psi_mean_tot, psi_std_tot = dist_tot.mean, jnp.sqrt(dist_tot.var)
@@ -749,8 +775,8 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
         dist_aniso = jax.vmap(learned_gp.aniso_psi_dist)(F_all)
         psi_mean_aniso, psi_std_aniso = dist_aniso.mean, jnp.sqrt(dist_aniso.var)
     else:
-        psi_mean_aniso = jnp.zeros_like(psi_true_tot)
-        psi_std_aniso = jnp.zeros_like(psi_true_tot)
+        psi_mean_aniso = jnp.zeros_like(psi_mean_tot)
+        psi_std_aniso = jnp.zeros_like(psi_std_tot)
 
     dist_vol = jax.vmap(learned_gp.vol_psi_dist)(F_all)
     psi_mean_vol, psi_std_vol = dist_vol.mean, jnp.sqrt(dist_vol.var)
@@ -784,14 +810,15 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
 
     for i, name in enumerate(mode_names):
         configs = [
-            (0, "Deviatoric", psi_true_dev[i], psi_mean_dev[i], psi_std_dev[i], psi_samples_dev[:, i, :], trans_dev[i]),
-            (1, "Volumetric", psi_true_vol[i], psi_mean_vol[i], psi_std_vol[i], psi_samples_vol[:, i, :], trans_vol[i]),
-            (2, "Anisotropic", psi_true_aniso[i], psi_mean_aniso[i], psi_std_aniso[i], psi_samples_aniso[:, i, :], trans_tot[i]),
-            (3, "Total Energy", psi_true_tot[i], psi_mean_tot[i], psi_std_tot[i], psi_samples_tot[:, i, :], trans_tot[i])
+            (0, "Deviatoric", psi_true_dev[i] if psi_true_dev is not None else None, psi_mean_dev[i], psi_std_dev[i], psi_samples_dev[:, i, :], trans_dev[i]),
+            (1, "Volumetric", psi_true_vol[i] if psi_true_vol is not None else None, psi_mean_vol[i], psi_std_vol[i], psi_samples_vol[:, i, :], trans_vol[i]),
+            (2, "Anisotropic", psi_true_aniso[i] if psi_true_aniso is not None else None, psi_mean_aniso[i], psi_std_aniso[i], psi_samples_aniso[:, i, :], trans_tot[i]),
+            (3, "Total Energy", psi_true_tot[i] if psi_true_tot is not None else None, psi_mean_tot[i], psi_std_tot[i], psi_samples_tot[:, i, :], trans_tot[i])
         ]
         for col, col_name, true_val, mean_val, std_val, samples, trans_g in configs:
             ax = axes[i, col]
-            ax.plot(gamma, true_val, 'k--', lw=1.8, label="True", zorder=5)
+            if true_val is not None:
+                ax.plot(gamma, true_val, 'k--', lw=1.8, label="True", zorder=5)
             ax.plot(gamma, samples.T, color="lightblue", lw=0.8, alpha=0.3, zorder=1)
             ax.plot(gamma, mean_val, color="#1f77b4", lw=2, label="GP Mean", zorder=3)
             ax.fill_between(gamma, mean_val - 1.96 * std_val, mean_val + 1.96 * std_val, color="#1f77b4", alpha=0.2, zorder=2)
@@ -802,14 +829,19 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
                 ax.axvspan(trans_g, max_g, color='red', alpha=0.10, zorder=1, label="Extrapolation" if (i == 0 and col == 3) else "")
                 ax.axvline(x=trans_g, color='darkred', linestyle=':', lw=1.5, alpha=0.8, zorder=4)
 
-            rmse, coverage = calc_metrics(true_val, mean_val, std_val)
+            if true_val is not None:
+                rmse, coverage = calc_metrics(true_val, mean_val, std_val)
+                ax.set_title(f"{name}: {col_name}\nRMSE: {rmse:.4f} | Cov: {coverage:.1f}%")
+                y_min, y_max = jnp.min(true_val), jnp.max(true_val)
+            else:
+                ax.set_title(f"{name}: {col_name}\n(GP Discovery)")
+                y_min = jnp.min(mean_val - 1.96 * std_val)
+                y_max = jnp.max(mean_val + 1.96 * std_val)
 
-            ax.set_title(f"{name}: {col_name}\nRMSE: {rmse:.4f} | Cov: {coverage:.1f}%")
             ax.set_xlabel(r"$\gamma$")
             ax.grid(True, alpha=0.25)
 
-            y_min, y_max = jnp.min(true_val), jnp.max(true_val)
-            pad = (y_max - y_min) * 0.1
+            pad = (y_max - y_min) * 0.1 if y_max != y_min else 1.0
             ax.set_ylim(y_min - pad, y_max + pad)
             ax.set_xlim(0, max_g)
             if i == 0 and col == 3:
@@ -854,6 +886,17 @@ def _format_step_indices(steps):
 
 def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_steps=None, val_steps=None, test_steps=None):
     """Plots parity and computes R2/RMSE/Coverage metrics across training, validation (calibration), and test (extrapolation) steps."""
+    if true_model is None:
+        print("[INFO] Ground truth material model is None (experimental data). Skipping true energy parity plots.")
+        empty_metrics = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
+        return ExtractionR2Metrics(
+            0.0, 0.0, 0.0,
+            train_metrics=empty_metrics,
+            val_metrics=empty_metrics,
+            test_metrics=empty_metrics,
+            by_component={}
+        )
+
     apply_style()
     print("Generating Training, Validation & Test Data R2 Plot...")
     num_steps = F_train_full.shape[0]
