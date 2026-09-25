@@ -244,6 +244,18 @@ def main():
         os.makedirs(s_dir, exist_ok=True)
         plot_fem_parameter_distributions(selected_samples, true_dict, s_dir)
 
+    # Check and plot failed FEM samples if present
+    try:
+        from plots.plot_failed_fem_samples import check_and_plot_failed_samples
+        for s_dir in set(save_dirs):
+            check_and_plot_failed_samples(s_dir)
+            for sub in ["block", "holes"]:
+                sub_p = os.path.join(s_dir, sub)
+                if os.path.exists(sub_p):
+                    check_and_plot_failed_samples(sub_p)
+    except Exception as e:
+        print(f"[WARN] Failed samples check encountered error: {e}")
+
 
 if __name__ == "__main__":
     main()

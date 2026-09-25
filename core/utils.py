@@ -1,4 +1,5 @@
 import os
+from typing import Optional, Callable, Any, Tuple, Union, List, Dict
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -249,7 +250,13 @@ def farthest_point_sampling_with_fixed_point(pts, num_samples, fixed_point):
     return pts_augmented[sampled_indices]
 
 
-def generate_standard_deformation_modes(num_points: int = 100, max_gamma: float = 2.0):
+def generate_standard_deformation_modes(
+    num_points: int = 100,
+    max_gamma: float = 2.0,
+    stress_mode: str = "plane_strain",
+    solve_lambda3_fn: Optional[Callable] = None,
+    material_model: Any = None
+):
     """
     Generates standard hyperelastic deformation modes in 3D:
       0: Uniaxial Tension
@@ -259,27 +266,59 @@ def generate_standard_deformation_modes(num_points: int = 100, max_gamma: float 
       4: Equibiaxial Compression
       5: Simple Shear
 
+    Args:
+        num_points: Number of points along each mode path
+        max_gamma: Maximum strain/stretch measure
+        stress_mode: "plane_strain" (default, F33 = 1.0) or "plane_stress" (F33 = lambda3)
+        solve_lambda3_fn: Optional callable (2, 2) -> scalar lambda3 satisfying P33=0
+        material_model: Optional material model instance. If provided and stress_mode is "plane_stress",
+                        make_plane_stress_piola is used to solve exact compressible lambda3.
+
     Returns:
         F_all: (6, num_points, 3, 3) array of deformation gradient tensors
         gamma: (num_points,) array of stretch / shear increments
     """
     gamma = jnp.linspace(0.0, max_gamma, num_points)
     
-    F_all = jnp.zeros((6, num_points, 3, 3))
-    def set_F(f11, f22, f33, f12=0.0):
-        arr = jnp.zeros((num_points, 3, 3))
+    # 1. Construct 2D deformation gradients (num_points, 2, 2)
+    def set_F2(f11, f22, f12=0.0, f21=0.0):
+        arr = jnp.zeros((num_points, 2, 2))
         arr = arr.at[:, 0, 0].set(f11)
         arr = arr.at[:, 1, 1].set(f22)
-        arr = arr.at[:, 2, 2].set(f33)
         arr = arr.at[:, 0, 1].set(f12)
+        arr = arr.at[:, 1, 0].set(f21)
         return arr
 
-    F_all = F_all.at[0].set(set_F(1 + gamma, 1.0, 1.0))            
-    F_all = F_all.at[1].set(set_F(1 + gamma, 1 + gamma, 1.0))    
-    F_all = F_all.at[2].set(set_F(1 + gamma, 1/(1 + gamma), 1.0)) 
-    F_all = F_all.at[3].set(set_F(1/(1 + gamma), 1.0, 1.0))       
-    F_all = F_all.at[4].set(set_F(1/(1 + gamma), 1/(1 + gamma), 1.0)) 
-    F_all = F_all.at[5].set(set_F(1.0, 1.0, 1.0, f12=gamma))      
+    F2_all = jnp.zeros((6, num_points, 2, 2))
+    F2_all = F2_all.at[0].set(set_F2(1.0 + gamma, 1.0))
+    F2_all = F2_all.at[1].set(set_F2(1.0 + gamma, 1.0 + gamma))
+    F2_all = F2_all.at[2].set(set_F2(1.0 + gamma, 1.0 / (1.0 + gamma)))
+    F2_all = F2_all.at[3].set(set_F2(1.0 / (1.0 + gamma), 1.0))
+    F2_all = F2_all.at[4].set(set_F2(1.0 / (1.0 + gamma), 1.0 / (1.0 + gamma)))
+    F2_all = F2_all.at[5].set(set_F2(1.0, 1.0, f12=gamma))
+
+    # 2. Determine lambda3 (out-of-plane stretch)
+    if stress_mode == "plane_stress":
+        if solve_lambda3_fn is None and material_model is not None:
+            from core.fem_engine import make_plane_stress_piola
+            _, solve_lambda3_fn = make_plane_stress_piola(material_model)
+
+        if solve_lambda3_fn is not None:
+            # Solve compressible lambda3 via root-finding: (6, num_points)
+            lam3_all = jax.vmap(jax.vmap(solve_lambda3_fn))(F2_all)
+        else:
+            # Fallback to standard incompressible plane stress: lambda3 = 1 / det(F_2D)
+            det_f2d = jax.vmap(jax.vmap(jnp.linalg.det))(F2_all)
+            lam3_all = 1.0 / jnp.clip(det_f2d, 1e-6, 1e6)
+    else:
+        # Plane strain: lambda3 = 1.0 identically
+        lam3_all = jnp.ones((6, num_points))
+
+    # 3. Assemble full 3x3 deformation gradients (6, num_points, 3, 3)
+    F_all = jnp.zeros((6, num_points, 3, 3))
+    F_all = F_all.at[:, :, :2, :2].set(F2_all)
+    F_all = F_all.at[:, :, 2, 2].set(lam3_all)
+
     return F_all, gamma
 
 

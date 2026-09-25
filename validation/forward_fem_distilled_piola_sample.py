@@ -720,6 +720,9 @@ if __name__ == "__main__" :
             piola_func=lambda F, p: piola_stress_distilled(F[:2, :2] if F.shape == (3, 3) else F, p, a0, a1)
         )
         
+        failed_samples = []
+        failed_reasons = []
+
         while success_count < n_sample and sample_idx < len(selected_samples):
             params = selected_samples[sample_idx]
             sample_idx += 1
@@ -730,10 +733,13 @@ if __name__ == "__main__" :
             
             try:
                 print(f"Sample {num_existing + success_count + 1}/{target_total_samples}: Attempting realization {sample_idx}/{len(selected_samples)}...")
-                u_pred = solve_adaptive_fem(problem_pred, bc_config, schedule_solve, petsc_options, u_boundary_steps=u_exp)
+                # Solve directly at the prescribed schedule steps without sub-stepping or step-halving
+                u_pred = solve_adaptive_fem(problem_pred, bc_config, schedule_solve, petsc_options, max_substeps=1, initial_substeps=1, u_boundary_steps=u_exp)
                 success = True 
             except Exception as e:
                 print(f"Simulation failed on realization {sample_idx}: {e}")
+                failed_samples.append(params)
+                failed_reasons.append(str(e))
                 success = False
 
             if success:
@@ -741,6 +747,22 @@ if __name__ == "__main__" :
                 actual_selected_samples.append(params)
                 success_count += 1
                 print(f"Sample {num_existing + success_count} completed successfully.")
+
+        # Save failed parameter realizations for post-mortem analysis
+        if len(failed_samples) > 0:
+            if args.output_suffix:
+                fail_file_name = f"failed_samples_{args.output_suffix}.npz"
+            elif args.total_workers > 1:
+                fail_file_name = f"failed_samples_worker{args.worker_id}.npz"
+            else:
+                fail_file_name = "failed_samples.npz"
+            fail_path = os.path.join(save_path, fail_file_name)
+            np.savez_compressed(
+                fail_path,
+                failed_samples=np.array(failed_samples),
+                failed_reasons=np.array(failed_reasons)
+            )
+            print(f"⚠️ Logged {len(failed_samples)} non-convergent parameter realizations to {fail_path}")
 
         if len(u_pred_samples) > 0:
             new_u_arr = np.array(u_pred_samples) # Shape: (n_sample, n_steps, n_nodes, 2)

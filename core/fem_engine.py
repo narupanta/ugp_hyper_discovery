@@ -465,15 +465,15 @@ def create_default_bc_config(
     return BoundaryConditionConfig(mode=mode, dirichlet_bcs=dirichlet_bcs, neumann_bcs=neumann_bcs)
 
 
-def make_plane_stress_piola(mat_model: Any, max_iter: int = 8) -> Tuple[Callable, Callable]:
+def make_plane_stress_piola(mat_model: Any, max_iter: int = 15) -> Tuple[Callable, Callable]:
     """
     Constructs an autodiff-compatible 2D First Piola-Kirchhoff stress function
     P_2D(F_2D) and lambda_3 root solver satisfying P_33(F_2D, lambda_3) = 0
     for compressible hyperelastic materials.
     """
     def solve_lambda3(F_2d: jnp.ndarray) -> jnp.ndarray:
-        det_2d = jnp.linalg.det(F_2d)
-        lam3_0 = 1.0 / jnp.clip(det_2d, 1e-4, 1e4)
+        # Starting at 1.0 avoids overshooting into clipping bounds during severe compression (e.g. Equibiaxial Compression)
+        lam3_0 = 1.0
 
         def step_fn(i, lam):
             def p33_val(l):
@@ -516,11 +516,14 @@ class HyperElasticityProblem(Problem):
         piola_func: Callable,
         surface_maps: Optional[List[Callable]] = None,
         num_internal_params: int = 0,
+        max_newton_iters: int = 50,
         **kwargs
     ):
         self.piola_func = piola_func
         self._surface_maps = surface_maps or []
         self.num_internal_params = num_internal_params
+        self.max_newton_iters = max_newton_iters
+        self._newton_iter_count = 0
         super().__init__(**kwargs)
 
     def custom_init(self):
@@ -531,6 +534,17 @@ class HyperElasticityProblem(Problem):
     def set_params(self, params: jnp.ndarray):
         """Allows dynamic parameter updating without class re-instantiation or recompilation."""
         self.internal_vars = [jnp.tile(params[None, None, :], (self.num_cells, self.fes[0].num_quads, 1))]
+
+    def reset_newton_counter(self):
+        self._newton_iter_count = 0
+
+    def newton_update(self, sol_list):
+        self._newton_iter_count += 1
+        if self._newton_iter_count > self.max_newton_iters:
+            raise RuntimeError(
+                f"Newton solver exceeded maximum allowed iterations ({self.max_newton_iters}) without converging."
+            )
+        return super().newton_update(sol_list)
 
     def get_surface_maps(self):
         return self._surface_maps
@@ -551,21 +565,20 @@ def solve_adaptive_fem(
     bc_config: BoundaryConditionConfig,
     schedule: jnp.ndarray,
     petsc_options: Optional[Dict] = None,
-    max_substeps: int = 32,
-    initial_substeps: int = 4,
+    max_substeps: int = 1,
+    initial_substeps: int = 1,
     u_boundary_steps: Optional[jnp.ndarray] = None
 ) -> jnp.ndarray:
     """
-    Solves nonlinear hyperelastic FEM over an incremental schedule (loads or displacements)
-    with automated step-halving upon PETSc non-convergence.
+    Solves nonlinear hyperelastic FEM over an incremental schedule (loads or displacements).
     
     Parameters:
         problem: instantiated HyperElasticityProblem.
         bc_config: boundary condition configuration.
         schedule: (num_steps, n_dims) array of loads or displacements.
         petsc_options: solver dictionary.
-        max_substeps: maximum substep divisions.
-        initial_substeps: initial number of substeps per schedule increment (default: 4).
+        max_substeps: maximum substep divisions per loadstep (default: 1, no step-halving).
+        initial_substeps: initial number of substeps per schedule increment (default: 1, exactly 1 solve per step).
         u_boundary_steps: optional (num_steps, num_nodes, 2) array of full boundary displacement fields.
     Returns:
         u_array: (num_steps, num_nodes, 2)
@@ -634,6 +647,9 @@ def solve_adaptive_fem(
                                     if not jnp.all(base_v == 0.0):
                                         problem.fes[0].vals_list[i_dbc] = base_v * frac
 
+                    if hasattr(problem, 'reset_newton_counter'):
+                        problem.reset_newton_counter()
+
                     u_sol = solver(problem, solver_options={
                         'petsc_solver': petsc_options,
                         'initial_guess': temp_u
@@ -643,10 +659,15 @@ def solve_adaptive_fem(
                 u = temp_u
                 success = True
             except Exception as e:
+                if num_substeps >= max_substeps:
+                    raise RuntimeError(
+                        f"FEM failed to converge at step {step_idx + 1}/{n_steps} (target={target}) "
+                        f"without sub-stepping: {e}"
+                    )
                 num_substeps *= 2
                 if num_substeps > max_substeps:
                     raise RuntimeError(
-                        f"FEM failed to converge at step {step_idx} (target={target}) "
+                        f"FEM failed to converge at step {step_idx + 1}/{n_steps} (target={target}) "
                         f"with {max_substeps} sub-steps: {e}"
                     )
 

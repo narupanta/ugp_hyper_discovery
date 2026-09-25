@@ -246,6 +246,7 @@ CONTROL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); 
 STRESS_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('stress_mode', d.get('stress_modes', 'plane_strain')))" 2>/dev/null || echo "plane_strain")
 CONSTRAINT_LENGTHSCALE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(int(d.get('constraint_lengthscale', 1)))" 2>/dev/null || echo "1")
 CLAMP_TOP_X=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(1 if d.get('clamp_top_x', True) else 0)" 2>/dev/null || echo "1")
+REACTION_LOSS_WEIGHT=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); val=d.get('reaction_loss_weight', d.get('reaction_loss_scale', '1.0')); print(val if val is not None else '1.0')" 2>/dev/null || echo "1.0")
 
 # Distillation params
 DIST_MODEL=$(get_cfg_default "distilled_material_model" "gmr")
@@ -442,6 +443,8 @@ for SEED in $SEEDS_LIST; do
                     --vf_order "$VF_ORDER" \
                     --control_mode "$CONTROL_MODE" \
                     --stress_mode "$STRESS_MODE" \
+                    --constraint_lengthscale "$CONSTRAINT_LENGTHSCALE" \
+                    --reaction_loss_weight "$REACTION_LOSS_WEIGHT" \
                     --seed "$SEED" \
                     --batch_dir "$CANDIDATE_OUT" \
                     $MAT_EXTRA_ARGS
@@ -487,6 +490,7 @@ for SEED in $SEEDS_LIST; do
                 --control_mode "$CONTROL_MODE" \
                 --stress_mode "$STRESS_MODE" \
                 --constraint_lengthscale "$CONSTRAINT_LENGTHSCALE" \
+                --reaction_loss_weight "$REACTION_LOSS_WEIGHT" \
                 --seed "$SEED" \
                 --batch_dir "$EXTRACT_DIR" \
                 $MAT_EXTRA_ARGS
@@ -804,6 +808,8 @@ for SEED in $SEEDS_LIST; do
                 echo "Generating Reaction Force verification plots for Seed $SEED..."
                 python3 plots/plot_reaction_force_distilled.py --model_path "$VAL_DIR" || true
                 python3 plots/plot_free_node_residuals.py --model_path "$VAL_DIR" || true
+                python3 plots/plot_fem_sampled_parameters.py --model_path "$VAL_DIR" || true
+                python3 plots/plot_failed_fem_samples.py --folder "$VAL_DIR" || true
             fi
 
             # Re-run distilled energy R2 plot and split summary if distilled outputs exist
