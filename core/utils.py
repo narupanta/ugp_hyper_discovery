@@ -198,6 +198,102 @@ def farthest_point_sampling(pts, num_samples):
     
     return jnp.concatenate([jnp.array([first_idx]), remaining_indices])
 
+
+def stratified_high_strain_fps(
+    pts: Any,
+    strain_metric: Any,
+    num_samples: int,
+    n_bins: int = 8,
+    power: float = 1.5
+) -> np.ndarray:
+    """
+    Performs stratified Farthest Point Sampling (FPS) weighted towards high-strain deformation states.
+    Divides the strain_metric range into equal-width bins, assigns target sample quotas with polynomial
+    weighting w ~ (bin_center)^power, and runs FPS within each bin to ensure diverse spatial coverage
+    while prioritizing high-strain regions.
+    """
+    pts_np = np.asarray(pts)
+    strain_np = np.asarray(strain_metric)
+    n_pts = pts_np.shape[0]
+
+    if n_pts <= num_samples:
+        return np.arange(n_pts)
+
+    min_s = float(strain_np.min())
+    max_s = float(strain_np.max())
+    if abs(max_s - min_s) < 1e-12:
+        return np.array(farthest_point_sampling(jnp.asarray(pts_np), num_samples))
+
+    bin_edges = np.linspace(min_s, max_s + 1e-8, n_bins + 1)
+    bin_indices = []
+    for b in range(n_bins - 1):
+        bin_indices.append(np.where((strain_np >= bin_edges[b]) & (strain_np < bin_edges[b+1]))[0])
+    bin_indices.append(np.where((strain_np >= bin_edges[-2]) & (strain_np <= bin_edges[-1]))[0])
+
+    bin_counts = np.array([len(b) for b in bin_indices])
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    weights = (bin_centers - min_s + 0.05) ** power
+    weights = weights / weights.sum()
+
+    allocated = np.zeros(n_bins, dtype=int)
+    remaining_quota = num_samples
+    active_bins = np.ones(n_bins, dtype=bool)
+
+    # Iteratively assign quotas respecting each bin's capacity
+    while remaining_quota > 0 and np.any(active_bins):
+        w = weights * active_bins
+        if w.sum() < 1e-12:
+            break
+        w = w / w.sum()
+        step_alloc = np.round(remaining_quota * w).astype(int)
+
+        capped = False
+        for b in range(n_bins):
+            if active_bins[b]:
+                if allocated[b] + step_alloc[b] >= bin_counts[b]:
+                    step_alloc[b] = bin_counts[b] - allocated[b]
+                    active_bins[b] = False
+                    capped = True
+        allocated += step_alloc
+        remaining_quota = num_samples - allocated.sum()
+        if not capped and remaining_quota == 0:
+            break
+
+    # Assign leftover slots to highest available bins
+    if remaining_quota > 0:
+        for b in reversed(range(n_bins)):
+            available = bin_counts[b] - allocated[b]
+            take = min(available, remaining_quota)
+            allocated[b] += take
+            remaining_quota -= take
+            if remaining_quota == 0:
+                break
+
+    if remaining_quota > 0:
+        for b in range(n_bins):
+            available = bin_counts[b] - allocated[b]
+            take = min(available, remaining_quota)
+            allocated[b] += take
+            remaining_quota -= take
+            if remaining_quota == 0:
+                break
+
+    # Execute FPS within each bin
+    selected = []
+    for b in range(n_bins):
+        k = allocated[b]
+        if k == 0:
+            continue
+        elif k >= bin_counts[b]:
+            selected.extend(bin_indices[b])
+        else:
+            pts_b = jnp.asarray(pts_np[bin_indices[b]])
+            fps_idx = np.array(farthest_point_sampling(pts_b, k))
+            selected.extend(bin_indices[b][fps_idx])
+
+    return np.array(selected[:num_samples])
+
+
 def transform_input_features(invariants) :
     i3 = jnp.maximum(invariants[2], 1e-6)
     j = jnp.sqrt(i3)

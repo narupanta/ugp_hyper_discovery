@@ -593,7 +593,7 @@ def main():
     parser.add_argument("--no_sensitivity", dest="do_sensitivity", action="store_false", help="Skip sensitivity analysis")
     parser.add_argument("--sobol_threshold", type=float, default=1e-4, help="Total Sobol index threshold for selecting sensitive parameters")
     parser.add_argument("--sobol_samples_factor", type=int, default=1024, help="Saltelli sample factor for sensitivity analysis")
-    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_all", "inducing_points"], help="Sample deformation inputs from extraction dataset directly or standard modes (with or without interpolation clipping)")
+    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_f_stratified", "dataset_all", "inducing_points"], help="Sample deformation inputs from extraction dataset directly (with standard FPS or stratified high-strain FPS) or standard modes")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points for GP joint evaluation and distillation")
     parser.add_argument("--num_func_samples", type=int, default=512, help="Number of functional samples drawn from GP during parameter distillation")
     parser.add_argument("--max_gamma", type=float, default=1.0, help="Max deformation intensity gamma when sample_mode is standard")
@@ -629,8 +629,8 @@ def main():
 
     if args.sample_mode == "dataset_all":
         export_subfolder = "pytorch_export_dataset_all"
-    elif args.sample_mode == "dataset_f":
-        export_subfolder = f"pytorch_export_dataset_f_n{args.num_points}"
+    elif args.sample_mode in ["dataset_f", "dataset_f_stratified"]:
+        export_subfolder = f"pytorch_export_{args.sample_mode}_n{args.num_points}"
     elif args.sample_mode == "standard_interp":
         export_subfolder = "pytorch_export_standard_interp"
     elif args.sample_mode == "inducing_points":
@@ -649,7 +649,6 @@ def main():
         cov_file  = "cov_psi.npy"
 
     if not os.path.exists(export_dir) or not os.path.exists(os.path.join(export_dir, mean_file)):
-        import subprocess
         print(f"'{export_dir}' or '{mean_file}' not found. Exporting GP to PyTorch first (sample_mode: {args.sample_mode}, max_gamma: {args.max_gamma}, distill_target: {args.distill_target})...")
         subprocess.run(["python3", "distillation/export_gp_to_pytorch.py", "--saved_model_dir", args.saved_model_dir, "--sample_mode", args.sample_mode, "--num_points", str(args.num_points), "--max_gamma", str(args.max_gamma), "--distill_target", args.distill_target, "--export_subfolder", export_subfolder], check=True)
         
@@ -676,7 +675,7 @@ def main():
     
     # Map deformation modes to test case identifiers for sensitivity analysis output grouping
     test_cases = torch.zeros(num_points, dtype=torch.int64, device=device)
-    if args.sample_mode in ["dataset_f", "dataset_all"]:
+    if args.sample_mode in ["dataset_f", "dataset_f_stratified", "dataset_all"]:
         # Heterogeneous full-field data: treat all as a single experimental load case
         test_cases[:] = test_case_identifier_equibiaxial_tension
     else:

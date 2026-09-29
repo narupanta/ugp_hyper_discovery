@@ -513,8 +513,8 @@ for SEED in $SEEDS_LIST; do
 
         if [ "$SAMPLE_MODE" == "dataset_all" ]; then
             EXPORT_SUB="pytorch_export_dataset_all"
-        elif [ "$SAMPLE_MODE" == "dataset_f" ]; then
-            EXPORT_SUB="pytorch_export_dataset_f_n${NUM_POINTS}"
+        elif [ "$SAMPLE_MODE" == "dataset_f" ] || [ "$SAMPLE_MODE" == "dataset_f_stratified" ]; then
+            EXPORT_SUB="pytorch_export_${SAMPLE_MODE}_n${NUM_POINTS}"
         elif [ "$SAMPLE_MODE" == "standard_interp" ]; then
             EXPORT_SUB="pytorch_export_standard_interp"
         elif [ "$SAMPLE_MODE" == "inducing_points" ]; then
