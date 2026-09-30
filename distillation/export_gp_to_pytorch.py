@@ -9,14 +9,257 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
-from core.utils import fto3x3, farthest_point_sampling, stratified_high_strain_fps, compute_invariants_np, infer_material_model_name
+from core.utils import fto3x3, farthest_point_sampling, stratified_high_strain_fps, uniform_energy_fps, compute_invariants_np, infer_material_model_name
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
+import json
+import datetime
+
+def verify_and_report_export(out_dir, components_dict, f3x3_flat, sample_mode="dataset_f", distill_target="sef_split"):
+    """
+    Verifies exported GP posterior arrays for PyTorch distillation:
+    1. Checks for NaNs and Infs in F, mean, and covariance matrices.
+    2. Checks covariance matrix symmetry: max|Sigma - Sigma^T| < 1e-4.
+    3. Checks strict positive-definiteness: min(eigvalsh(Sigma)) > 0.
+    4. Computes and saves precomputed Cholesky factor L = chol(Sigma) as L_{name}.npy.
+    5. Writes export_verification_report.json and export_verification_report.txt.
+    6. If any check fails, logs full report and raises RuntimeError immediately to halt pipeline execution.
+    """
+    errors = []
+    component_stats = {}
+    all_healthy = True
+
+    f_arr = np.asarray(f3x3_flat)
+    if np.isnan(f_arr).any() or np.isinf(f_arr).any():
+        errors.append("Deformation gradient tensor f3x3 contains NaN or Inf values")
+        all_healthy = False
+
+    for comp_name, comp_data in components_dict.items():
+        mean = np.asarray(comp_data["mean"])
+        cov = np.asarray(comp_data["cov"])
+        comp_errors = []
+
+        # 1. Finite check
+        has_nan_mean = bool(np.isnan(mean).any() or np.isinf(mean).any())
+        has_nan_cov = bool(np.isnan(cov).any() or np.isinf(cov).any())
+        if has_nan_mean:
+            comp_errors.append("Mean vector contains NaN or Inf values")
+        if has_nan_cov:
+            comp_errors.append("Covariance matrix contains NaN or Inf values")
+
+        # 2. Symmetry check
+        sym_res = float(np.max(np.abs(cov - cov.T)))
+        if sym_res > 1e-4:
+            comp_errors.append(f"Covariance asymmetry residual {sym_res:.2e} exceeds tolerance 1e-4")
+
+        # 3. Eigenvalue and positive-definiteness check
+        try:
+            cov_sym = 0.5 * (cov + cov.T)
+            eigvals = np.linalg.eigvalsh(cov_sym)
+            min_eig = float(np.min(eigvals))
+            max_eig = float(np.max(eigvals))
+            cond_num = float(max_eig / min_eig) if min_eig > 0 else float("inf")
+            if min_eig <= 0.0:
+                comp_errors.append(f"Covariance is not positive definite: min eigenvalue = {min_eig:.3e} <= 0")
+        except Exception as e:
+            min_eig, max_eig, cond_num = None, None, None
+            comp_errors.append(f"Eigenvalue calculation failed: {e}")
+
+        # 4. Cholesky factorization and caching
+        cholesky_success = False
+        L_filename = f"L_{comp_name}.npy"
+        L_path = os.path.join(out_dir, L_filename)
+        try:
+            cov_sym = 0.5 * (cov + cov.T)
+            L = np.linalg.cholesky(cov_sym)
+            np.save(L_path, L)
+            cholesky_success = True
+        except Exception as e:
+            comp_errors.append(f"Cholesky factorization failed: {e}")
+
+        comp_healthy = (len(comp_errors) == 0)
+        if not comp_healthy:
+            all_healthy = False
+            for err in comp_errors:
+                errors.append(f"[{comp_name}] {err}")
+
+        component_stats[comp_name] = {
+            "shape": list(cov.shape),
+            "min_eigenvalue": min_eig,
+            "max_eigenvalue": max_eig,
+            "condition_number": cond_num,
+            "symmetry_residual": sym_res,
+            "has_nan_or_inf": has_nan_mean or has_nan_cov,
+            "cholesky_success": cholesky_success,
+            "cholesky_file": L_filename if cholesky_success else None,
+            "healthy": comp_healthy,
+            "errors": comp_errors
+        }
+
+    # 5. Build and save verification reports
+    report = {
+        "status": "PASSED" if all_healthy else "FAILED",
+        "overall_healthy": all_healthy,
+        "timestamp": datetime.datetime.now().isoformat(),
+        "export_dir": os.path.abspath(out_dir),
+        "sample_mode": sample_mode,
+        "distill_target": distill_target,
+        "num_points": int(f_arr.shape[0]),
+        "components": component_stats,
+        "errors": errors
+    }
+
+    json_path = os.path.join(out_dir, "export_verification_report.json")
+    with open(json_path, "w") as f:
+        json.dump(report, f, indent=2)
+
+    txt_path = os.path.join(out_dir, "export_verification_report.txt")
+    with open(txt_path, "w") as f:
+        f.write("=" * 65 + "\n")
+        f.write(f"GP EXPORT VERIFICATION REPORT: {report['status']}\n")
+        f.write("=" * 65 + "\n")
+        f.write(f"Timestamp:      {report['timestamp']}\n")
+        f.write(f"Export Dir:     {report['export_dir']}\n")
+        f.write(f"Sample Mode:    {sample_mode} (N={report['num_points']})\n")
+        f.write(f"Distill Target: {distill_target}\n")
+        f.write("-" * 65 + "\n")
+        for cname, cinfo in component_stats.items():
+            f.write(f"Component: {cname.upper()}\n")
+            f.write(f"  Shape:             {cinfo['shape']}\n")
+            min_e = f"{cinfo['min_eigenvalue']:.3e}" if cinfo['min_eigenvalue'] is not None else "N/A"
+            max_e = f"{cinfo['max_eigenvalue']:.3e}" if cinfo['max_eigenvalue'] is not None else "N/A"
+            c_num = f"{cinfo['condition_number']:.2e}" if cinfo['condition_number'] is not None else "N/A"
+            f.write(f"  Min Eigenvalue:    {min_e}\n")
+            f.write(f"  Max Eigenvalue:    {max_e}\n")
+            f.write(f"  Condition Number:  {c_num}\n")
+            f.write(f"  Symmetry Residual: {cinfo['symmetry_residual']:.2e}\n")
+            f.write(f"  Cholesky Success:  {cinfo['cholesky_success']}\n")
+            f.write(f"  Cholesky Cache:    {cinfo['cholesky_file']}\n")
+            f.write(f"  Healthy:           {cinfo['healthy']}\n")
+            if cinfo['errors']:
+                f.write(f"  Errors:            {cinfo['errors']}\n")
+            f.write("-" * 65 + "\n")
+        if errors:
+            f.write("ERRORS DETECTED:\n")
+            for err in errors:
+                f.write(f"  ❌ {err}\n")
+        else:
+            f.write("✅ All components verified successfully. Matrix health confirmed.\n")
+        f.write("=" * 65 + "\n")
+
+    if all_healthy:
+        print(f"\n[EXPORT VERIFICATION] ✅ Status: PASSED for {out_dir}")
+        for cname, cinfo in component_stats.items():
+            print(f"  - [{cname.upper()}] min_eig: {cinfo['min_eigenvalue']:.3e}, cond: {cinfo['condition_number']:.2e} -> Precomputed Cholesky saved to {cinfo['cholesky_file']}")
+        print(f"  - Verification report written to: {json_path}\n")
+    else:
+        print("\n" + "!" * 75)
+        print(f"❌ [EXPORT VERIFICATION FAILED] Corrupt/non-positive-definite covariance in {out_dir}!")
+        for err in errors:
+            print(f"   -> {err}")
+        print(f"Full verification report saved to: {json_path}")
+        print("!" * 75 + "\n")
+        raise RuntimeError(f"Export verification failed: {errors}. Aborting execution immediately.")
+
+    return report
+
+def generate_standard_modes(num_points=32, max_gamma=1.0):
+    gamma = np.linspace(0.0, max_gamma, num_points)
+    F_all = np.zeros((6, num_points, 2, 2))
+    def set_F(f11, f22, f12=0.0):
+        arr = np.zeros((num_points, 2, 2))
+        arr[:, 0, 0] = f11
+        arr[:, 1, 1] = f22
+        arr[:, 0, 1] = f12
+        return arr
+
+    F_all[0] = set_F(1 + gamma, 1.0)
+    F_all[1] = set_F(1 + gamma, 1 + gamma)
+    F_all[2] = set_F(1 + gamma, 1 / (1 + gamma))
+    F_all[3] = set_F(1 / (1 + gamma), 1.0)
+    F_all[4] = set_F(1 / (1 + gamma), 1 / (1 + gamma))
+    F_all[5] = set_F(1.0, 1.0, f12=gamma)
+    return F_all.reshape(-1, 2, 2)
+
+def generate_standard_modes_interp(num_points=32, max_search_gamma=1.0, min_dev=None, max_dev=None, min_vol=None, max_vol=None):
+    search_points = 10000
+    gamma_search = np.linspace(0.0, max_search_gamma, search_points)
+
+    def get_mode_F(mode_idx, g_arr):
+        n = len(g_arr)
+        arr = np.zeros((n, 2, 2))
+        arr[:, 0, 0] = 1.0
+        arr[:, 1, 1] = 1.0
+        if mode_idx == 0:
+            arr[:, 0, 0] = 1 + g_arr
+        elif mode_idx == 1:
+            arr[:, 0, 0] = 1 + g_arr
+            arr[:, 1, 1] = 1 + g_arr
+        elif mode_idx == 2:
+            arr[:, 0, 0] = 1 + g_arr
+            arr[:, 1, 1] = 1.0 / (1 + g_arr)
+        elif mode_idx == 3:
+            arr[:, 0, 0] = 1.0 / (1 + g_arr)
+        elif mode_idx == 4:
+            arr[:, 0, 0] = 1.0 / (1 + g_arr)
+            arr[:, 1, 1] = 1.0 / (1 + g_arr)
+        elif mode_idx == 5:
+            arr[:, 0, 1] = g_arr
+        return arr
+
+    F_sampled = np.zeros((6, num_points, 2, 2))
+    mode_names = ["Uniaxial Tension", "Equibiaxial Tension", "Pure Shear", 
+                  "Uniaxial Compression", "Equibiaxial Compression", "Simple Shear"]
+
+    true_min_dev = np.array(min_dev) - 1e-4
+    true_max_dev = np.array(max_dev) + 1e-4
+    true_min_vol = np.array(min_vol) - 1e-4
+    true_max_vol = np.array(max_vol) + 1e-4
+
+    extractor = IsotropicFeatureExtractor()
+
+    print(f"\n--- Dynamically determining interpolation transition points (gamma in [0, {max_search_gamma}]) ---")
+    for i in range(6):
+        F_search_2x2 = get_mode_F(i, gamma_search)
+        F_search_3x3 = np.zeros((search_points, 3, 3))
+        F_search_3x3[:, :2, :2] = F_search_2x2
+        F_search_3x3[:, 2, 2] = 1.0
+
+        dev_m, vol_m = jax.vmap(extractor.extract)(jnp.array(F_search_3x3))
+        dev_m, vol_m = np.array(dev_m), np.array(vol_m)
+
+        in_bounds_dev0 = (dev_m[:, 0] >= true_min_dev[0]) & (dev_m[:, 0] <= true_max_dev[0])
+        in_bounds_dev1 = (dev_m[:, 1] >= true_min_dev[1]) & (dev_m[:, 1] <= true_max_dev[1])
+        in_bounds_vol = (vol_m[:, 0] >= true_min_vol[0]) & (vol_m[:, 0] <= true_max_vol[0])
+        in_bounds = in_bounds_dev0 & in_bounds_dev1 & in_bounds_vol
+
+        if not np.all(in_bounds):
+            exit_idx = np.argmax(~in_bounds)
+            trans_g = gamma_search[exit_idx]
+            if exit_idx == 0:
+                trans_g = gamma_search[1]
+            print(f"Mode {i} ({mode_names[i]}): Interpolation region ends at gamma = {trans_g:.4f}")
+        else:
+            trans_g = max_search_gamma
+            print(f"Mode {i} ({mode_names[i]}): Entirely within interpolation up to gamma = {trans_g:.4f}")
+
+        gamma_mode = np.linspace(0.0, trans_g, num_points)
+        F_sampled[i] = get_mode_F(i, gamma_mode)
+
+    return F_sampled.reshape(-1, 2, 2)
+
+def get_F_from_invariants(I1_bar, I2_bar, J):
+    coeffs = [1.0, -I1_bar, I2_bar, -1.0]
+    roots = np.roots(coeffs)
+    lambda_sq = np.real(roots)
+    lambda_sq = np.maximum(lambda_sq, 1e-8)
+    lambdas = np.sqrt(lambda_sq) * (J ** (1 / 3))
+    return np.diag(lambdas)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, required=True)
     parser.add_argument("--max_gamma", type=float, default=0.8, help="Retained for CLI backward compatibility.")
-    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["dataset_f", "dataset_f_stratified", "dataset_all"], help="Sample deformations from extraction dataset with standard FPS (dataset_f), stratified high-strain FPS (dataset_f_stratified), or all extraction dataset points (dataset_all).")
+    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["dataset_f", "dataset_f_stratified", "dataset_f_uniform_energy", "dataset_all", "standard", "standard_interp", "inducing_points"], help="Sample deformations from extraction dataset (standard FPS, stratified high-strain FPS, uniform energy spectrum sampling, or all points), standard modes, or inducing points.")
     parser.add_argument("--stratified_power", type=float, default=1.5, help="Exponent for weighting high-strain bins in stratified FPS.")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points to evaluate GP over.")
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"], help="Distillation target mode: solely Strain Energy Function (sef), joint SEF + Piola stress (sef_stress), joint SEF + Cauchy stress (sef_cauchy), or separate DEV and VOL energy (sef_split).")
@@ -262,49 +505,92 @@ def main():
 
     f3x3_flat = None
 
-    # Generate points from extraction dataset
-    if dataset_F_flat_2x2 is None:
-        raise ValueError(f"Dataset loading failed, cannot use sample_mode '{args.sample_mode}'.")
-    F_flat_2x2 = dataset_F_flat_2x2
+    # Generate points
+    if args.sample_mode in ["dataset_f", "dataset_f_stratified", "dataset_f_uniform_energy", "dataset_all"]:
+        if dataset_F_flat_2x2 is None:
+            raise ValueError(f"Dataset loading failed, cannot use sample_mode '{args.sample_mode}'.")
+        F_flat_2x2 = dataset_F_flat_2x2
 
-    if args.sample_mode == "dataset_all":
-        print(f"Using exactly ALL {len(F_flat_2x2)} observed deformation points from extraction load steps (no FPS!).")
-        f3x3_flat_2x2 = F_flat_2x2
-        if dataset_F_flat_3d is not None:
-            f3x3_flat = dataset_F_flat_3d
-    elif args.sample_mode == "dataset_f_stratified":
-        print(f"Applying Stratified High-Strain FPS over {len(F_flat_2x2)} observed deformations (power={args.stratified_power})...")
-        if dataset_F_flat_3d is not None:
-            _, i2_all, _ = compute_invariants_np(dataset_F_flat_3d)
-            strain_metric = i2_all - 3.0
-        else:
-            f3_temp = np.zeros((F_flat_2x2.shape[0], 3, 3))
-            f3_temp[:, :2, :2] = F_flat_2x2
-            f3_temp[:, 2, 2] = 1.0
-            _, i2_all, _ = compute_invariants_np(f3_temp)
-            strain_metric = i2_all - 3.0
+        if args.sample_mode == "dataset_all":
+            print(f"Using exactly ALL {len(F_flat_2x2)} observed deformation points from extraction load steps (no FPS!).")
+            f3x3_flat_2x2 = F_flat_2x2
+            if dataset_F_flat_3d is not None:
+                f3x3_flat = dataset_F_flat_3d
+            default_export_subfolder = "pytorch_export_dataset_all"
+        elif args.sample_mode == "dataset_f_stratified":
+            print(f"Applying Stratified High-Strain FPS over {len(F_flat_2x2)} observed deformations (power={args.stratified_power})...")
+            if dataset_F_flat_3d is not None:
+                _, i2_all, _ = compute_invariants_np(dataset_F_flat_3d)
+                strain_metric = i2_all - 3.0
+            else:
+                f3_temp = np.zeros((F_flat_2x2.shape[0], 3, 3))
+                f3_temp[:, :2, :2] = F_flat_2x2
+                f3_temp[:, 2, 2] = 1.0
+                _, i2_all, _ = compute_invariants_np(f3_temp)
+                strain_metric = i2_all - 3.0
 
-        pts = jnp.array(F_flat_2x2.reshape(-1, 4), dtype=jnp.float64)
-        indices = stratified_high_strain_fps(pts, strain_metric, args.num_points, n_bins=8, power=args.stratified_power)
+            pts = jnp.array(F_flat_2x2.reshape(-1, 4), dtype=jnp.float64)
+            indices = stratified_high_strain_fps(pts, strain_metric, args.num_points, n_bins=8, power=args.stratified_power)
 
-        f3x3_flat_2x2 = F_flat_2x2[indices]
-        if dataset_F_flat_3d is not None:
-            f3x3_flat = dataset_F_flat_3d[indices]
-        default_export_subfolder = f"pytorch_export_{args.sample_mode}_n{args.num_points}"
-        print(f"Sampled {len(indices)} deformations directly from extraction dataset via Stratified High-Strain FPS.")
-    else:  # "dataset_f"
-        print(f"Applying Farthest Point Sampling (FPS) over {len(F_flat_2x2)} observed deformations...")
-        pts = jnp.array(F_flat_2x2.reshape(-1, 4), dtype=jnp.float64)
-        if len(F_flat_2x2) <= args.num_points:
-            indices = np.arange(len(F_flat_2x2))
-        else:
-            indices = np.array(farthest_point_sampling(pts, args.num_points))
+            f3x3_flat_2x2 = F_flat_2x2[indices]
+            if dataset_F_flat_3d is not None:
+                f3x3_flat = dataset_F_flat_3d[indices]
+            default_export_subfolder = f"pytorch_export_{args.sample_mode}_n{args.num_points}"
+            print(f"Sampled {len(indices)} deformations directly from extraction dataset via Stratified High-Strain FPS.")
+        elif args.sample_mode == "dataset_f_uniform_energy":
+            print(f"Applying Uniform Energy Spectrum Sampling over {len(F_flat_2x2)} observed deformations...")
+            if dataset_F_flat_3d is not None:
+                f3_cand = dataset_F_flat_3d
+            else:
+                f3_cand = np.zeros((F_flat_2x2.shape[0], 3, 3))
+                f3_cand[:, :2, :2] = F_flat_2x2
+                f3_cand[:, 2, 2] = 1.0
 
-        f3x3_flat_2x2 = F_flat_2x2[indices]
-        if dataset_F_flat_3d is not None:
-            f3x3_flat = dataset_F_flat_3d[indices]
-        default_export_subfolder = f"pytorch_export_dataset_f_n{args.num_points}"
-        print(f"Sampled {len(indices)} deformations directly from extraction dataset via Farthest Point Sampling.")
+            # Evaluate GP posterior mean energy across all candidate observed deformations
+            if args.distill_target == "sef_split":
+                feats = jax.vmap(gp_model.feature_extractor.extract)(jnp.array(f3_cand))
+                energy_metric = np.array(gp_model.dev_gp_mean(feats[0]))
+            else:
+                energy_metric = np.array(gp_model.psi_gp_mean(jnp.array(f3_cand)))
+
+            pts = jnp.array(F_flat_2x2.reshape(-1, 4), dtype=jnp.float64)
+            indices = uniform_energy_fps(pts, energy_metric, args.num_points, n_bins=8)
+
+            f3x3_flat_2x2 = F_flat_2x2[indices]
+            if dataset_F_flat_3d is not None:
+                f3x3_flat = dataset_F_flat_3d[indices]
+            default_export_subfolder = f"pytorch_export_{args.sample_mode}_n{args.num_points}"
+            print(f"Sampled {len(indices)} deformations directly from extraction dataset via Uniform Energy Spectrum Sampling.")
+        else:  # "dataset_f"
+            print(f"Applying Farthest Point Sampling (FPS) over {len(F_flat_2x2)} observed deformations...")
+            pts = jnp.array(F_flat_2x2.reshape(-1, 4), dtype=jnp.float64)
+            if len(F_flat_2x2) <= args.num_points:
+                indices = np.arange(len(F_flat_2x2))
+            else:
+                indices = np.array(farthest_point_sampling(pts, args.num_points))
+
+            f3x3_flat_2x2 = F_flat_2x2[indices]
+            if dataset_F_flat_3d is not None:
+                f3x3_flat = dataset_F_flat_3d[indices]
+            default_export_subfolder = f"pytorch_export_dataset_f_n{args.num_points}"
+            print(f"Sampled {len(indices)} deformations directly from extraction dataset via Farthest Point Sampling.")
+    elif args.sample_mode == "standard_interp":
+        print(f"Generating standard deformation modes strictly within GP interpolation bounds (up to gamma = {args.max_gamma})...")
+        f3x3_flat_2x2 = generate_standard_modes_interp(num_points=max(1, args.num_points // 6), max_search_gamma=args.max_gamma, min_dev=min_dev, max_dev=max_dev, min_vol=min_vol, max_vol=max_vol)
+        default_export_subfolder = "pytorch_export_standard_interp"
+    elif args.sample_mode == "inducing_points":
+        print(f"Generating F directly from the {len(I_z)} GP inducing points...")
+        f3x3_list = []
+        for i in range(len(I_z)):
+            I1_bar = I_z[i, 0]
+            I2_bar = I_z[i, 1]
+            J = I_z[i, 2]
+            f3x3_list.append(get_F_from_invariants(I1_bar, I2_bar, J))
+        f3x3_flat = np.stack(f3x3_list)
+        default_export_subfolder = "pytorch_export_inducing_points"
+    else:  # "standard"
+        f3x3_flat_2x2 = generate_standard_modes(num_points=max(1, args.num_points // 6), max_gamma=args.max_gamma)
+        default_export_subfolder = f"pytorch_export_standard_g{args.max_gamma}" if args.max_gamma != 0.8 else "pytorch_export"
 
     if args.export_subfolder:
         export_subfolder = args.export_subfolder
@@ -401,11 +687,31 @@ def main():
         np.save(os.path.join(out_dir, "f3x3.npy"), np.array(f3x3_flat))
         print(f"Exported GP Target Mean and Cov for DEV, VOL (and ANISO if present) to {out_dir}")
 
+        components_dict = {
+            "dev": {"mean": mean_dev, "cov": cov_dev},
+            "vol": {"mean": mean_vol, "cov": cov_vol},
+        }
+        if gp_model.is_anisotropic:
+            components_dict["aniso"] = {"mean": mean_aniso, "cov": cov_aniso}
+
     else:
         np.save(os.path.join(out_dir, "mean_psi.npy"), np.array(mean_psi))
         np.save(os.path.join(out_dir, "cov_psi.npy"), np.array(cov_psi))
         np.save(os.path.join(out_dir, "f3x3.npy"), np.array(f3x3_flat))
         print(f"Exported GP Target Mean ({mean_psi.shape}) and Cov ({cov_psi.shape}) to {out_dir}")
+
+        components_dict = {
+            "psi": {"mean": mean_psi, "cov": cov_psi}
+        }
+
+    # Verify exported matrices, precompute Cholesky factors, write reports, and halt if error occurs
+    verify_and_report_export(
+        out_dir=out_dir,
+        components_dict=components_dict,
+        f3x3_flat=np.array(f3x3_flat),
+        sample_mode=args.sample_mode,
+        distill_target=args.distill_target
+    )
     
     # Automatically generate the GP sample plot if it's the SEF target
     if args.distill_target == "sef":

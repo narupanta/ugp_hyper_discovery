@@ -88,12 +88,43 @@ def fto3x3(f) :
                       [0.0, 0.0, 1.0]])
     return f3x3
 
-# def fto3x3(f):
-#     # Initialize a 3x3 Identity matrix (ensures F33 = 1.0 and others are 0.0)
-#     f3x3 = jnp.eye(3)
-#     # Use JAX's functional update to place the 2x2 F into the 3x3
-#     f3x3 = f3x3.at[:2, :2].set(f)
-#     return f3x3
+
+def load_f3x3_from_dataset(prep_data, material_model=None):
+    """
+    Extracts full 3x3 deformation gradients from preprocessed dataset dictionary,
+    adhering to plane stress (lambda_3 satisfying P_33=0) or plane strain (F_33=1.0)
+    as dictated by the dataset's stress_mode.
+    """
+    stress_mode = str(prep_data.get("stress_mode", "plane_strain"))
+    if stress_mode == "plane_stress":
+        if "F_3d" in prep_data:
+            return jnp.asarray(prep_data["F_3d"], dtype=jnp.float64)
+        elif "lam3" in prep_data:
+            f2x2 = prep_data["F"]
+            lam3 = prep_data["lam3"]
+            f3x3_np = np.zeros((*f2x2.shape[:-2], 3, 3), dtype=np.float64)
+            f3x3_np[..., :2, :2] = np.array(f2x2)
+            f3x3_np[..., 2, 2] = np.array(lam3)
+            return jnp.asarray(f3x3_np, dtype=jnp.float64)
+        elif material_model is not None:
+            from core.fem_engine import make_plane_stress_piola
+            _, solve_lambda3 = make_plane_stress_piola(material_model)
+            f2x2 = prep_data["F"]
+            lam3 = jax.vmap(jax.vmap(solve_lambda3))(f2x2)
+            f3x3_np = np.zeros((*f2x2.shape[:-2], 3, 3), dtype=np.float64)
+            f3x3_np[..., :2, :2] = np.array(f2x2)
+            f3x3_np[..., 2, 2] = np.array(lam3)
+            return jnp.asarray(f3x3_np, dtype=jnp.float64)
+        else:
+            f2x2 = prep_data["F"]
+            det_f2d = jnp.linalg.det(f2x2)
+            lam3 = 1.0 / jnp.clip(det_f2d, 1e-4, 1e4)
+            f3x3_np = np.zeros((*f2x2.shape[:-2], 3, 3), dtype=np.float64)
+            f3x3_np[..., :2, :2] = np.array(f2x2)
+            f3x3_np[..., 2, 2] = np.array(lam3)
+            return jnp.asarray(f3x3_np, dtype=jnp.float64)
+    else:
+        return jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
 
 @jax.vmap
 def transformation_jacobian(coords_elem) :
@@ -279,6 +310,100 @@ def stratified_high_strain_fps(
                 break
 
     # Execute FPS within each bin
+    selected = []
+    for b in range(n_bins):
+        k = allocated[b]
+        if k == 0:
+            continue
+        elif k >= bin_counts[b]:
+            selected.extend(bin_indices[b])
+        else:
+            pts_b = jnp.asarray(pts_np[bin_indices[b]])
+            fps_idx = np.array(farthest_point_sampling(pts_b, k))
+            selected.extend(bin_indices[b][fps_idx])
+
+    return np.array(selected[:num_samples])
+
+
+def uniform_energy_fps(
+    pts: Any,
+    energies: Any,
+    num_samples: int,
+    n_bins: int = 8
+) -> np.ndarray:
+    """
+    Performs uniform energy spectrum sampling over observed deformation points.
+    Divides the energy range [E_min, E_max] into equal-width energy intervals,
+    targets an equal sample quota (N / n_bins) across all intervals, and runs
+    Farthest Point Sampling (FPS) within each interval. Any intervals with fewer
+    points than the target quota contribute 100% of their points, ensuring maximum
+    representation of rare high-energy deformation states.
+    """
+    pts_np = np.asarray(pts)
+    energies_np = np.asarray(energies)
+    n_pts = pts_np.shape[0]
+
+    if n_pts <= num_samples:
+        return np.arange(n_pts)
+
+    min_e = float(energies_np.min())
+    max_e = float(energies_np.max())
+    if abs(max_e - min_e) < 1e-12:
+        return np.array(farthest_point_sampling(jnp.asarray(pts_np), num_samples))
+
+    bin_edges = np.linspace(min_e, max_e + 1e-8, n_bins + 1)
+    bin_indices = []
+    for b in range(n_bins - 1):
+        bin_indices.append(np.where((energies_np >= bin_edges[b]) & (energies_np < bin_edges[b+1]))[0])
+    bin_indices.append(np.where((energies_np >= bin_edges[-2]) & (energies_np <= bin_edges[-1]))[0])
+
+    bin_counts = np.array([len(b) for b in bin_indices])
+    allocated = np.zeros(n_bins, dtype=int)
+    remaining_quota = num_samples
+    active_bins = np.ones(n_bins, dtype=bool)
+
+    # Equal target quota per energy slice
+    weights = np.ones(n_bins) / n_bins
+
+    while remaining_quota > 0 and np.any(active_bins):
+        w = weights * active_bins
+        if w.sum() < 1e-12:
+            break
+        w = w / w.sum()
+        step_alloc = np.round(remaining_quota * w).astype(int)
+
+        capped = False
+        for b in range(n_bins):
+            if active_bins[b]:
+                if allocated[b] + step_alloc[b] >= bin_counts[b]:
+                    step_alloc[b] = bin_counts[b] - allocated[b]
+                    active_bins[b] = False
+                    capped = True
+        allocated += step_alloc
+        remaining_quota = num_samples - allocated.sum()
+        if not capped and remaining_quota == 0:
+            break
+
+    # Assign leftover quota to highest available bins with capacity
+    if remaining_quota > 0:
+        for b in reversed(range(n_bins)):
+            available = bin_counts[b] - allocated[b]
+            take = min(available, remaining_quota)
+            allocated[b] += take
+            remaining_quota -= take
+            if remaining_quota == 0:
+                break
+
+    if remaining_quota > 0:
+        for b in range(n_bins):
+            available = bin_counts[b] - allocated[b]
+            take = min(available, remaining_quota)
+            allocated[b] += take
+            remaining_quota -= take
+            if remaining_quota == 0:
+                break
+
+    # Execute FPS within each energy bin
     selected = []
     for b in range(n_bins):
         k = allocated[b]

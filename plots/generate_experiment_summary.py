@@ -130,18 +130,24 @@ def rank_seeds(seed_data_list):
     return sorted_list
 
 
-def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
+def copy_seed_plots(seed_item, target_dir, mat_model):
     """
-    Copies key individual plots from the top-ranked seed into exp_dir/plots/:
-    - split_energy_{mat_model}.pdf/.png
-    - split_params_{mat_model}.pdf/.png
+    Copies key individual plots from the specified seed into target_dir:
+    - split_energy_{mat_model}.pdf/.png (and with legend)
+    - split_params_{mat_model}.pdf/.png (and with legend)
+    - split_invariant_spaces_{mat_model}.pdf/.png
     - sobol_total_order_vs_invariants.pdf/.png
+    - parameter_identification_{mat_model}.pdf/.png
+    - invariant_sensitivities_{mat_model}.pdf/.png
+    - split_cauchy_stress_{mat_model}.pdf/.png
+    - split_piola_stress_{mat_model}.pdf/.png (and with legend)
     - displacement_analysis.pdf/.png (for both block and holes)
     - disp_r2_coverage_xy__piola.pdf/.png (for both block and holes)
+    - fem_material_parameters_distribution.pdf/.png
+    - fem_material_parameters_joint.pdf/.png
     """
-    plots_dir = os.path.join(exp_dir, "plots")
-    os.makedirs(plots_dir, exist_ok=True)
-    seed_p = best_seed_item["path"]
+    os.makedirs(target_dir, exist_ok=True)
+    seed_p = seed_item["path"]
     distilled_p = os.path.join(seed_p, "distilled")
     fem_p = os.path.join(seed_p, "fem_validation")
 
@@ -153,7 +159,15 @@ def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
             os.path.join(distilled_p, f"split_energy.{ext}"),
         ]:
             if os.path.exists(cand):
-                shutil.copyfile(cand, os.path.join(plots_dir, f"split_energy_{mat_model}.{ext}"))
+                shutil.copyfile(cand, os.path.join(target_dir, f"split_energy_{mat_model}.{ext}"))
+                break
+
+        for cand in [
+            os.path.join(distilled_p, f"split_energy_{mat_model}_with_legend.{ext}"),
+            os.path.join(distilled_p, f"split_energy_with_legend.{ext}"),
+        ]:
+            if os.path.exists(cand):
+                shutil.copyfile(cand, os.path.join(target_dir, f"split_energy_{mat_model}_with_legend.{ext}"))
                 break
 
         # split_params
@@ -162,7 +176,60 @@ def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
             os.path.join(distilled_p, f"split_params.{ext}"),
         ]:
             if os.path.exists(cand):
-                shutil.copyfile(cand, os.path.join(plots_dir, f"split_params_{mat_model}.{ext}"))
+                shutil.copyfile(cand, os.path.join(target_dir, f"split_params_{mat_model}.{ext}"))
+                break
+
+        for cand in [
+            os.path.join(distilled_p, f"split_params_{mat_model}_with_legend.{ext}"),
+            os.path.join(distilled_p, f"split_params_with_legend.{ext}"),
+        ]:
+            if os.path.exists(cand):
+                shutil.copyfile(cand, os.path.join(target_dir, f"split_params_{mat_model}_with_legend.{ext}"))
+                break
+
+        # parameter_identification
+        for cand in [
+            os.path.join(distilled_p, f"parameter_identification_{mat_model}.{ext}"),
+            os.path.join(distilled_p, f"parameter_identification.{ext}"),
+            os.path.join(distilled_p, f"parameter_identification_{mat_model}_with_legend.{ext}"),
+        ]:
+            if os.path.exists(cand):
+                shutil.copyfile(cand, os.path.join(target_dir, f"parameter_identification_{mat_model}.{ext}"))
+                break
+
+        # invariant_sensitivities
+        for cand in [
+            os.path.join(distilled_p, f"invariant_sensitivities_{mat_model}.{ext}"),
+            os.path.join(distilled_p, f"invariant_sensitivities.{ext}"),
+        ]:
+            if os.path.exists(cand):
+                shutil.copyfile(cand, os.path.join(target_dir, f"invariant_sensitivities_{mat_model}.{ext}"))
+                break
+
+        # split_piola_stress
+        for cand in [
+            os.path.join(distilled_p, f"split_piola_stress_{mat_model}.{ext}"),
+            os.path.join(distilled_p, f"split_piola_stress.{ext}"),
+        ]:
+            if os.path.exists(cand):
+                shutil.copyfile(cand, os.path.join(target_dir, f"split_piola_stress_{mat_model}.{ext}"))
+                break
+
+        for cand in [
+            os.path.join(distilled_p, f"split_piola_stress_{mat_model}_with_legend.{ext}"),
+            os.path.join(distilled_p, f"split_piola_stress_with_legend.{ext}"),
+        ]:
+            if os.path.exists(cand):
+                shutil.copyfile(cand, os.path.join(target_dir, f"split_piola_stress_{mat_model}_with_legend.{ext}"))
+                break
+
+        # split_cauchy_stress
+        for cand in [
+            os.path.join(distilled_p, f"split_cauchy_stress_{mat_model}.{ext}"),
+            os.path.join(distilled_p, f"split_cauchy_stress.{ext}"),
+        ]:
+            if os.path.exists(cand):
+                shutil.copyfile(cand, os.path.join(target_dir, f"split_cauchy_stress_{mat_model}.{ext}"))
                 break
 
         # split_invariant_spaces
@@ -171,7 +238,7 @@ def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
             os.path.join(distilled_p, f"split_invariant_spaces.{ext}"),
         ]:
             if os.path.exists(cand):
-                shutil.copyfile(cand, os.path.join(plots_dir, f"split_invariant_spaces_{mat_model}.{ext}"))
+                shutil.copyfile(cand, os.path.join(target_dir, f"split_invariant_spaces_{mat_model}.{ext}"))
                 break
 
         # sobol_total_order_vs_invariants
@@ -180,7 +247,27 @@ def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
             os.path.join(distilled_p, "output", f"sobol_total_order_vs_invariants.{ext}"),
         ]:
             if os.path.exists(cand):
-                shutil.copyfile(cand, os.path.join(plots_dir, f"sobol_total_order_vs_invariants.{ext}"))
+                shutil.copyfile(cand, os.path.join(target_dir, f"sobol_total_order_vs_invariants.{ext}"))
+                break
+
+        # fem_material_parameters_distribution
+        for cand in [
+            os.path.join(fem_p, f"fem_material_parameters_distribution.{ext}"),
+            os.path.join(fem_p, "block", f"fem_material_parameters_distribution.{ext}"),
+            os.path.join(distilled_p, f"fem_material_parameters_distribution.{ext}"),
+        ]:
+            if os.path.exists(cand):
+                shutil.copyfile(cand, os.path.join(target_dir, f"fem_material_parameters_distribution.{ext}"))
+                break
+
+        # fem_material_parameters_joint
+        for cand in [
+            os.path.join(fem_p, f"fem_material_parameters_joint.{ext}"),
+            os.path.join(fem_p, "block", f"fem_material_parameters_joint.{ext}"),
+            os.path.join(distilled_p, f"fem_material_parameters_joint.{ext}"),
+        ]:
+            if os.path.exists(cand):
+                shutil.copyfile(cand, os.path.join(target_dir, f"fem_material_parameters_joint.{ext}"))
                 break
 
     # 2. FEM Validation plots for block, holes, and ttc
@@ -208,63 +295,63 @@ def copy_best_seed_plots(best_seed_item, exp_dir, mat_model):
             for base in paths:
                 cand = os.path.join(base, f"displacement_analysis.{ext}")
                 if os.path.exists(cand):
-                    shutil.copyfile(cand, os.path.join(plots_dir, f"displacement_analysis_{geom}.{ext}"))
+                    shutil.copyfile(cand, os.path.join(target_dir, f"displacement_analysis_{geom}.{ext}"))
                     break
 
             # displacement_analysis_raw
             for base in paths:
                 cand = os.path.join(base, f"displacement_analysis_raw.{ext}")
                 if os.path.exists(cand):
-                    shutil.copyfile(cand, os.path.join(plots_dir, f"displacement_analysis_raw_{geom}.{ext}"))
+                    shutil.copyfile(cand, os.path.join(target_dir, f"displacement_analysis_raw_{geom}.{ext}"))
                     break
 
             # displacement_analysis_conformal
             for base in paths:
                 cand = os.path.join(base, f"displacement_analysis_conformal.{ext}")
                 if os.path.exists(cand):
-                    shutil.copyfile(cand, os.path.join(plots_dir, f"displacement_analysis_conformal_{geom}.{ext}"))
+                    shutil.copyfile(cand, os.path.join(target_dir, f"displacement_analysis_conformal_{geom}.{ext}"))
                     break
 
             # displacement_calibration_tuning
             for base in paths:
                 cand = os.path.join(base, f"displacement_calibration_tuning.{ext}")
                 if os.path.exists(cand):
-                    shutil.copyfile(cand, os.path.join(plots_dir, f"displacement_calibration_tuning_{geom}.{ext}"))
+                    shutil.copyfile(cand, os.path.join(target_dir, f"displacement_calibration_tuning_{geom}.{ext}"))
                     break
 
             # disp_r2_coverage_xy__piola
             for base in paths:
                 cand = os.path.join(base, f"disp_r2_coverage_xy__piola.{ext}")
                 if os.path.exists(cand):
-                    shutil.copyfile(cand, os.path.join(plots_dir, f"disp_r2_coverage_xy__piola_{geom}.{ext}"))
+                    shutil.copyfile(cand, os.path.join(target_dir, f"disp_r2_coverage_xy__piola_{geom}.{ext}"))
                     break
 
             # reaction_force_distilled
             for base in paths:
                 cand = os.path.join(base, f"reaction_force_distilled_{geom}.{ext}")
                 if os.path.exists(cand):
-                    shutil.copyfile(cand, os.path.join(plots_dir, f"reaction_force_distilled_{geom}.{ext}"))
+                    shutil.copyfile(cand, os.path.join(target_dir, f"reaction_force_distilled_{geom}.{ext}"))
                     break
 
             # reaction_force_conformal
             for base in paths:
                 cand = os.path.join(base, f"reaction_force_conformal_{geom}.{ext}")
                 if os.path.exists(cand):
-                    shutil.copyfile(cand, os.path.join(plots_dir, f"reaction_force_conformal_{geom}.{ext}"))
+                    shutil.copyfile(cand, os.path.join(target_dir, f"reaction_force_conformal_{geom}.{ext}"))
                     break
 
             # reaction_force_distribution
             for base in paths:
                 cand = os.path.join(base, f"reaction_force_distribution_{geom}.{ext}")
                 if os.path.exists(cand):
-                    shutil.copyfile(cand, os.path.join(plots_dir, f"reaction_force_distribution_{geom}.{ext}"))
+                    shutil.copyfile(cand, os.path.join(target_dir, f"reaction_force_distribution_{geom}.{ext}"))
                     break
 
             # free_node_residuals
             for base in paths:
                 cand = os.path.join(base, f"free_node_residuals_{geom}.{ext}")
                 if os.path.exists(cand):
-                    shutil.copyfile(cand, os.path.join(plots_dir, f"free_node_residuals_{geom}.{ext}"))
+                    shutil.copyfile(cand, os.path.join(target_dir, f"free_node_residuals_{geom}.{ext}"))
                     break
 
 
@@ -730,19 +817,31 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
     tex_lines.append("```\n")
 
     # ==============================================================================
-    # 3. Best-Seed Visualizations Links
+    # 3. Model Visualizations Links (Best, Median, Worst)
     # ==============================================================================
+    n_seeds = len(ranked_seeds)
+    best_seed = ranked_seeds[0]
+    median_seed = ranked_seeds[n_seeds // 2]
+    worst_seed = ranked_seeds[-1]
+
     vis_lines = []
-    vis_lines.append("## Key Visualizations (Top Ranked Seed)\n")
-    vis_lines.append(f"- **Strain Energy Splitting**: `plots/split_energy_{mat_model}.pdf`")
-    vis_lines.append(f"- **Candidate Parameters Posterior**: `plots/split_params_{mat_model}.pdf`")
-    vis_lines.append(f"- **Sobol Sensitivity Analysis**: `plots/sobol_total_order_vs_invariants.pdf`")
-    vis_lines.append(f"- **Block Displacement UQ**: `plots/displacement_analysis_block.pdf` & `plots/disp_r2_coverage_xy__piola_block.pdf`")
-    vis_lines.append(f"- **Holes Displacement UQ**: `plots/displacement_analysis_holes.pdf` & `plots/disp_r2_coverage_xy__piola_holes.pdf`")
-    vis_lines.append(f"- **Reaction Force UQ**: `plots/reaction_force_distilled_block.pdf` & `plots/reaction_force_distilled_holes.pdf`")
-    vis_lines.append(f"- **Reaction Force Distribution (Step 16)**: `plots/reaction_force_distribution_block.pdf` & `plots/reaction_force_distribution_holes.pdf`")
-    vis_lines.append(f"- **Free Node Equilibrium Residuals (Step 16)**: `plots/free_node_residuals_block.pdf` & `plots/free_node_residuals_holes.pdf`")
-    vis_lines.append(f"- **Sampled Material Parameters Posterior**: `plots/fem_material_parameters_distribution.pdf` & `plots/fem_material_parameters_joint.pdf`\n")
+    vis_lines.append(f"## Key Visualizations\n")
+    vis_lines.append(f"Model visualizations are organized into dedicated subfolders based on cross-seed ranking:")
+    vis_lines.append(f"- **Best Model (Rank 1, Seed {best_seed['seed']})**: `plots/best/`")
+    vis_lines.append(f"- **Median Model (Rank {n_seeds // 2 + 1}, Seed {median_seed['seed']})**: `plots/median/`")
+    vis_lines.append(f"- **Worst Model (Rank {n_seeds}, Seed {worst_seed['seed']})**: `plots/worst/`\n")
+    vis_lines.append(f"### Key Plots in Each Folder")
+    vis_lines.append(f"- **Strain Energy Splitting**: `split_energy_{mat_model}.pdf` & `split_energy_{mat_model}_with_legend.pdf`")
+    vis_lines.append(f"- **Candidate Parameters Posterior**: `split_params_{mat_model}.pdf` & `split_params_{mat_model}_with_legend.pdf`")
+    vis_lines.append(f"- **Sobol Sensitivity Analysis**: `sobol_total_order_vs_invariants.pdf`")
+    vis_lines.append(f"- **Merged 2x2 Disp & Force (Block)**: `merged_2x2_disp_force_raw_block.pdf` & `merged_2x2_disp_force_conformal_block.pdf`")
+    vis_lines.append(f"- **Merged 2x2 Disp & Force (Holes)**: `merged_2x2_disp_force_raw_holes.pdf` & `merged_2x2_disp_force_conformal_holes.pdf`")
+    vis_lines.append(f"- **Block Displacement UQ**: `displacement_analysis_block.pdf` & `disp_r2_coverage_xy__piola_block.pdf`")
+    vis_lines.append(f"- **Holes Displacement UQ**: `displacement_analysis_holes.pdf` & `disp_r2_coverage_xy__piola_holes.pdf`")
+    vis_lines.append(f"- **Reaction Force UQ**: `reaction_force_distilled_block.pdf` & `reaction_force_distilled_holes.pdf`")
+    vis_lines.append(f"- **Reaction Force Distribution (Step 16)**: `reaction_force_distribution_block.pdf` & `reaction_force_distribution_holes.pdf`")
+    vis_lines.append(f"- **Free Node Equilibrium Residuals (Step 16)**: `free_node_residuals_block.pdf` & `free_node_residuals_holes.pdf`")
+    vis_lines.append(f"- **Sampled Material Parameters Posterior**: `fem_material_parameters_distribution.pdf` & `fem_material_parameters_joint.pdf`\n")
 
     final_content = "\n".join(md_lines) + "\n" + "\n".join(tex_lines) + "\n" + "\n".join(vis_lines)
 
@@ -788,11 +887,46 @@ def main():
 
     # Rank seeds
     ranked_seeds = rank_seeds(seed_data_list)
+    n_seeds = len(ranked_seeds)
     best_seed = ranked_seeds[0]
-    print(f"🏆 Top Ranked Seed: Seed {best_seed['seed']} (Rank 1)")
+    median_idx = n_seeds // 2
+    median_seed = ranked_seeds[median_idx]
+    worst_seed = ranked_seeds[-1]
 
-    # Copy top seed plots into exp_dir/plots/
-    copy_best_seed_plots(best_seed, exp_dir, mat_model)
+    print(f"🏆 Top Ranked Seed (Best)   : Seed {best_seed['seed']} (Rank 1)")
+    print(f"⚖️ Median Ranked Seed        : Seed {median_seed['seed']} (Rank {median_idx + 1})")
+    print(f"🔻 Lowest Ranked Seed (Worst): Seed {worst_seed['seed']} (Rank {n_seeds})")
+
+    # Define subdirectories: plots/best, plots/median, plots/worst
+    best_plots_dir = os.path.join(exp_dir, "plots", "best")
+    median_plots_dir = os.path.join(exp_dir, "plots", "median")
+    worst_plots_dir = os.path.join(exp_dir, "plots", "worst")
+    top_plots_dir = os.path.join(exp_dir, "plots")
+
+    copy_seed_plots(best_seed, best_plots_dir, mat_model)
+    copy_seed_plots(median_seed, median_plots_dir, mat_model)
+    copy_seed_plots(worst_seed, worst_plots_dir, mat_model)
+    copy_seed_plots(best_seed, top_plots_dir, mat_model)
+
+    # Generate 2x2 merged displacement and force plots for best, median, worst
+    merge_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "merge_displacement_and_force_2x2.py")
+    if os.path.exists(merge_script):
+        import subprocess
+        for s_item, s_dir in [
+            (best_seed, best_plots_dir),
+            (median_seed, median_plots_dir),
+            (worst_seed, worst_plots_dir),
+            (best_seed, top_plots_dir),
+        ]:
+            try:
+                subprocess.run([
+                    sys.executable, merge_script,
+                    "--exp_dir", exp_dir,
+                    "--seed", str(s_item["seed"]),
+                    "--out_dir", s_dir
+                ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
 
     # Multi-seed plots
     generate_accuracy_comparison_plot(ranked_seeds, exp_dir)

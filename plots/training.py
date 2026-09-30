@@ -872,37 +872,37 @@ class ExtractionR2Metrics(tuple):
 
 
 def _format_step_indices(steps):
-    """Utility to format a collection of load step indices into compact strings."""
+    """Utility to format a collection of load step indices into compact strings (e.g. '1, 7, 13, 19' or '2-6, 8-12, 14-18')."""
     if not steps:
         return "None"
-    steps = sorted(list(steps))
-    if len(steps) > 2 and steps == list(range(steps[0], steps[-1] + 1)):
-        return f"{steps[0]}-{steps[-1]}"
-    elif len(steps) <= 5:
-        return ", ".join(map(str, steps))
+    steps = sorted(list(set(steps)))
+    ranges = []
+    start = steps[0]
+    prev = steps[0]
+    for s in steps[1:]:
+        if s == prev + 1:
+            prev = s
+        else:
+            if start == prev:
+                ranges.append(f"{start}")
+            elif prev == start + 1:
+                ranges.append(f"{start}, {prev}")
+            else:
+                ranges.append(f"{start}-{prev}")
+            start = s
+            prev = s
+    if start == prev:
+        ranges.append(f"{start}")
+    elif prev == start + 1:
+        ranges.append(f"{start}, {prev}")
     else:
-        return f"{steps[0]}...{steps[-1]}"
+        ranges.append(f"{start}-{prev}")
+    return ", ".join(ranges)
 
 
-def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_steps=None, val_steps=None, test_steps=None):
-    """Plots parity and computes R2/RMSE/Coverage metrics across training, validation (calibration), and test (extrapolation) steps."""
-    if true_model is None:
-        print("[INFO] Ground truth material model is None (experimental data). Skipping true energy parity plots.")
-        empty_metrics = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
-        return ExtractionR2Metrics(
-            0.0, 0.0, 0.0,
-            train_metrics=empty_metrics,
-            val_metrics=empty_metrics,
-            test_metrics=empty_metrics,
-            by_component={}
-        )
-
-    apply_style()
-    print("Generating Training, Validation & Test Data R2 Plot...")
-    num_steps = F_train_full.shape[0]
-
-    # Resolve train_steps, val_steps, and test_steps from config files if omitted
-    if (val_steps is None or train_steps is None or test_steps is None) and save_path:
+def _resolve_load_steps(num_steps, save_path=None, train_steps=None, val_steps=None, test_steps=None):
+    """Resolves and validates train and validation step indices from explicit lists or config files (test is deprecated/omitted)."""
+    if (val_steps is None or train_steps is None) and save_path:
         for cfg_file in ["recipe_config.yaml", "config.yaml", "config.json"]:
             cfg_path = os.path.join(save_path, cfg_file)
             if not os.path.exists(cfg_path):
@@ -921,13 +921,12 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
                                 val_steps = cfg["val_load_steps_indices"]
                             if train_steps is None and "train_load_steps_indices" in cfg:
                                 train_steps = cfg["train_load_steps_indices"]
-                            if test_steps is None and "test_load_steps_indices" in cfg:
-                                test_steps = cfg["test_load_steps_indices"]
-                        if val_steps is not None and train_steps is not None and test_steps is not None:
+                        if val_steps is not None and train_steps is not None:
                             break
                 except Exception:
                     pass
 
+    # If test_steps is explicitly provided (not None), clean it; otherwise default to empty list
     if test_steps is not None:
         if isinstance(test_steps, (int, float)):
             test_steps = [int(test_steps)]
@@ -945,13 +944,15 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
         val_steps = []
 
     test_set = set(test_steps)
-    val_set = set(val_steps) - test_set
 
     if train_steps is not None and len(train_steps) > 0:
         train_steps_list = [int(s) for s in train_steps if int(s) < num_steps]
-        train_set = set(train_steps_list) - val_set - test_set
+        train_set = set(train_steps_list) - test_set
     else:
-        train_set = set(range(num_steps)) - val_set - test_set
+        train_set = set(range(num_steps)) - set(val_steps) - test_set
+
+    # Validation steps are all requested val_steps not in train_set or test_set
+    val_set = set(val_steps) - train_set - test_set
 
     train_steps_clean = [s for s in range(num_steps) if s in train_set]
     val_steps_clean = [s for s in range(num_steps) if s in val_set]
@@ -960,6 +961,41 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
     train_steps_str = _format_step_indices(train_steps_clean)
     val_steps_str = _format_step_indices(val_steps_clean)
     test_steps_str = _format_step_indices(test_steps_clean)
+
+    return (
+        train_set, val_set, test_set,
+        train_steps_clean, val_steps_clean, test_steps_clean,
+        train_steps_str, val_steps_str, test_steps_str
+    )
+
+
+def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_steps=None, val_steps=None, test_steps=None, n_pws_samples: int = 256):
+    """
+    Plots energy parity across training, validation (calibration), and test (extrapolation) steps.
+    Row 0 displays Raw Energy Parity (Psi).
+    Row 1 displays Recentered Energy Parity (Psi - Psi(I)) where I is the undeformed reference state.
+    Uses pathwise sampling (default 256 draws) to compute predictive uncertainties and correlation with reference state.
+    """
+    if true_model is None:
+        print("[INFO] Ground truth material model is None (experimental data). Skipping true energy parity plots.")
+        empty_metrics = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
+        return ExtractionR2Metrics(
+            0.0, 0.0, 0.0,
+            train_metrics=empty_metrics,
+            val_metrics=empty_metrics,
+            test_metrics=empty_metrics,
+            by_component={}
+        )
+
+    apply_style()
+    print("Generating Training, Validation & Test Data R2 Plot (Raw and Recentered)...")
+    num_steps = F_train_full.shape[0]
+
+    (
+        train_set, val_set, test_set,
+        train_steps_clean, val_steps_clean, test_steps_clean,
+        train_steps_str, val_steps_str, test_steps_str
+    ) = _resolve_load_steps(num_steps, save_path, train_steps, val_steps, test_steps)
 
     has_aniso = (hasattr(learned_gp, 'is_anisotropic') and learned_gp.is_anisotropic) and hasattr(true_model, 'psi_aniso')
 
@@ -986,8 +1022,38 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
     components.append(("Total Energy", r"Total Energy ($\Psi_{\mathrm{total}}$)", lambda f: jax.vmap(true_model.psi)(f), lambda f: learned_gp.psi_dist(f)))
 
     n_panels = len(components)
-    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 6), squeeze=False)
-    axes = axes[0]
+    fig, axes = plt.subplots(2, n_panels, figsize=(6 * n_panels, 12), squeeze=False)
+
+    # Reference state F = I (3, 3)
+    I_ref = jnp.eye(3)[None, ...]
+    I_ref_single = jnp.eye(3)
+
+    # Pre-evaluate energy pathwise sample realizations if enabled
+    step_energy_samples = {}
+    use_pws = (n_pws_samples is not None and n_pws_samples > 0 and hasattr(learned_gp, 'get_path_components_psi_fn'))
+    if use_pws:
+        print(f"Pre-evaluating energy pathwise realizations (n_samples = {n_pws_samples})...")
+        @jax.jit
+        def _eval_step_energy(F_s, key):
+            keys = jax.random.split(key, n_pws_samples)
+            def single_draw(k):
+                fn = learned_gp.get_path_components_psi_fn(k)
+                dev_F, vol_F, aniso_F = jax.vmap(fn)(F_s)
+                dev_I, vol_I, aniso_I = fn(I_ref_single)
+                tot_F = dev_F + vol_F + (aniso_F if has_aniso else 0.0)
+                tot_I = dev_I + vol_I + (aniso_I if has_aniso else 0.0)
+                return (
+                    dev_F, dev_F - dev_I,
+                    vol_F, vol_F - vol_I,
+                    aniso_F if has_aniso else jnp.zeros_like(dev_F),
+                    (aniso_F - aniso_I) if has_aniso else jnp.zeros_like(dev_F),
+                    tot_F, tot_F - tot_I
+                )
+            return jax.vmap(single_draw)(keys)
+
+        for s in range(num_steps):
+            if s in train_set or s in val_set or s in test_set:
+                step_energy_samples[s] = _eval_step_energy(F_train_full[s], jax.random.PRNGKey(42 + s))
 
     comp_metrics = {}
     ret_train = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
@@ -1011,17 +1077,27 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
         cov_val_c = jnp.mean((y_t >= lower) & (y_t <= upper)) * 100.0
         return float(r2_val_c), float(rmse_val_c), float(cov_val_c)
 
-    for ax_idx, (comp_name, comp_label, true_fn, gp_dist_fn) in enumerate(components):
-        ax = axes[ax_idx]
-        ax.set_title(f"Energy Parity: {comp_name}", fontsize=14)
+    comp_idx_map = {
+        "Deviatoric": (0, 1),
+        "Volumetric": (2, 3),
+        "Anisotropic": (4, 5),
+        "Total Energy": (6, 7),
+    }
+
+    for col_idx, (comp_name, comp_label, true_fn, gp_dist_fn) in enumerate(components):
+        # Evaluation at reference state I
+        psi_I_true = float(jnp.squeeze(true_fn(I_ref)))
+        psi_I_gp = float(jnp.squeeze(gp_dist_fn(I_ref).mean))
 
         train_true, train_mean, train_std = [], [], []
         val_true, val_mean, val_std = [], [], []
         test_true, test_mean, test_std = [], [], []
 
-        has_train_lbl = False
-        has_val_lbl = False
-        has_test_lbl = False
+        train_true_rec, train_mean_rec, train_std_rec = [], [], []
+        val_true_rec, val_mean_rec, val_std_rec = [], [], []
+        test_true_rec, test_mean_rec, test_std_rec = [], [], []
+
+        raw_idx, rec_idx = comp_idx_map.get(comp_name, (6, 7))
 
         for step in range(num_steps):
             if step not in train_set and step not in val_set and step not in test_set:
@@ -1031,99 +1107,147 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
             true_psi = true_fn(F_step)
             dist = gp_dist_fn(F_step)
             mean_psi = dist.mean
-            std_psi = jnp.sqrt(dist.var)
+
+            if use_pws and step in step_energy_samples:
+                std_psi = jnp.std(step_energy_samples[step][raw_idx], axis=0)
+                std_psi_rec = jnp.std(step_energy_samples[step][rec_idx], axis=0)
+            else:
+                std_psi = jnp.sqrt(dist.var)
+                std_psi_rec = std_psi
+
+            true_rec = true_psi - psi_I_true
+            mean_rec = mean_psi - psi_I_gp
 
             if step in test_set:
                 test_true.append(true_psi)
                 test_mean.append(mean_psi)
                 test_std.append(std_psi)
-                lbl = f"Test Steps ({test_steps_str})" if not has_test_lbl else ""
-                has_test_lbl = True
-                ax.errorbar(true_psi, mean_psi, yerr=1.96 * std_psi, fmt='o',
-                            color='#d62728', ecolor='#e45756', alpha=0.40,
-                            markersize=3.5, elinewidth=0.85, label=lbl)
+                test_true_rec.append(true_rec)
+                test_mean_rec.append(mean_rec)
+                test_std_rec.append(std_psi_rec)
             elif step in val_set:
                 val_true.append(true_psi)
                 val_mean.append(mean_psi)
                 val_std.append(std_psi)
-                lbl = f"Val/Calib Steps ({val_steps_str})" if not has_val_lbl else ""
-                has_val_lbl = True
-                ax.errorbar(true_psi, mean_psi, yerr=1.96 * std_psi, fmt='o',
-                            color='#1f77b4', ecolor='#4ba3e3', alpha=0.35,
-                            markersize=3.2, elinewidth=0.8, label=lbl)
+                val_true_rec.append(true_rec)
+                val_mean_rec.append(mean_rec)
+                val_std_rec.append(std_psi_rec)
             else:
                 train_true.append(true_psi)
                 train_mean.append(mean_psi)
                 train_std.append(std_psi)
-                lbl = f"Train Steps ({train_steps_str})" if not has_train_lbl else ""
-                has_train_lbl = True
-                ax.errorbar(true_psi, mean_psi, yerr=1.96 * std_psi, fmt='o',
+                train_true_rec.append(true_rec)
+                train_mean_rec.append(mean_rec)
+                train_std_rec.append(std_psi_rec)
+
+        for row_idx, is_recentered in enumerate([False, True]):
+            ax = axes[row_idx, col_idx]
+            if not is_recentered:
+                tr_t, tr_m, tr_s = train_true, train_mean, train_std
+                v_t, v_m, v_s = val_true, val_mean, val_std
+                te_t, te_m, te_s = test_true, test_mean, test_std
+                title_str = f"Raw Energy Parity: {comp_name}"
+                xlabel_str = f"True {comp_label}"
+                ylabel_str = f"Predicted GP Mean {comp_label}"
+            else:
+                tr_t, tr_m, tr_s = train_true_rec, train_mean_rec, train_std_rec
+                v_t, v_m, v_s = val_true_rec, val_mean_rec, val_std_rec
+                te_t, te_m, te_s = test_true_rec, test_mean_rec, test_std_rec
+                title_str = rf"Recentered Energy Parity: {comp_name} ($\Psi - \Psi(\mathbf{{I}})$)"
+                xlabel_str = rf"True Recentered {comp_name} Energy ($\Psi - \Psi(\mathbf{{I}})$)"
+                ylabel_str = rf"Predicted GP Mean Recentered {comp_name} Energy ($\Psi - \Psi(\mathbf{{I}})$)"
+
+            if len(te_t) > 0:
+                ax.errorbar(jnp.concatenate(te_t), jnp.concatenate(te_m),
+                            yerr=1.96 * jnp.concatenate(te_s), fmt='o',
+                            color='#d62728', ecolor='#e45756', alpha=0.40,
+                            markersize=3.5, elinewidth=0.85,
+                            label=f"Test Steps ({test_steps_str})")
+            if len(v_t) > 0:
+                ax.errorbar(jnp.concatenate(v_t), jnp.concatenate(v_m),
+                            yerr=1.96 * jnp.concatenate(v_s), fmt='o',
+                            color='#1f77b4', ecolor='#4ba3e3', alpha=0.35,
+                            markersize=3.2, elinewidth=0.8,
+                            label=f"Val/Calib Steps ({val_steps_str})")
+            if len(tr_t) > 0:
+                ax.errorbar(jnp.concatenate(tr_t), jnp.concatenate(tr_m),
+                            yerr=1.96 * jnp.concatenate(tr_s), fmt='o',
                             color='gray', ecolor='#b0b0b0', alpha=0.25,
-                            markersize=3.0, elinewidth=0.8, label=lbl)
+                            markersize=3.0, elinewidth=0.8,
+                            label=f"Train Steps ({train_steps_str})")
 
-        r2_tr, rmse_tr, cov_tr = compute_metrics(train_true, train_mean, train_std)
-        r2_v, rmse_v, cov_v = compute_metrics(val_true, val_mean, val_std)
-        r2_te, rmse_te, cov_te = compute_metrics(test_true, test_mean, test_std)
-        r2_tot, rmse_tot, cov_tot = compute_metrics(
-            train_true + val_true + test_true,
-            train_mean + val_mean + test_mean,
-            train_std + val_std + test_std
-        )
+            r2_tr, rmse_tr, cov_tr = compute_metrics(tr_t, tr_m, tr_s)
+            r2_v, rmse_v, cov_v = compute_metrics(v_t, v_m, v_s)
+            r2_te, rmse_te, cov_te = compute_metrics(te_t, te_m, te_s)
+            r2_tot, rmse_tot, cov_tot = compute_metrics(
+                tr_t + v_t + te_t,
+                tr_m + v_m + te_m,
+                tr_s + v_s + te_s
+            )
 
-        all_pts_true = train_true + val_true + test_true
-        all_pts_mean = train_mean + val_mean + test_mean
-        if len(all_pts_true) > 0:
-            cat_true = jnp.concatenate(all_pts_true)
-            cat_mean = jnp.concatenate(all_pts_mean)
-            min_val = min(float(cat_true.min()), float(cat_mean.min()))
-            max_val = max(float(cat_true.max()), float(cat_mean.max()))
-            margin = max((max_val - min_val) * 0.05, 1e-4)
-            ax.plot([min_val - margin, max_val + margin], [min_val - margin, max_val + margin], 'k--', lw=1.5, label="Parity")
+            all_pts_t = tr_t + v_t + te_t
+            all_pts_m = tr_m + v_m + te_m
+            if len(all_pts_t) > 0:
+                cat_true = jnp.concatenate(all_pts_t)
+                cat_mean = jnp.concatenate(all_pts_m)
+                min_val = min(float(cat_true.min()), float(cat_mean.min()))
+                max_val = max(float(cat_true.max()), float(cat_mean.max()))
+                margin = max((max_val - min_val) * 0.05, 1e-4)
+                ax.plot([min_val - margin, max_val + margin], [min_val - margin, max_val + margin], 'k--', lw=1.5, label="Parity")
 
-        box_lines = []
-        if len(train_true) > 0:
-            box_lines.append(f"Train ({train_steps_str}):")
-            box_lines.append(f"  $R^2$: {r2_tr:.4f}")
-            box_lines.append(f"  RMSE: {rmse_tr:.4f}")
-            box_lines.append(f"  EC: {cov_tr:.1f}%")
+            box_lines = []
+            if len(tr_t) > 0:
+                box_lines.append(f"Train ({train_steps_str}):")
+                box_lines.append(f"  $R^2$: {r2_tr:.4f}")
+                box_lines.append(f"  RMSE: {rmse_tr:.4f}")
+                box_lines.append(f"  EC: {cov_tr:.1f}%")
 
-        if len(val_true) > 0:
-            if len(box_lines) > 0:
-                box_lines.append("")
-            box_lines.append(f"Val ({val_steps_str}):")
-            box_lines.append(f"  $R^2$: {r2_v:.4f}")
-            box_lines.append(f"  RMSE: {rmse_v:.4f}")
-            box_lines.append(f"  EC: {cov_v:.1f}%")
+            if len(v_t) > 0:
+                if len(box_lines) > 0:
+                    box_lines.append("")
+                box_lines.append(f"Val ({val_steps_str}):")
+                box_lines.append(f"  $R^2$: {r2_v:.4f}")
+                box_lines.append(f"  RMSE: {rmse_v:.4f}")
+                box_lines.append(f"  EC: {cov_v:.1f}%")
 
-        if len(test_true) > 0:
-            if len(box_lines) > 0:
-                box_lines.append("")
-            box_lines.append(f"Test ({test_steps_str}):")
-            box_lines.append(f"  $R^2$: {r2_te:.4f}")
-            box_lines.append(f"  RMSE: {rmse_te:.4f}")
-            box_lines.append(f"  EC: {cov_te:.1f}%")
+            if len(te_t) > 0:
+                if len(box_lines) > 0:
+                    box_lines.append("")
+                box_lines.append(f"Test ({test_steps_str}):")
+                box_lines.append(f"  $R^2$: {r2_te:.4f}")
+                box_lines.append(f"  RMSE: {rmse_te:.4f}")
+                box_lines.append(f"  EC: {cov_te:.1f}%")
 
-        box_text = "\n".join(box_lines)
-        ax.text(0.05, 0.95, box_text, transform=ax.transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='#cccccc'), fontsize=9.0)
+            box_text = "\n".join(box_lines)
+            ax.text(0.05, 0.95, box_text, transform=ax.transAxes, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='#cccccc'), fontsize=9.0)
 
-        ax.set_xlabel(f"True {comp_label}", fontsize=11)
-        ax.set_ylabel(f"Predicted GP Mean {comp_label}", fontsize=11)
-        ax.grid(True, alpha=0.25)
-        ax.set_aspect('equal', adjustable='datalim')
-        ax.legend(loc='lower right', fontsize=9, framealpha=0.85)
+            ax.set_title(title_str, fontsize=13, fontweight='bold')
+            ax.set_xlabel(xlabel_str, fontsize=11)
+            ax.set_ylabel(ylabel_str, fontsize=11)
+            ax.grid(True, alpha=0.25)
+            ax.set_aspect('equal', adjustable='datalim')
+            ax.legend(loc='lower right', fontsize=8.5, framealpha=0.85)
 
-        comp_metrics[comp_name] = {
-            "train": {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr},
-            "val": {"r2": r2_v, "rmse": rmse_v, "ec": cov_v},
-            "test": {"r2": r2_te, "rmse": rmse_te, "ec": cov_te},
-            "overall": {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot}
-        }
-        if comp_name == "Total Energy":
-            ret_train = {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr, "steps": train_steps_clean}
-            ret_val = {"r2": r2_v, "rmse": rmse_v, "ec": cov_v, "steps": val_steps_clean}
-            ret_test = {"r2": r2_te, "rmse": rmse_te, "ec": cov_te, "steps": test_steps_clean}
-            ret_overall = {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot, "steps": list(range(num_steps))}
+            if not is_recentered:
+                comp_metrics[comp_name] = {
+                    "train": {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr},
+                    "val": {"r2": r2_v, "rmse": rmse_v, "ec": cov_v},
+                    "test": {"r2": r2_te, "rmse": rmse_te, "ec": cov_te},
+                    "overall": {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot}
+                }
+                if comp_name == "Total Energy":
+                    ret_train = {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr, "steps": train_steps_clean}
+                    ret_val = {"r2": r2_v, "rmse": rmse_v, "ec": cov_v, "steps": val_steps_clean}
+                    ret_test = {"r2": r2_te, "rmse": rmse_te, "ec": cov_te, "steps": test_steps_clean}
+                    ret_overall = {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot, "steps": list(range(num_steps))}
+            else:
+                comp_metrics[f"{comp_name}_recentered"] = {
+                    "train": {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr},
+                    "val": {"r2": r2_v, "rmse": rmse_v, "ec": cov_v},
+                    "test": {"r2": r2_te, "rmse": rmse_te, "ec": cov_te},
+                    "overall": {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot}
+                }
 
     plt.tight_layout()
     save_figure(fig, os.path.join(save_path, "training_r2_energy.pdf"))
@@ -1138,6 +1262,218 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
         primary_r2, primary_rmse, primary_cov,
         train_metrics=ret_train, val_metrics=ret_val, test_metrics=ret_test, by_component=comp_metrics
     )
+
+
+def plot_training_r2_piola(
+    learned_gp,
+    true_model,
+    F_train_full,
+    save_path,
+    train_steps=None,
+    val_steps=None,
+    test_steps=None,
+    n_pws_samples: int = 256
+):
+    """
+    Plots First Piola-Kirchhoff stress parity across training, validation, and test steps
+    for all tensor components (P11, P22, P33, P12, P21) and Frobenius norm ||P||_F.
+    Uses fast pathwise sampling (default 256 draws) to compute predictive uncertainties.
+    """
+    if true_model is None:
+        print("[INFO] Ground truth material model is None (experimental data). Skipping true Piola stress parity plots.")
+        return {}
+
+    apply_style()
+    print("Generating First Piola-Kirchhoff Stress Parity Plot...")
+    num_steps = F_train_full.shape[0]
+
+    (
+        train_set, val_set, test_set,
+        train_steps_clean, val_steps_clean, test_steps_clean,
+        train_steps_str, val_steps_str, test_steps_str
+    ) = _resolve_load_steps(num_steps, save_path, train_steps, val_steps, test_steps)
+
+    stress_components = [
+        ("P11", r"$P_{11}$ ($P_{xx}$)", (0, 0)),
+        ("P22", r"$P_{22}$ ($P_{yy}$)", (1, 1)),
+        ("P33", r"$P_{33}$ ($P_{zz}$)", (2, 2)),
+        ("P12", r"$P_{12}$ ($P_{xy}$)", (0, 1)),
+        ("P21", r"$P_{21}$ ($P_{yx}$)", (1, 0)),
+        ("Norm", r"$\|\mathbf{P}\|_{\mathrm{F}}$ (Frobenius Norm)", None),
+    ]
+
+    # Pre-evaluate true stress, GP mean, and pathwise sample realizations per step
+    step_results = {}
+    print(f"Evaluating Piola stress across {num_steps} steps (pathwise draws = {n_pws_samples})...")
+    @jax.jit
+    def _eval_step_piola(F_s, key):
+        keys = jax.random.split(key, n_pws_samples)
+        return jax.vmap(lambda k: learned_gp.piola_pws(F_s, k))(keys)
+
+    for step in range(num_steps):
+        if step not in train_set and step not in val_set and step not in test_set:
+            continue
+        F_step = F_train_full[step]
+        P_tr = jax.vmap(true_model.P)(F_step)
+        P_gp = jax.vmap(learned_gp.piola_det)(F_step)
+        P_samps = _eval_step_piola(F_step, jax.random.PRNGKey(42 + step))
+        step_results[step] = (P_tr, P_gp, P_samps)
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12), squeeze=False)
+    metrics_summary = {}
+
+    def compute_metrics(y_t_list, y_m_list, y_s_list):
+        if len(y_t_list) == 0:
+            return np.nan, np.nan, np.nan
+        y_t = jnp.concatenate(y_t_list)
+        y_m = jnp.concatenate(y_m_list)
+        y_s = jnp.concatenate(y_s_list)
+
+        ss_tot = jnp.sum((y_t - jnp.mean(y_t)) ** 2)
+        ss_res = jnp.sum((y_t - y_m) ** 2)
+        if float(ss_tot) < 1e-6:
+            r2_val_c = np.nan
+        else:
+            r2_val_c = 1.0 - ss_res / (ss_tot + 1e-12)
+        rmse_val_c = jnp.sqrt(jnp.mean((y_t - y_m) ** 2))
+        lower = y_m - 1.96 * y_s
+        upper = y_m + 1.96 * y_s
+        cov_val_c = jnp.mean((y_t >= lower) & (y_t <= upper)) * 100.0
+        return float(r2_val_c), float(rmse_val_c), float(cov_val_c)
+
+    def _fmt_r2(val):
+        return "N/A (Const 0)" if (np.isnan(val) or val < -100.0) else f"{val:.4f}"
+
+    for c_idx, (comp_id, comp_label, idx) in enumerate(stress_components):
+        row_idx = c_idx // 3
+        col_idx = c_idx % 3
+        ax = axes[row_idx, col_idx]
+
+        train_true, train_mean, train_std = [], [], []
+        val_true, val_mean, val_std = [], [], []
+        test_true, test_mean, test_std = [], [], []
+
+        for step in range(num_steps):
+            if step not in step_results:
+                continue
+            P_tr, P_gp, P_samps = step_results[step]
+            if idx is not None:
+                yt = P_tr[:, idx[0], idx[1]]
+                ym = P_gp[:, idx[0], idx[1]]
+                ys = jnp.std(P_samps[:, :, idx[0], idx[1]], axis=0)
+            else:
+                yt = jnp.linalg.norm(P_tr, axis=(-2, -1))
+                ym = jnp.linalg.norm(P_gp, axis=(-2, -1))
+                norms = jnp.linalg.norm(P_samps, axis=(-2, -1))
+                ys = jnp.std(norms, axis=0)
+
+            if step in test_set:
+                test_true.append(yt)
+                test_mean.append(ym)
+                test_std.append(ys)
+            elif step in val_set:
+                val_true.append(yt)
+                val_mean.append(ym)
+                val_std.append(ys)
+            else:
+                train_true.append(yt)
+                train_mean.append(ym)
+                train_std.append(ys)
+
+        if len(test_true) > 0:
+            ax.errorbar(jnp.concatenate(test_true), jnp.concatenate(test_mean),
+                        yerr=1.96 * jnp.concatenate(test_std), fmt='o',
+                        color='#d62728', ecolor='#e45756', alpha=0.40,
+                        markersize=3.5, elinewidth=0.85,
+                        label=f"Test Steps ({test_steps_str})")
+        if len(val_true) > 0:
+            ax.errorbar(jnp.concatenate(val_true), jnp.concatenate(val_mean),
+                        yerr=1.96 * jnp.concatenate(val_std), fmt='o',
+                        color='#1f77b4', ecolor='#4ba3e3', alpha=0.35,
+                        markersize=3.2, elinewidth=0.8,
+                        label=f"Val/Calib Steps ({val_steps_str})")
+        if len(train_true) > 0:
+            ax.errorbar(jnp.concatenate(train_true), jnp.concatenate(train_mean),
+                        yerr=1.96 * jnp.concatenate(train_std), fmt='o',
+                        color='gray', ecolor='#b0b0b0', alpha=0.25,
+                        markersize=3.0, elinewidth=0.8,
+                        label=f"Train Steps ({train_steps_str})")
+
+        r2_tr, rmse_tr, cov_tr = compute_metrics(train_true, train_mean, train_std)
+        r2_v, rmse_v, cov_v = compute_metrics(val_true, val_mean, val_std)
+        r2_te, rmse_te, cov_te = compute_metrics(test_true, test_mean, test_std)
+        r2_tot, rmse_tot, cov_tot = compute_metrics(
+            train_true + val_true + test_true,
+            train_mean + val_mean + test_mean,
+            train_std + val_std + test_std
+        )
+
+        all_pts_t = train_true + val_true + test_true
+        all_pts_m = train_mean + val_mean + test_mean
+        if len(all_pts_t) > 0:
+            cat_true = jnp.concatenate(all_pts_t)
+            cat_mean = jnp.concatenate(all_pts_m)
+            min_val = min(float(cat_true.min()), float(cat_mean.min()))
+            max_val = max(float(cat_true.max()), float(cat_mean.max()))
+            margin = max((max_val - min_val) * 0.1, 0.05)
+            ax.plot([min_val - margin, max_val + margin], [min_val - margin, max_val + margin], 'k--', lw=1.5, label="Parity")
+            ax.set_xlim(min_val - margin, max_val + margin)
+            ax.set_ylim(min_val - margin, max_val + margin)
+
+        box_lines = []
+        if len(train_true) > 0:
+            box_lines.append(f"Train ({train_steps_str}):")
+            box_lines.append(f"  $R^2$: {_fmt_r2(r2_tr)}")
+            box_lines.append(f"  RMSE: {rmse_tr:.4f}")
+            box_lines.append(f"  EC: {cov_tr:.1f}%")
+
+        if len(val_true) > 0:
+            if len(box_lines) > 0:
+                box_lines.append("")
+            box_lines.append(f"Val ({val_steps_str}):")
+            box_lines.append(f"  $R^2$: {_fmt_r2(r2_v)}")
+            box_lines.append(f"  RMSE: {rmse_v:.4f}")
+            box_lines.append(f"  EC: {cov_v:.1f}%")
+
+        if len(test_true) > 0:
+            if len(box_lines) > 0:
+                box_lines.append("")
+            box_lines.append(f"Test ({test_steps_str}):")
+            box_lines.append(f"  $R^2$: {_fmt_r2(r2_te)}")
+            box_lines.append(f"  RMSE: {rmse_te:.4f}")
+            box_lines.append(f"  EC: {cov_te:.1f}%")
+
+        box_text = "\n".join(box_lines)
+        ax.text(0.05, 0.95, box_text, transform=ax.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='#cccccc'), fontsize=9.0)
+
+        ax.set_title(f"First Piola Stress Parity: {comp_label}", fontsize=13, fontweight='bold')
+        ax.set_xlabel(f"True Stress {comp_label}", fontsize=11)
+        ax.set_ylabel(f"Predicted GP Mean {comp_label}", fontsize=11)
+        ax.grid(True, alpha=0.25)
+        ax.set_aspect('equal', adjustable='datalim')
+        ax.legend(loc='lower right', fontsize=8.5, framealpha=0.85)
+
+        metrics_summary[comp_id] = {
+            "train": {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr},
+            "val": {"r2": r2_v, "rmse": rmse_v, "ec": cov_v},
+            "test": {"r2": r2_te, "rmse": rmse_te, "ec": cov_te},
+            "overall": {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot}
+        }
+
+    plt.tight_layout()
+    save_figure(fig, os.path.join(save_path, "training_r2_piola_stress.pdf"))
+    save_figure(fig, os.path.join(save_path, "training_r2_piola_stress.png"))
+    plt.close(fig)
+
+    metrics_file = os.path.join(save_path, "piola_stress_metrics.json")
+    try:
+        with open(metrics_file, "w") as f:
+            json.dump(metrics_summary, f, indent=2)
+    except Exception as e:
+        print(f"Warning: could not write {metrics_file}: {e}")
+
+    return metrics_summary
 
 
 def plot_domain_invariants(

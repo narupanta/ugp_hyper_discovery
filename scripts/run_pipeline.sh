@@ -261,6 +261,7 @@ MAX_GAMMA=$(get_cfg_default "max_gamma" "1.0")
 DO_SENSITIVITY=$(get_cfg_default "do_sensitivity" "False")
 SOBOL_THRESHOLD=$(get_cfg_default "sobol_threshold" "0.0001")
 SOBOL_FACTOR=$(get_cfg_default "sobol_samples_factor" "2")
+DISTILL_SAMPLING_MODE=$(get_cfg_default "distillation_sampling_mode" "cached_L")
 SENSITIVITY_FLAG=""
 if [ "$DO_SENSITIVITY" == "0" ] || [ "$DO_SENSITIVITY" == "False" ] || [ "$DO_SENSITIVITY" == "false" ]; then
     SENSITIVITY_FLAG="--no_sensitivity"
@@ -513,7 +514,7 @@ for SEED in $SEEDS_LIST; do
 
         if [ "$SAMPLE_MODE" == "dataset_all" ]; then
             EXPORT_SUB="pytorch_export_dataset_all"
-        elif [ "$SAMPLE_MODE" == "dataset_f" ] || [ "$SAMPLE_MODE" == "dataset_f_stratified" ]; then
+        elif [[ "$SAMPLE_MODE" == dataset_f* ]]; then
             EXPORT_SUB="pytorch_export_${SAMPLE_MODE}_n${NUM_POINTS}"
         elif [ "$SAMPLE_MODE" == "standard_interp" ]; then
             EXPORT_SUB="pytorch_export_standard_interp"
@@ -547,6 +548,7 @@ for SEED in $SEEDS_LIST; do
             --component "dev" \
             --override_out_dir "$DISTILL_DIR" \
             --sample_mode "$SAMPLE_MODE" \
+            --sampling_mode "$DISTILL_SAMPLING_MODE" \
             --num_points "$NUM_POINTS" \
             --num_func_samples "$NUM_FUNC_SAMPLES" \
             --max_gamma "$MAX_GAMMA" \
@@ -565,6 +567,7 @@ for SEED in $SEEDS_LIST; do
             --component "vol" \
             --override_out_dir "$DISTILL_DIR" \
             --sample_mode "$SAMPLE_MODE" \
+            --sampling_mode "$DISTILL_SAMPLING_MODE" \
             --num_points "$NUM_POINTS" \
             --num_func_samples "$NUM_FUNC_SAMPLES" \
             --max_gamma "$MAX_GAMMA" \
@@ -589,6 +592,7 @@ for SEED in $SEEDS_LIST; do
                 --component "aniso" \
                 --override_out_dir "$DISTILL_DIR" \
                 --sample_mode "$SAMPLE_MODE" \
+                --sampling_mode "$DISTILL_SAMPLING_MODE" \
                 --num_points "$NUM_POINTS" \
                 --num_func_samples "$NUM_FUNC_SAMPLES" \
                 --max_gamma "$MAX_GAMMA" \

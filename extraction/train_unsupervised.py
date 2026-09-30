@@ -19,7 +19,7 @@ import optax
 jax.config.update("jax_enable_x64", True)
 
 from core.model import SparseHyperelasticityGP
-from core.utils import transform_input_features, fto3x3, farthest_point_sampling_with_fixed_point
+from core.utils import transform_input_features, fto3x3, farthest_point_sampling_with_fixed_point, load_f3x3_from_dataset
 from core.dataclass import GPRawParams, GPParams, GPWeights
 from core.material_models import get_material
 from core.trainer import HyperelasticGPTrainer
@@ -752,7 +752,7 @@ if __name__ == "__main__" :
         kzz_jitter=args.kzz_jitter,
         constraint_lengthscale=constraint_lengthscale
     )
-    F_train_full_3x3 = jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
+    F_train_full_3x3 = load_f3x3_from_dataset(prep_data, material_model=true_mat_model)
     
     val_load_steps_indices = args.val_load_steps_indices
     test_load_steps_indices = args.test_load_steps_indices
