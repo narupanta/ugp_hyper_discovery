@@ -445,16 +445,19 @@ class SparseHyperelasticityGP:
     # Helper for Numerically Stable Component Covariance / Variance
     # ---------------------------------------------------------
     def _stable_component_var(self, x: jnp.ndarray, z: jnp.ndarray, sig: jnp.ndarray, ls: jnp.ndarray, u_var: jnp.ndarray) -> jnp.ndarray:
-        """Exact closed-form marginal variance without catastrophic cancellation: sig^2 * max(0, 1 - ||v||^2) + w^T S w."""
+        """Exact closed-form marginal variance without catastrophic cancellation: sig^2 * max(0, 1 - ||v||^2) + var_ind."""
         Kzz_norm = rbf(z, z, 1.0, ls) + (self.kzz_jitter / (sig**2)) * jnp.eye(z.shape[0], dtype=jnp.float64)
         L_norm = jnp.linalg.cholesky(Kzz_norm)
         k_xz_norm = rbf(x, z, 1.0, ls)
         v = jax.scipy.linalg.solve_triangular(L_norm, k_xz_norm.T, lower=True)
         quad = jnp.sum(v**2, axis=0)
         var_prior = sig**2 * jnp.maximum(0.0, 1.0 - quad)
-        w = jax.scipy.linalg.solve_triangular(L_norm.T, v, lower=False)
         U_cov = u_var if u_var.ndim == 2 else jnp.diag(u_var)
-        var_ind = jnp.sum((w.T @ U_cov) * w.T, axis=-1)
+        if "whitened" in self.covariance_mode:
+            var_ind = sig**2 * jnp.sum((v.T @ U_cov) * v.T, axis=-1)
+        else:
+            w = jax.scipy.linalg.solve_triangular(L_norm.T, v, lower=False)
+            var_ind = jnp.sum((w.T @ U_cov) * w.T, axis=-1)
         return var_prior + var_ind
 
     def _stable_component_joint_cov(self, x: jnp.ndarray, z: jnp.ndarray, sig: jnp.ndarray, ls: jnp.ndarray, u_var: jnp.ndarray) -> jnp.ndarray:
@@ -466,9 +469,12 @@ class SparseHyperelasticityGP:
         v = jax.scipy.linalg.solve_triangular(L_norm, k_xz_norm.T, lower=True)
         cov_prior = sig**2 * (Kxx_norm - v.T @ v)
         cov_prior = 0.5 * (cov_prior + cov_prior.T)
-        w = jax.scipy.linalg.solve_triangular(L_norm.T, v, lower=False)
         U_cov = u_var if u_var.ndim == 2 else jnp.diag(u_var)
-        cov_ind = w.T @ U_cov @ w
+        if "whitened" in self.covariance_mode:
+            cov_ind = sig**2 * (v.T @ U_cov @ v)
+        else:
+            w = jax.scipy.linalg.solve_triangular(L_norm.T, v, lower=False)
+            cov_ind = w.T @ U_cov @ w
         cov_ind = 0.5 * (cov_ind + cov_ind.T)
         return cov_prior + cov_ind
 
@@ -546,10 +552,13 @@ class SparseHyperelasticityGP:
             v1 = jax.scipy.linalg.solve_triangular(L_norm, k_x1z_norm.T, lower=True)
             v2 = jax.scipy.linalg.solve_triangular(L_norm, k_x2z_norm.T, lower=True)
             cov_prior = sig**2 * (k_x1x2_norm - v1.T @ v2)
-            w1 = jax.scipy.linalg.solve_triangular(L_norm.T, v1, lower=False)
-            w2 = jax.scipy.linalg.solve_triangular(L_norm.T, v2, lower=False)
             U_cov = u_var if u_var.ndim == 2 else jnp.diag(u_var)
-            cov_ind = w1.T @ U_cov @ w2
+            if "whitened" in self.covariance_mode:
+                cov_ind = sig**2 * (v1.T @ U_cov @ v2)
+            else:
+                w1 = jax.scipy.linalg.solve_triangular(L_norm.T, v1, lower=False)
+                w2 = jax.scipy.linalg.solve_triangular(L_norm.T, v2, lower=False)
+                cov_ind = w1.T @ U_cov @ w2
             return (cov_prior + cov_ind).squeeze()
 
         def psi_cov_single(fa, fb):

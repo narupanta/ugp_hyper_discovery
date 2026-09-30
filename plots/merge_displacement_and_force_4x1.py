@@ -72,7 +72,8 @@ def extract_plot_data(
     calib_force_file: str,
     reaction_cache_file: str,
     is_conformal: bool = False,
-    alpha: float = 0.05
+    alpha: float = 0.05,
+    use_clean: bool = False
 ):
     """Extracts and prepares displacement and reaction force validation data."""
     is_block = (geom.lower() == "block")
@@ -84,12 +85,20 @@ def extract_plot_data(
     n_samples = data["u_pred"].shape[0]
     n_steps_avail = data["u_pred"].shape[1]
 
-    if "u_exp" in data:
-        u_ref_all = np.array(data["u_exp"])
-    elif "u_true" in data:
-        u_ref_all = np.array(data["u_true"])
+    if use_clean:
+        if "u_true" in data:
+            u_ref_all = np.array(data["u_true"])
+        elif "u_exp" in data:
+            u_ref_all = np.array(data["u_exp"])
+        else:
+            u_ref_all = np.mean(data["u_pred"], axis=0)
     else:
-        u_ref_all = np.mean(data["u_pred"], axis=0)
+        if "u_exp" in data:
+            u_ref_all = np.array(data["u_exp"])
+        elif "u_true" in data:
+            u_ref_all = np.array(data["u_true"])
+        else:
+            u_ref_all = np.mean(data["u_pred"], axis=0)
 
     test_steps = get_experiment_test_steps(data_file, n_steps_avail)
     valid_test_steps = [s for s in test_steps if s < n_steps_avail]
@@ -170,7 +179,7 @@ def extract_plot_data(
     n_rf_steps = rf_data["n_steps"]
 
     return {
-        "geom": geom, "is_block": is_block, "is_conformal": is_conformal,
+        "geom": geom, "is_block": is_block, "is_conformal": is_conformal, "use_clean": use_clean,
         "coords_obs": coords_obs, "coords_pred": coords_pred, "cells": cells,
         "mag_obs": mag_obs, "mag_pred": mag_pred, "error_step": error_step,
         "vmin_disp": vmin_disp, "vmax_disp": vmax_disp,

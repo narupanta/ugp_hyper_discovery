@@ -30,7 +30,7 @@ from core.fem_engine import make_plane_stress_piola
 from core.plotter import (
     plot_loss_analysis,
     plot_parameters_hist, plot_inducing_points, plot_combined_validation, plot_training_r2,
-    plot_domain_invariants
+    plot_domain_invariants, plot_reaction_forces_noise_comparison
 )
 
 def parse_args():
@@ -496,6 +496,21 @@ if __name__ == "__main__" :
         print("✅ Pre-training domain invariants plot generated successfully.")
     except Exception as e:
         print(f"Warning: Could not generate pre-training domain invariants plot: {e}")
+
+    # Pre-training visualization: Reaction forces (clean vs noisy) across load steps
+    try:
+        print("Generating pre-training reaction forces visualization...")
+        plot_reaction_forces_noise_comparison(
+            prep_data=prep_data,
+            save_path=save_path,
+            train_load_steps_indices=train_load_steps_indices,
+            val_load_steps_indices=args.val_load_steps_indices,
+            make_png=True,
+            save_detailed=True
+        )
+        print("✅ Pre-training reaction forces plot generated successfully.")
+    except Exception as e:
+        print(f"Warning: Could not generate pre-training reaction forces plot: {e}")
 
     # Setup random key
     key = jax.random.PRNGKey(args.seed)

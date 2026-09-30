@@ -1714,6 +1714,287 @@ def plot_domain_invariants(
     return saved_paths
 
 
+def plot_reaction_forces_noise_comparison(
+    prep_data: dict,
+    save_path: str,
+    train_load_steps_indices: Optional[List[int]] = None,
+    val_load_steps_indices: Optional[List[int]] = None,
+    make_png: bool = True,
+    save_detailed: bool = True
+) -> dict:
+    """
+    Plots pre-training reaction forces comparing clean ground-truth vs. noisy observations
+    across all discrete load steps.
+
+    Generates:
+      1. standard 1x3 overview (Fx, Fy, ||F|| vs. Load Step) -> reaction_forces_clean_vs_noisy.pdf
+      2. detailed 2x2 analysis (components, magnitude, and noise residuals) -> reaction_forces_detailed_2x2.pdf
+    """
+    apply_style()
+
+    rf_true = prep_data.get("reaction_forces_true", None)
+    rf_noisy = prep_data.get("reaction_forces", prep_data.get("load", None))
+    noise_std = prep_data.get("load_noise_std_steps", prep_data.get("load_noise_std", None))
+
+    if rf_noisy is None and rf_true is None:
+        print("[WARNING] No reaction force data found in prep_data.")
+        return {}
+
+    if rf_true is None:
+        rf_true = rf_noisy
+    if rf_noisy is None:
+        rf_noisy = rf_true
+
+    rf_true = np.asarray(rf_true, dtype=np.float64)
+    rf_noisy = np.asarray(rf_noisy, dtype=np.float64)
+
+    n_steps = len(rf_noisy)
+    steps = np.arange(n_steps)
+
+    if noise_std is None:
+        noise_std = np.zeros_like(rf_noisy)
+    else:
+        noise_std = np.asarray(noise_std, dtype=np.float64)
+
+    if train_load_steps_indices is None:
+        train_steps = [s for s in [1, 7, 13, 19] if s < n_steps]
+    else:
+        train_steps = [int(s) for s in train_load_steps_indices if 0 <= int(s) < n_steps]
+
+    if val_load_steps_indices is None:
+        val_steps = [s for s in range(n_steps) if s not in train_steps and s > 0]
+    else:
+        val_steps = [int(s) for s in val_load_steps_indices if 0 <= int(s) < n_steps]
+
+    # Magnitudes
+    mag_true = np.linalg.norm(rf_true, axis=1)
+    mag_noisy = np.linalg.norm(rf_noisy, axis=1)
+
+    mag_std = np.zeros_like(mag_true)
+    mask_nonzero = mag_true > 1e-8
+    mag_std[mask_nonzero] = np.sqrt(
+        (rf_true[mask_nonzero, 0] * noise_std[mask_nonzero, 0])**2 +
+        (rf_true[mask_nonzero, 1] * noise_std[mask_nonzero, 1])**2
+    ) / mag_true[mask_nonzero]
+
+    saved_paths = {}
+
+    # =========================================================================
+    # 1. Standard 1x3 Figure: Fx, Fy, ||F|| vs. Load Step
+    # =========================================================================
+    fig, axes = plt.subplots(1, 3, figsize=(18.0, 5.2))
+
+    # --- Panel 0: Fx vs Load Step ---
+    ax0 = axes[0]
+    ax0.plot(steps, rf_true[:, 0], color='#1f77b4', lw=2.2, label=r"True $F_x$ (Clean)", zorder=2)
+    ax0.fill_between(
+        steps,
+        rf_true[:, 0] - 1.96 * noise_std[:, 0],
+        rf_true[:, 0] + 1.96 * noise_std[:, 0],
+        color='#1f77b4', alpha=0.18, label=r"Expected Noise Bound ($\pm 1.96\sigma_x$)"
+    )
+    if val_steps:
+        ax0.errorbar(
+            val_steps, rf_noisy[val_steps, 0], yerr=1.96 * noise_std[val_steps, 0],
+            fmt='o', color='#555555', ecolor='#888888', elinewidth=1.2, capsize=3, markersize=5.5,
+            alpha=0.75, label="Noisy $F_x$ (Holdout Steps)", zorder=3
+        )
+    if train_steps:
+        ax0.errorbar(
+            train_steps, rf_noisy[train_steps, 0], yerr=1.96 * noise_std[train_steps, 0],
+            fmt='s', color='#d62728', ecolor='#d62728', elinewidth=1.8, capsize=4, markersize=7.5,
+            label="Noisy $F_x$ (Train Steps, VFM)", zorder=4
+        )
+    ax0.set_xlabel("Load Step Index", fontsize=11)
+    ax0.set_ylabel(r"Reaction Force $F_x$ [N/mm] ($\mathbf{R}\cdot\mathbf{e}_0$)", fontsize=11)
+    ax0.set_title(r"Reaction Force $F_x$ vs. Load Step (Shear)", fontsize=12, fontweight="bold")
+    ax0.set_xticks(steps[::2])
+    ax0.grid(True, alpha=0.25)
+    ax0.legend(loc="upper left", fontsize=9.5, framealpha=0.9)
+
+    # --- Panel 1: Fy vs Load Step ---
+    ax1 = axes[1]
+    ax1.plot(steps, rf_true[:, 1], color='#2ca02c', lw=2.2, label=r"True $F_y$ (Clean)", zorder=2)
+    ax1.fill_between(
+        steps,
+        rf_true[:, 1] - 1.96 * noise_std[:, 1],
+        rf_true[:, 1] + 1.96 * noise_std[:, 1],
+        color='#2ca02c', alpha=0.18, label=r"Expected Noise Bound ($\pm 1.96\sigma_y$)"
+    )
+    if val_steps:
+        ax1.errorbar(
+            val_steps, rf_noisy[val_steps, 1], yerr=1.96 * noise_std[val_steps, 1],
+            fmt='o', color='#555555', ecolor='#888888', elinewidth=1.2, capsize=3, markersize=5.5,
+            alpha=0.75, label="Noisy $F_y$ (Holdout Steps)", zorder=3
+        )
+    if train_steps:
+        ax1.errorbar(
+            train_steps, rf_noisy[train_steps, 1], yerr=1.96 * noise_std[train_steps, 1],
+            fmt='s', color='#d62728', ecolor='#d62728', elinewidth=1.8, capsize=4, markersize=7.5,
+            label="Noisy $F_y$ (Train Steps, VFM)", zorder=4
+        )
+    ax1.set_xlabel("Load Step Index", fontsize=11)
+    ax1.set_ylabel(r"Reaction Force $F_y$ [N/mm] ($\mathbf{R}\cdot\mathbf{e}_1$)", fontsize=11)
+    ax1.set_title(r"Reaction Force $F_y$ vs. Load Step (Tension)", fontsize=12, fontweight="bold")
+    ax1.set_xticks(steps[::2])
+    ax1.grid(True, alpha=0.25)
+    ax1.legend(loc="upper left", fontsize=9.5, framealpha=0.9)
+
+    # --- Panel 2: ||F|| vs Load Step ---
+    ax2 = axes[2]
+    ax2.plot(steps, mag_true, color='#9467bd', lw=2.2, label=r"True $\|\mathbf{F}\|$ (Clean)", zorder=2)
+    ax2.fill_between(
+        steps,
+        np.maximum(0, mag_true - 1.96 * mag_std),
+        mag_true + 1.96 * mag_std,
+        color='#9467bd', alpha=0.18, label=r"Expected Noise Bound ($\pm 1.96\sigma_{\|\mathbf{F}\|}$)"
+    )
+    if val_steps:
+        ax2.errorbar(
+            val_steps, mag_noisy[val_steps], yerr=1.96 * mag_std[val_steps],
+            fmt='o', color='#555555', ecolor='#888888', elinewidth=1.2, capsize=3, markersize=5.5,
+            alpha=0.75, label=r"Noisy $\|\mathbf{F}\|$ (Holdout Steps)", zorder=3
+        )
+    if train_steps:
+        ax2.errorbar(
+            train_steps, mag_noisy[train_steps], yerr=1.96 * mag_std[train_steps],
+            fmt='s', color='#d62728', ecolor='#d62728', elinewidth=1.8, capsize=4, markersize=7.5,
+            label=r"Noisy $\|\mathbf{F}\|$ (Train Steps, VFM)", zorder=4
+        )
+    ax2.set_xlabel("Load Step Index", fontsize=11)
+    ax2.set_ylabel(r"Resultant Force $\|\mathbf{F}\|$ [N/mm]", fontsize=11)
+    ax2.set_title(r"Resultant Reaction Force $\|\mathbf{F}\|$ vs. Load Step", fontsize=12, fontweight="bold")
+    ax2.set_xticks(steps[::2])
+    ax2.grid(True, alpha=0.25)
+    ax2.legend(loc="upper left", fontsize=9.5, framealpha=0.9)
+
+    plt.tight_layout()
+    out_pdf = os.path.join(save_path, "reaction_forces_clean_vs_noisy.pdf")
+    save_figure(fig, out_pdf, make_png=make_png)
+    plt.close(fig)
+    saved_paths["reaction_forces_clean_vs_noisy"] = out_pdf
+
+    # =========================================================================
+    # 2. Detailed 2x2 Figure: Fx, Fy, ||F|| and Residuals
+    # =========================================================================
+    if save_detailed:
+        fig_d, axes_d = plt.subplots(2, 2, figsize=(14.0, 10.0))
+
+        # (0, 0): Fx
+        ax_d0 = axes_d[0, 0]
+        ax_d0.plot(steps, rf_true[:, 0], color='#1f77b4', lw=2.2, label=r"True $F_x$ (Clean)", zorder=2)
+        ax_d0.fill_between(
+            steps, rf_true[:, 0] - 1.96 * noise_std[:, 0], rf_true[:, 0] + 1.96 * noise_std[:, 0],
+            color='#1f77b4', alpha=0.18, label=r"Noise Band ($\pm 1.96\sigma_x$)"
+        )
+        if val_steps:
+            ax_d0.errorbar(val_steps, rf_noisy[val_steps, 0], yerr=1.96 * noise_std[val_steps, 0],
+                           fmt='o', color='#555555', ecolor='#888888', elinewidth=1.2, capsize=3, markersize=5.5,
+                           alpha=0.75, label="Noisy (Holdout Steps)", zorder=3)
+        if train_steps:
+            ax_d0.errorbar(train_steps, rf_noisy[train_steps, 0], yerr=1.96 * noise_std[train_steps, 0],
+                           fmt='s', color='#d62728', ecolor='#d62728', elinewidth=1.8, capsize=4, markersize=7.5,
+                           label="Noisy (Train Steps, VFM)", zorder=4)
+        ax_d0.set_xlabel("Load Step Index", fontsize=11)
+        ax_d0.set_ylabel(r"$F_x$ [N/mm] ($\mathbf{R}\cdot\mathbf{e}_0$)", fontsize=11)
+        ax_d0.set_title(r"Reaction Force $F_x$ vs. Load Step (Shear)", fontsize=12, fontweight="bold")
+        ax_d0.set_xticks(steps[::2])
+        ax_d0.grid(True, alpha=0.25)
+        ax_d0.legend(loc="upper left", fontsize=9.5, framealpha=0.9)
+
+        # (0, 1): Fy
+        ax_d1 = axes_d[0, 1]
+        ax_d1.plot(steps, rf_true[:, 1], color='#2ca02c', lw=2.2, label=r"True $F_y$ (Clean)", zorder=2)
+        ax_d1.fill_between(
+            steps, rf_true[:, 1] - 1.96 * noise_std[:, 1], rf_true[:, 1] + 1.96 * noise_std[:, 1],
+            color='#2ca02c', alpha=0.18, label=r"Noise Band ($\pm 1.96\sigma_y$)"
+        )
+        if val_steps:
+            ax_d1.errorbar(val_steps, rf_noisy[val_steps, 1], yerr=1.96 * noise_std[val_steps, 1],
+                           fmt='o', color='#555555', ecolor='#888888', elinewidth=1.2, capsize=3, markersize=5.5,
+                           alpha=0.75, label="Noisy (Holdout Steps)", zorder=3)
+        if train_steps:
+            ax_d1.errorbar(train_steps, rf_noisy[train_steps, 1], yerr=1.96 * noise_std[train_steps, 1],
+                           fmt='s', color='#d62728', ecolor='#d62728', elinewidth=1.8, capsize=4, markersize=7.5,
+                           label="Noisy (Train Steps, VFM)", zorder=4)
+        ax_d1.set_xlabel("Load Step Index", fontsize=11)
+        ax_d1.set_ylabel(r"$F_y$ [N/mm] ($\mathbf{R}\cdot\mathbf{e}_1$)", fontsize=11)
+        ax_d1.set_title(r"Reaction Force $F_y$ vs. Load Step (Tension)", fontsize=12, fontweight="bold")
+        ax_d1.set_xticks(steps[::2])
+        ax_d1.grid(True, alpha=0.25)
+        ax_d1.legend(loc="upper left", fontsize=9.5, framealpha=0.9)
+
+        # (1, 0): Resultant Magnitude
+        ax_d2 = axes_d[1, 0]
+        ax_d2.plot(steps, mag_true, color='#9467bd', lw=2.2, label=r"True $\|\mathbf{F}\|$ (Clean)", zorder=2)
+        ax_d2.fill_between(
+            steps, np.maximum(0, mag_true - 1.96 * mag_std), mag_true + 1.96 * mag_std,
+            color='#9467bd', alpha=0.18, label=r"Noise Band ($\pm 1.96\sigma_{\|\mathbf{F}\|}$)"
+        )
+        if val_steps:
+            ax_d2.errorbar(val_steps, mag_noisy[val_steps], yerr=1.96 * mag_std[val_steps],
+                           fmt='o', color='#555555', ecolor='#888888', elinewidth=1.2, capsize=3, markersize=5.5,
+                           alpha=0.75, label=r"Noisy $\|\mathbf{F}\|$ (Holdout Steps)", zorder=3)
+        if train_steps:
+            ax_d2.errorbar(train_steps, mag_noisy[train_steps], yerr=1.96 * mag_std[train_steps],
+                           fmt='s', color='#d62728', ecolor='#d62728', elinewidth=1.8, capsize=4, markersize=7.5,
+                           label=r"Noisy $\|\mathbf{F}\|$ (Train Steps, VFM)", zorder=4)
+        ax_d2.set_xlabel("Load Step Index", fontsize=11)
+        ax_d2.set_ylabel(r"Resultant Force $\|\mathbf{F}\|$ [N/mm]", fontsize=11)
+        ax_d2.set_title(r"Resultant Reaction Force $\|\mathbf{F}\|$ vs. Load Step", fontsize=12, fontweight="bold")
+        ax_d2.set_xticks(steps[::2])
+        ax_d2.grid(True, alpha=0.25)
+        ax_d2.legend(loc="upper left", fontsize=9.5, framealpha=0.9)
+
+        # (1, 1): Residuals & Error Envelopes
+        ax_d3 = axes_d[1, 1]
+        diff_x = rf_noisy[:, 0] - rf_true[:, 0]
+        diff_y = rf_noisy[:, 1] - rf_true[:, 1]
+
+        ax_d3.axhline(0, color='black', linestyle='--', lw=1.2, alpha=0.7)
+        ax_d3.plot(steps, 1.96 * noise_std[:, 0], color='#1f77b4', linestyle=':', lw=1.5, label=r"$\pm 1.96\sigma_x$ Theoretical Bound")
+        ax_d3.plot(steps, -1.96 * noise_std[:, 0], color='#1f77b4', linestyle=':', lw=1.5)
+        ax_d3.plot(steps, 1.96 * noise_std[:, 1], color='#2ca02c', linestyle=':', lw=1.5, label=r"$\pm 1.96\sigma_y$ Theoretical Bound")
+        ax_d3.plot(steps, -1.96 * noise_std[:, 1], color='#2ca02c', linestyle=':', lw=1.5)
+
+        ax_d3.scatter(steps, diff_x, color='#1f77b4', marker='o', s=40, alpha=0.85, label=r"$\Delta F_x = F_{\mathrm{noisy}, x} - F_{\mathrm{true}, x}$", zorder=3)
+        ax_d3.scatter(steps, diff_y, color='#2ca02c', marker='^', s=45, alpha=0.85, label=r"$\Delta F_y = F_{\mathrm{noisy}, y} - F_{\mathrm{true}, y}$", zorder=3)
+
+        mae_x = float(np.mean(np.abs(diff_x[1:]))) if n_steps > 1 else 0.0
+        mae_y = float(np.mean(np.abs(diff_y[1:]))) if n_steps > 1 else 0.0
+        hits_x = int(np.sum(np.abs(diff_x[1:]) <= 1.96 * noise_std[1:, 0]))
+        hits_y = int(np.sum(np.abs(diff_y[1:]) <= 1.96 * noise_std[1:, 1]))
+        total_p = max(1, n_steps - 1)
+
+        box_text = (
+            f"Noise Level: $\\sigma / |F| = 5.0\\%$\n"
+            f"MAE($F_x$): {mae_x:.4f} N/mm\n"
+            f"MAE($F_y$): {mae_y:.4f} N/mm\n"
+            f"$F_x$ in 95% Band: {hits_x}/{total_p} ({hits_x/total_p*100:.1f}%)\n"
+            f"$F_y$ in 95% Band: {hits_y}/{total_p} ({hits_y/total_p*100:.1f}%)"
+        )
+        ax_d3.text(
+            0.05, 0.95, box_text, transform=ax_d3.transAxes, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='#cccccc'),
+            fontsize=9.5
+        )
+
+        ax_d3.set_xlabel("Load Step Index", fontsize=11)
+        ax_d3.set_ylabel(r"Force Residual $\Delta F$ [N/mm]", fontsize=11)
+        ax_d3.set_title(r"Measurement Residuals vs. Expected Noise Bounds", fontsize=12, fontweight="bold")
+        ax_d3.set_xticks(steps[::2])
+        ax_d3.grid(True, alpha=0.25)
+        ax_d3.legend(loc="lower left", fontsize=9.0, framealpha=0.9)
+
+        plt.tight_layout()
+        out_d_pdf = os.path.join(save_path, "reaction_forces_detailed_2x2.pdf")
+        save_figure(fig_d, out_d_pdf, make_png=make_png)
+        plt.close(fig_d)
+        saved_paths["reaction_forces_detailed_2x2"] = out_d_pdf
+
+    return saved_paths
+
+
 def evaluate_reaction_force_calibration(
     learned_gp,
     prep_data: dict,

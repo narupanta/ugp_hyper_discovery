@@ -366,7 +366,7 @@ import matplotlib.ticker as ticker
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from sklearn.metrics import r2_score
 
-def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, mode_str="", filename_base="displacement_analysis", banner_prefix=""):
+def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, mode_str="", filename_base="displacement_analysis", banner_prefix="", is_clean=False):
     apply_style()
 
     # --- Data Preparation ---
@@ -385,14 +385,18 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     vmin_disp = min(mag_true.min(), mag_pred.min())
     vmax_disp = max(mag_true.max(), mag_pred.max())
 
-    # --- 1. Predicted Displacement Magnitude with Observed Domain Underlay ---
+    # --- 1. Predicted Displacement Magnitude with Observed/Clean Domain Underlay ---
     tri_obs = tri.Triangulation(coords_true[:, 0], coords_true[:, 1], cells)
     tri_pred = tri.Triangulation(coords_pred[:, 0], coords_pred[:, 1], cells)
 
-    # 1a. Background shaded fill of observed domain
+    ref_name = "Clean FEM" if is_clean else "Observed"
+    ref_sym = r"\mathbf{u}_{\mathrm{clean}}" if is_clean else r"\mathbf{u}_{\mathrm{obs}}"
+    ref_label_latex = rf"{ref_name} (${ref_sym}$)"
+
+    # 1a. Background shaded fill of reference domain
     axes[0].tripcolor(tri_obs, mag_true, cmap="Blues", alpha=0.30, vmin=vmin_disp, vmax=vmax_disp, zorder=1)
-    # 1b. Clear wireframe grid of observed domain
-    axes[0].triplot(tri_obs, color="#444444", linestyle=":", linewidth=0.7, alpha=0.75, zorder=2, label=r"Observed ($\mathbf{u}_{\mathrm{obs}}$)")
+    # 1b. Clear wireframe grid of reference domain
+    axes[0].triplot(tri_obs, color="#444444", linestyle=":", linewidth=0.7, alpha=0.75, zorder=2, label=ref_label_latex)
     
     # 1c. Predicted displacement field contour on top with slight transparency
     im1 = axes[0].tripcolor(tri_pred, mag_pred, cmap="Blues", alpha=0.88, vmin=vmin_disp, vmax=vmax_disp, zorder=3)
@@ -452,7 +456,8 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     limits = [all_vals.min(), all_vals.max()]
     axes[2].plot(limits, limits, "k--", linewidth=1.2, label="Isoline", zorder=5)
 
-    axes[2].set_xlabel(r"$u_{\mathrm{obs}}$", fontsize=11, labelpad=5)
+    ref_axis_label = r"$u_{\mathrm{clean}}$" if is_clean else r"$u_{\mathrm{obs}}$"
+    axes[2].set_xlabel(ref_axis_label, fontsize=11, labelpad=5)
     axes[2].set_ylabel(r"$u_{\mathrm{pred}}$", fontsize=11, labelpad=3)
     axes[2].tick_params(axis="both", which="major", labelsize=8.5)
     axes[2].grid(True, linestyle=":", alpha=0.6)
@@ -461,11 +466,11 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     axes[2].yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
     axes[2].set_box_aspect(1)
 
-    # Observed vs Predicted legend centered directly below Panel 1
+    # Reference vs Predicted legend centered directly below Panel 1
     import matplotlib.lines as mlines
-    obs_line = mlines.Line2D([], [], color='#444444', linestyle=':', linewidth=1.4, label=r'Observed ($\mathbf{u}_{\mathrm{obs}}$)')
+    ref_line = mlines.Line2D([], [], color='#444444', linestyle=':', linewidth=1.4, label=ref_label_latex)
     pred_line = mlines.Line2D([], [], color='#002b4d', linestyle='-', linewidth=1.4, label=r'Predicted ($\mathbf{u}_{\mathrm{pred}}$)')
-    fig.legend(handles=[obs_line, pred_line], loc='center', bbox_to_anchor=(0.18, 0.035),
+    fig.legend(handles=[ref_line, pred_line], loc='center', bbox_to_anchor=(0.18, 0.035),
                ncol=2, frameon=False, fontsize=8.5, handlelength=1.6, borderpad=0.1)
 
     # --- Bottom Text Box Banner across figure width (centered under panels 2 & 3) ---
@@ -486,7 +491,8 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     plt.savefig(png_file, bbox_inches="tight", dpi=300)
     print(f"Displacement analysis plot saved to: {pdf_file} and {png_file}")
     plt.close(fig)
-def plot_disp_r2_coverage(u_true, u_pred_med, u_pred_lower, u_pred_upper, save_path, suffix="_"):
+
+def plot_disp_r2_coverage(u_true, u_pred_med, u_pred_lower, u_pred_upper, save_path, suffix="_", is_clean=False):
     apply_style()
 
     fig, ax = plt.subplots(figsize=(10, 7))
@@ -526,6 +532,7 @@ def plot_disp_r2_coverage(u_true, u_pred_med, u_pred_lower, u_pred_upper, save_p
     ax.plot(limits, limits, 'k--', linewidth=1.5, label='Isoline', zorder=5)
 
     # --- Annotation Box ---
+    ref_sub = r"{\mathrm{clean}}" if is_clean else r"{\mathrm{obs}}"
     stats_text = (f'Estimated Coverage $X$: {cov_x:.1f}%\n'
                   f'Estimated Coverage $Y$: {cov_y:.1f}%\n'
                   f'$R^2_X$: {r2_x:.4f}\n'
@@ -536,7 +543,8 @@ def plot_disp_r2_coverage(u_true, u_pred_med, u_pred_lower, u_pred_upper, save_p
             bbox=dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.85, edgecolor='gray', lw=0.5))
 
     # Formatting
-    ax.set_xlabel(r'$u_{\mathrm{obs}}$', fontsize=14)
+    ref_axis_label = r'$u_{\mathrm{clean}}$' if is_clean else r'$u_{\mathrm{obs}}$'
+    ax.set_xlabel(ref_axis_label, fontsize=14)
     ax.set_ylabel(r'$u_{\mathrm{pred}}$', fontsize=14)
     ax.grid(True, linestyle=':', alpha=0.6)
     ax.legend(loc='lower right', frameon=True, fontsize=12)
@@ -648,24 +656,47 @@ if __name__ == "__main__" :
         step = valid_val_step_indices[-1]
     print(f"Plotting local node distribution and field contours at load step: {step}")
 
+    has_u_exp = False
+    has_u_true = False
+    u_obs_step = None
+    u_clean_step = None
+
     if consolidated_data is not None:
         u_pred_piola_samples = consolidated_data["u_pred"][:, step]
         mesh_node_coords = consolidated_data["node_coords"]
         mesh_cells = consolidated_data["cells"]
         true_data = consolidated_data
         if "u_exp" in consolidated_data:
-            u_true = consolidated_data["u_exp"][step]
-            print(f"Using experimental displacement with noise (u_exp) as observation reference for plots.")
-        elif "u_true" in consolidated_data:
-            u_true = consolidated_data["u_true"][step]
-            print(f"Using ground truth displacement (u_true) as reference for plots.")
-        else:
+            has_u_exp = True
+            u_obs_step = consolidated_data["u_exp"][step]
+            print(f"Loaded experimental displacement with noise (u_exp) as observation reference for plots.")
+        if "u_true" in consolidated_data:
+            has_u_true = True
+            u_clean_step = consolidated_data["u_true"][step]
+            print(f"Loaded ground truth displacement (u_true) as clean FEM reference for plots.")
+        elif (pred_dir_name.parent / "gt" / "u_gt.npz").exists():
             gt_data = np.load(pred_dir_name.parent / "gt" / "u_gt.npz")
-            u_true = gt_data["u"][step]
+            has_u_true = True
+            u_clean_step = gt_data["u"][step]
+            print(f"Loaded ground truth displacement (u_gt.npz) as clean FEM reference.")
+        elif (pred_dir_name / "gt" / "u_gt.npz").exists():
+            gt_data = np.load(pred_dir_name / "gt" / "u_gt.npz")
+            has_u_true = True
+            u_clean_step = gt_data["u"][step]
+            print(f"Loaded ground truth displacement (u_gt.npz) as clean FEM reference.")
+
+        if u_obs_step is None and u_clean_step is not None:
+            u_obs_step = u_clean_step
+        if u_clean_step is None and u_obs_step is not None:
+            u_clean_step = u_obs_step
+        u_true = u_obs_step if has_u_exp else u_clean_step
         print(f"Loaded {u_pred_piola_samples.shape[0]} consolidated samples from {consolidated_file}")
     else:
         true_data = np.load(pred_dir_name / "gt" / "u_gt.npz")
         u_true = true_data["u"][step]
+        u_clean_step = u_true
+        u_obs_step = u_true
+        has_u_true = True
         files = os.listdir(pred_dir_name / "piola_samples") if os.path.exists(pred_dir_name / "piola_samples") else []
         u_pred_piola_samples = [] 
         for f in files:
@@ -710,6 +741,28 @@ if __name__ == "__main__" :
 
     print(f"Closest node indices: {node_indices}")
     node_type = true_data["node_type"]
+
+    u_obs_val_flat = None
+    u_clean_val_flat = None
+    if "u_exp" in true_data:
+        has_u_exp = True
+        u_obs_val_flat = true_data["u_exp"][valid_val_step_indices].reshape(-1, 2)
+    if "u_true" in true_data:
+        has_u_true = True
+        u_clean_val_flat = true_data["u_true"][valid_val_step_indices].reshape(-1, 2)
+    elif (pred_dir_name.parent / "gt" / "u_gt.npz").exists():
+        gt_data = np.load(pred_dir_name.parent / "gt" / "u_gt.npz")
+        has_u_true = True
+        u_clean_val_flat = gt_data["u"][valid_val_step_indices].reshape(-1, 2)
+    elif (pred_dir_name / "gt" / "u_gt.npz").exists():
+        gt_data = np.load(pred_dir_name / "gt" / "u_gt.npz")
+        has_u_true = True
+        u_clean_val_flat = gt_data["u"][valid_val_step_indices].reshape(-1, 2)
+
+    if u_obs_val_flat is None and u_clean_val_flat is not None:
+        u_obs_val_flat = u_clean_val_flat
+    if u_clean_val_flat is None and u_obs_val_flat is not None:
+        u_clean_val_flat = u_obs_val_flat
 
     ref_u_all = true_data["u_exp"] if "u_exp" in true_data else (true_data["u_true"] if "u_true" in true_data else true_data["u"])
     u_true_val = ref_u_all[valid_val_step_indices]
@@ -859,32 +912,83 @@ if __name__ == "__main__" :
     # ---------------------------------------------------------
     # Generate Before-Scaling (Raw) and After-Scaling (Conformal)
     # ---------------------------------------------------------
-    # 1. Raw uncalibrated plot on test steps (or default valid_val_step_indices)
-    plot_disp_field(
-        mesh_node_coords, mesh_cells, u_true, u_pred_piola_samples.mean(axis=0),
-        u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound,
-        save_path, mode_str=mode_display,
-        filename_base="displacement_analysis_raw",
-        banner_prefix="[Uncalibrated]"
-    )
-    # Also save as standard displacement_analysis for backwards compatibility
-    plot_disp_field(
-        mesh_node_coords, mesh_cells, u_true, u_pred_piola_samples.mean(axis=0),
-        u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound,
-        save_path, mode_str=mode_display,
-        filename_base="displacement_analysis",
-        banner_prefix="[Uncalibrated]"
-    )
+    # 1. Observed Displacement Visualizations (with DIC noise)
+    if has_u_exp and u_obs_val_flat is not None:
+        plot_disp_field(
+            mesh_node_coords, mesh_cells, u_obs_step, u_pred_piola_samples.mean(axis=0),
+            u_obs_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound,
+            save_path, mode_str=mode_display,
+            filename_base="displacement_analysis_raw",
+            banner_prefix="[Uncalibrated (Observed)]",
+            is_clean=False
+        )
+        # Also save as standard displacement_analysis for backwards compatibility
+        plot_disp_field(
+            mesh_node_coords, mesh_cells, u_obs_step, u_pred_piola_samples.mean(axis=0),
+            u_obs_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound,
+            save_path, mode_str=mode_display,
+            filename_base="displacement_analysis",
+            banner_prefix="[Uncalibrated (Observed)]",
+            is_clean=False
+        )
 
-    # 2. Calibrated Conformal plot on test steps
-    u_p_conf_mean, u_p_conf_lower, u_p_conf_upper = apply_conformal_band(u_pred_piola_samples_val_flat, q_disp)
-    plot_disp_field(
-        mesh_node_coords, mesh_cells, u_true, u_pred_piola_samples.mean(axis=0),
-        u_true_val_flat, u_p_conf_mean, u_p_conf_lower, u_p_conf_upper,
-        save_path, mode_str=mode_display,
-        filename_base="displacement_analysis_conformal",
-        banner_prefix=f"[Conformal Q={q_disp:.2f}]"
-    )
+        u_p_conf_mean, u_p_conf_lower, u_p_conf_upper = apply_conformal_band(u_pred_piola_samples_val_flat, q_disp)
+        plot_disp_field(
+            mesh_node_coords, mesh_cells, u_obs_step, u_pred_piola_samples.mean(axis=0),
+            u_obs_val_flat, u_p_conf_mean, u_p_conf_lower, u_p_conf_upper,
+            save_path, mode_str=mode_display,
+            filename_base="displacement_analysis_conformal",
+            banner_prefix=f"[Conformal Q={q_disp:.2f} (Observed)]",
+            is_clean=False
+        )
+        plot_disp_r2_coverage(u_obs_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, suffix="_piola", is_clean=False)
+
+    # 2. Clean FEM Ground Truth Visualizations (without DIC noise)
+    if has_u_true and u_clean_val_flat is not None:
+        print("[Conformal] Generating Clean FEM ground truth displacement plots...")
+        plot_disp_field(
+            mesh_node_coords, mesh_cells, u_clean_step, u_pred_piola_samples.mean(axis=0),
+            u_clean_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound,
+            save_path, mode_str=mode_display,
+            filename_base="displacement_analysis_raw_clean",
+            banner_prefix="[Uncalibrated (Clean FEM)]",
+            is_clean=True
+        )
+        plot_disp_field(
+            mesh_node_coords, mesh_cells, u_clean_step, u_pred_piola_samples.mean(axis=0),
+            u_clean_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound,
+            save_path, mode_str=mode_display,
+            filename_base="displacement_analysis_clean",
+            banner_prefix="[Uncalibrated (Clean FEM)]",
+            is_clean=True
+        )
+        plot_disp_field(
+            mesh_node_coords, mesh_cells, u_clean_step, u_pred_piola_samples.mean(axis=0),
+            u_clean_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound,
+            save_path, mode_str=mode_display,
+            filename_base="displacement_analysis_clean_raw",
+            banner_prefix="[Uncalibrated (Clean FEM)]",
+            is_clean=True
+        )
+
+        u_p_conf_mean, u_p_conf_lower, u_p_conf_upper = apply_conformal_band(u_pred_piola_samples_val_flat, q_disp)
+        plot_disp_field(
+            mesh_node_coords, mesh_cells, u_clean_step, u_pred_piola_samples.mean(axis=0),
+            u_clean_val_flat, u_p_conf_mean, u_p_conf_lower, u_p_conf_upper,
+            save_path, mode_str=mode_display,
+            filename_base="displacement_analysis_conformal_clean",
+            banner_prefix=f"[Conformal Q={q_disp:.2f} (Clean FEM)]",
+            is_clean=True
+        )
+        plot_disp_field(
+            mesh_node_coords, mesh_cells, u_clean_step, u_pred_piola_samples.mean(axis=0),
+            u_clean_val_flat, u_p_conf_mean, u_p_conf_lower, u_p_conf_upper,
+            save_path, mode_str=mode_display,
+            filename_base="displacement_analysis_clean_conformal",
+            banner_prefix=f"[Conformal Q={q_disp:.2f} (Clean FEM)]",
+            is_clean=True
+        )
+        plot_disp_r2_coverage(u_clean_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, suffix="_piola_clean", is_clean=True)
 
     # Calculate and log calibrated coverage
     calib_cov_xy = float(compute_empirical_coverage(u_true_val_flat, u_p_conf_lower, u_p_conf_upper))
@@ -907,7 +1011,8 @@ if __name__ == "__main__" :
     except Exception as e:
         print(f"[Conformal] Warning: Failed to update {calib_metric_p}: {e}")
 
-    plot_node_distributions(u_true, u_pred_piola_samples, u_pred_piola_traction_samples, node_indices, save_path)
+    ref_node_dist = u_clean_step if u_clean_step is not None else u_true
+    plot_node_distributions(ref_node_dist, u_pred_piola_samples, u_pred_piola_traction_samples, node_indices, save_path)
 
     if len(pt_files) > 0:
         u_pred_piola_traction_samples_val = []
@@ -922,6 +1027,7 @@ if __name__ == "__main__" :
         u_pt_upper_bound = np.quantile(u_pred_piola_traction_samples_val_flat, 0.975, axis=0)
         u_pt_mean = np.mean(u_pred_piola_traction_samples_val_flat, axis=0)
 
-        plot_disp_r2_coverage(u_true_val_flat, u_pt_mean, u_pt_lower_bound, u_pt_upper_bound, save_path, suffix ="_piola_traction")
-
-    plot_disp_r2_coverage(u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, suffix ="_piola")
+        if has_u_exp and u_obs_val_flat is not None:
+            plot_disp_r2_coverage(u_obs_val_flat, u_pt_mean, u_pt_lower_bound, u_pt_upper_bound, save_path, suffix="_piola_traction", is_clean=False)
+        if has_u_true and u_clean_val_flat is not None:
+            plot_disp_r2_coverage(u_clean_val_flat, u_pt_mean, u_pt_lower_bound, u_pt_upper_bound, save_path, suffix="_piola_traction_clean", is_clean=True)

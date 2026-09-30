@@ -326,6 +326,50 @@ def copy_seed_plots(seed_item, target_dir, mat_model):
                     shutil.copyfile(cand, os.path.join(target_dir, f"disp_r2_coverage_xy__piola_{geom}.{ext}"))
                     break
 
+            # displacement_analysis_clean
+            for base in paths:
+                cand = os.path.join(base, f"displacement_analysis_clean.{ext}")
+                if os.path.exists(cand):
+                    shutil.copyfile(cand, os.path.join(target_dir, f"displacement_analysis_clean_{geom}.{ext}"))
+                    break
+
+            # displacement_analysis_raw_clean
+            for base in paths:
+                for c_name in [f"displacement_analysis_raw_clean.{ext}", f"displacement_analysis_clean_raw.{ext}"]:
+                    cand = os.path.join(base, c_name)
+                    if os.path.exists(cand):
+                        shutil.copyfile(cand, os.path.join(target_dir, f"displacement_analysis_raw_clean_{geom}.{ext}"))
+                        break
+
+            # displacement_analysis_conformal_clean
+            for base in paths:
+                for c_name in [f"displacement_analysis_conformal_clean.{ext}", f"displacement_analysis_clean_conformal.{ext}"]:
+                    cand = os.path.join(base, c_name)
+                    if os.path.exists(cand):
+                        shutil.copyfile(cand, os.path.join(target_dir, f"displacement_analysis_conformal_clean_{geom}.{ext}"))
+                        break
+
+            # disp_r2_coverage_xy__piola_clean
+            for base in paths:
+                cand = os.path.join(base, f"disp_r2_coverage_xy__piola_clean.{ext}")
+                if os.path.exists(cand):
+                    shutil.copyfile(cand, os.path.join(target_dir, f"disp_r2_coverage_xy__piola_clean_{geom}.{ext}"))
+                    break
+
+            # merged_2x2_disp_force_raw_clean
+            for base in paths:
+                cand = os.path.join(base, f"merged_2x2_disp_force_raw_clean_{geom}.{ext}")
+                if os.path.exists(cand):
+                    shutil.copyfile(cand, os.path.join(target_dir, f"merged_2x2_disp_force_raw_clean_{geom}.{ext}"))
+                    break
+
+            # merged_2x2_disp_force_conformal_clean
+            for base in paths:
+                cand = os.path.join(base, f"merged_2x2_disp_force_conformal_clean_{geom}.{ext}")
+                if os.path.exists(cand):
+                    shutil.copyfile(cand, os.path.join(target_dir, f"merged_2x2_disp_force_conformal_clean_{geom}.{ext}"))
+                    break
+
             # reaction_force_distilled
             for base in paths:
                 cand = os.path.join(base, f"reaction_force_distilled_{geom}.{ext}")
@@ -713,6 +757,8 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
 
     # Define metric rows to report:
     # (section_name, [ (row_label, tex_label, keys_tuple, decimals, is_pct) ])
+    has_obs_disp = any(get_val(s, "disp_obs", "block", "norm", "rmse") is not None for s in ranked_seeds)
+    disp_title = "Displacement Field Metrics (Clean FEM)" if has_obs_disp else "Displacement Field Metrics (FEM)"
     sections = [
         ("GP Posterior Extraction (SEF)", [
             ("GP $\\Psi$ RMSE", r"GP $\Psi$ RMSE", ("sef", "gp", "total", "rmse"), 4, False),
@@ -724,7 +770,7 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
             ("Distilled $\\Psi$ EC (%)", r"Distilled $\Psi$ EC (\%)", ("sef", "dist", "total", "coverage"), 2, True),
             ("Distilled $\\Psi$ $R^2$", r"Distilled $\Psi$ $R^2$", ("sef", "dist", "total", "r2"), 4, False),
         ]),
-        ("Displacement Field Metrics (FEM)", [
+        (disp_title, [
             ("Disp RMSE (TTC)", "Disp RMSE (TTC)", ("disp", "ttc", "norm", "rmse"), 4, False),
             ("Disp EC (%) (TTC)", r"Disp EC (\%) (TTC)", ("disp", "ttc", "coverage_xy"), 2, True),
             ("Disp $R^2$ (TTC)", r"Disp $R^2$ (TTC)", ("disp", "ttc", "norm", "r2"), 4, False),
@@ -735,25 +781,41 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
             ("Disp EC (%) (Block)", r"Disp EC (\%) (Block)", ("disp", "block", "coverage_xy"), 2, True),
             ("Disp $R^2$ (Block)", r"Disp $R^2$ (Block)", ("disp", "block", "norm", "r2"), 4, False),
         ]),
+    ]
+    if has_obs_disp:
+        sections.append(
+            ("Displacement Field Metrics (Observed DIC)", [
+                ("Disp RMSE (TTC)", "Disp RMSE (TTC)", ("disp_obs", "ttc", "norm", "rmse"), 4, False),
+                ("Disp EC (%) (TTC)", r"Disp EC (\%) (TTC)", ("disp_obs", "ttc", "coverage_xy"), 2, True),
+                ("Disp $R^2$ (TTC)", r"Disp $R^2$ (TTC)", ("disp_obs", "ttc", "norm", "r2"), 4, False),
+                ("Disp RMSE (Holes)", "Disp RMSE (Holes)", ("disp_obs", "holes", "norm", "rmse"), 4, False),
+                ("Disp EC (%) (Holes)", r"Disp EC (\%) (Holes)", ("disp_obs", "holes", "coverage_xy"), 2, True),
+                ("Disp $R^2$ (Holes)", r"Disp $R^2$ (Holes)", ("disp_obs", "holes", "norm", "r2"), 4, False),
+                ("Disp RMSE (Block)", "Disp RMSE (Block)", ("disp_obs", "block", "norm", "rmse"), 4, False),
+                ("Disp EC (%) (Block)", r"Disp EC (\%) (Block)", ("disp_obs", "block", "coverage_xy"), 2, True),
+                ("Disp $R^2$ (Block)", r"Disp $R^2$ (Block)", ("disp_obs", "block", "norm", "r2"), 4, False),
+            ])
+        )
+    sections.append(
         ("Conformal Calibration & Variance Budget", [
             ("Disp $Q_{0.95}$ (Calibrated on TTC)", r"Disp $Q_{0.95}$ (TTC)", ("conformal", "ttc", "q_disp"), 3, False),
             ("Calibrated Disp EC (%) (TTC)", r"Calib Disp EC (\%) (TTC)", ("conformal", "ttc", "calibrated_coverage_xy"), 2, True),
             ("Disp $Q_{0.95}$ (Calibrated on Block)", r"Disp $Q_{0.95}$", ("conformal", "block", "q_disp"), 3, False),
             ("Calibrated Disp EC (%) (Block)", r"Calib Disp EC (\%) (Block)", ("conformal", "block", "calibrated_coverage_xy"), 2, True),
             ("Calibrated Disp EC (%) (Holes Transfer)", r"Calib Disp EC (\%) (Holes)", ("conformal", "holes", "calibrated_coverage_xy"), 2, True),
-            ("Disp $\\sigma_{\\mathrm{param}}^2$", r"Disp $\sigma_{\mathrm{param}}^2$", ("conformal", "block", "variance_budget", "sigma2_param"), 4, False),
-            ("Disp $\\sigma_{\\mathrm{DIC}}^2$", r"Disp $\sigma_{\mathrm{DIC}}^2$", ("conformal", "block", "variance_budget", "sigma2_noise"), 4, False),
-            ("Disp $\\sigma_{\\mathrm{discrepancy}}^2$", r"Disp $\sigma_{\mathrm{discrepancy}}^2$", ("conformal", "block", "variance_budget", "sigma2_discrepancy"), 4, False),
+            ("Disp $\\sigma_{\\mathrm{param}}^2$", r"Disp $\sigma_{\\mathrm{param}}^2$", ("conformal", "block", "variance_budget", "sigma2_param"), 4, False),
+            ("Disp $\\sigma_{\\mathrm{DIC}}^2$", r"Disp $\sigma_{\\mathrm{DIC}}^2$", ("conformal", "block", "variance_budget", "sigma2_noise"), 4, False),
+            ("Disp $\\sigma_{\\mathrm{discrepancy}}^2$", r"Disp $\sigma_{\\mathrm{discrepancy}}^2$", ("conformal", "block", "variance_budget", "sigma2_discrepancy"), 4, False),
             ("Disp Discrepancy Status", r"Disp Discrepancy Status", ("conformal", "block", "variance_budget", "status"), 0, False),
             ("Force $Q_{0.95}$ (Calibrated on Block)", r"Force $Q_{0.95}$", ("force", "block", "conformal", "q_force"), 3, False),
             ("Calibrated Force EC (%) (Block)", r"Calib Force EC (\%) (Block)", ("force", "block", "conformal", "calibrated_total_ec"), 2, True),
             ("Calibrated Force EC (%) (Holes Transfer)", r"Calib Force EC (\%) (Holes)", ("force", "holes", "conformal", "calibrated_ec_y"), 2, True),
-            ("Force $\\sigma_{\\mathrm{param}}^2$", r"Force $\sigma_{\mathrm{param}}^2$", ("force", "block", "conformal", "variance_budget", "sigma2_param"), 4, False),
-            ("Force $\\sigma_{\\mathrm{loadcell}}^2$", r"Force $\sigma_{\mathrm{loadcell}}^2$", ("force", "block", "conformal", "variance_budget", "sigma2_noise"), 4, False),
-            ("Force $\\sigma_{\\mathrm{discrepancy}}^2$", r"Force $\sigma_{\mathrm{discrepancy}}^2$", ("force", "block", "conformal", "variance_budget", "sigma2_discrepancy"), 4, False),
+            ("Force $\\sigma_{\\mathrm{param}}^2$", r"Force $\sigma_{\\mathrm{param}}^2$", ("force", "block", "conformal", "variance_budget", "sigma2_param"), 4, False),
+            ("Force $\\sigma_{\\mathrm{loadcell}}^2$", r"Force $\sigma_{\\mathrm{loadcell}}^2$", ("force", "block", "conformal", "variance_budget", "sigma2_noise"), 4, False),
+            ("Force $\\sigma_{\\mathrm{discrepancy}}^2$", r"Force $\sigma_{\\mathrm{discrepancy}}^2$", ("force", "block", "conformal", "variance_budget", "sigma2_discrepancy"), 4, False),
             ("Force Discrepancy Status", r"Force Discrepancy Status", ("force", "block", "conformal", "variance_budget", "status"), 0, False),
         ])
-    ]
+    )
 
     # ==============================================================================
     # 1. Markdown Table Generation
@@ -834,10 +896,14 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
     vis_lines.append(f"- **Strain Energy Splitting**: `split_energy_{mat_model}.pdf` & `split_energy_{mat_model}_with_legend.pdf`")
     vis_lines.append(f"- **Candidate Parameters Posterior**: `split_params_{mat_model}.pdf` & `split_params_{mat_model}_with_legend.pdf`")
     vis_lines.append(f"- **Sobol Sensitivity Analysis**: `sobol_total_order_vs_invariants.pdf`")
-    vis_lines.append(f"- **Merged 2x2 Disp & Force (Block)**: `merged_2x2_disp_force_raw_block.pdf` & `merged_2x2_disp_force_conformal_block.pdf`")
-    vis_lines.append(f"- **Merged 2x2 Disp & Force (Holes)**: `merged_2x2_disp_force_raw_holes.pdf` & `merged_2x2_disp_force_conformal_holes.pdf`")
-    vis_lines.append(f"- **Block Displacement UQ**: `displacement_analysis_block.pdf` & `disp_r2_coverage_xy__piola_block.pdf`")
-    vis_lines.append(f"- **Holes Displacement UQ**: `displacement_analysis_holes.pdf` & `disp_r2_coverage_xy__piola_holes.pdf`")
+    vis_lines.append(f"- **Merged 2x2 Disp & Force (Block, Clean FEM)**: `merged_2x2_disp_force_raw_clean_block.pdf` & `merged_2x2_disp_force_conformal_clean_block.pdf`")
+    vis_lines.append(f"- **Merged 2x2 Disp & Force (Block, Observed)**: `merged_2x2_disp_force_raw_block.pdf` & `merged_2x2_disp_force_conformal_block.pdf`")
+    vis_lines.append(f"- **Merged 2x2 Disp & Force (Holes, Clean FEM)**: `merged_2x2_disp_force_raw_clean_holes.pdf` & `merged_2x2_disp_force_conformal_clean_holes.pdf`")
+    vis_lines.append(f"- **Merged 2x2 Disp & Force (Holes, Observed)**: `merged_2x2_disp_force_raw_holes.pdf` & `merged_2x2_disp_force_conformal_holes.pdf`")
+    vis_lines.append(f"- **Block Displacement UQ (Clean FEM)**: `displacement_analysis_clean_block.pdf` & `disp_r2_coverage_xy__piola_clean_block.pdf`")
+    vis_lines.append(f"- **Block Displacement UQ (Observed DIC)**: `displacement_analysis_block.pdf` & `disp_r2_coverage_xy__piola_block.pdf`")
+    vis_lines.append(f"- **Holes Displacement UQ (Clean FEM)**: `displacement_analysis_clean_holes.pdf` & `disp_r2_coverage_xy__piola_clean_holes.pdf`")
+    vis_lines.append(f"- **Holes Displacement UQ (Observed DIC)**: `displacement_analysis_holes.pdf` & `disp_r2_coverage_xy__piola_holes.pdf`")
     vis_lines.append(f"- **Reaction Force UQ**: `reaction_force_distilled_block.pdf` & `reaction_force_distilled_holes.pdf`")
     vis_lines.append(f"- **Reaction Force Distribution (Step 16)**: `reaction_force_distribution_block.pdf` & `reaction_force_distribution_holes.pdf`")
     vis_lines.append(f"- **Free Node Equilibrium Residuals (Step 16)**: `free_node_residuals_block.pdf` & `free_node_residuals_holes.pdf`")

@@ -36,8 +36,10 @@ def create_merged_2x2_figure(
     geom = d["geom"]
     is_block = d["is_block"]
     is_conformal = d["is_conformal"]
+    use_clean = d.get("use_clean", False)
+    clean_tag = "_clean" if use_clean else ""
     conf_tag = "conformal" if is_conformal else "raw"
-    base_name = f"merged_2x2_disp_force_{conf_tag}_{geom}"
+    base_name = f"merged_2x2_disp_force_{conf_tag}{clean_tag}_{geom}"
 
     fig, axes = plt.subplots(
         nrows=2, ncols=2,
@@ -69,7 +71,8 @@ def create_merged_2x2_figure(
     cbar1.locator = ticker.MaxNLocator(nbins=4)
     cbar1.update_ticks()
 
-    obs_line = mlines.Line2D([], [], color="#444444", linestyle=":", linewidth=1.3, label=r"Obs. ($\mathbf{u}_{\mathrm{obs}}$)")
+    obs_label = r"Clean ($\mathbf{u}_{\mathrm{clean}}$)" if use_clean else r"Obs. ($\mathbf{u}_{\mathrm{obs}}$)"
+    obs_line = mlines.Line2D([], [], color="#444444", linestyle=":", linewidth=1.3, label=obs_label)
     pred_line = mlines.Line2D([], [], color="#002b4d", linestyle="-", linewidth=1.3, label=r"Pred. ($\mathbf{u}_{\mathrm{pred}}$)")
     leg_x = 0.40 if is_block else 0.32
     ax1.legend(
@@ -115,7 +118,8 @@ def create_merged_2x2_figure(
     all_vals = np.concatenate([d["u_obs_test"].flatten(), d["u_pred_test_mean"].flatten()])
     lims = [all_vals.min(), all_vals.max()]
     ax3.plot(lims, lims, "k--", linewidth=1.2, label="Isoline", zorder=5)
-    ax3.set_xlabel(r"$u_{\mathrm{obs}}$", fontsize=10.0, labelpad=3)
+    xlabel_str = r"$u_{\mathrm{clean}}$" if use_clean else r"$u_{\mathrm{obs}}$"
+    ax3.set_xlabel(xlabel_str, fontsize=10.0, labelpad=3)
     ax3.set_ylabel(r"$u_{\mathrm{pred}}$", fontsize=10.0, labelpad=3)
     t_pref = f"[Conformal $Q={d['q_disp']:.2f}$] " if is_conformal else ""
     ax3.set_title(rf"{t_pref}Parity", fontsize=11.2, pad=6)
@@ -345,33 +349,37 @@ def main():
     block_val_dir = exp_dir / str(seed) / "fem_validation" / "block"
     holes_val_dir = exp_dir / str(seed) / "fem_validation" / "holes"
 
-    for is_conf in [False, True]:
-        conf_tag = "Conformal" if is_conf else "Raw"
-        print(f"\n==================================================")
-        print(f"Extracting 2x2 Validation Data ({conf_tag})")
-        print(f"==================================================")
-        d_block = extract_plot_data(
-            geom="block",
-            data_file=str(block_val_dir / "fem_distilled_samples.npz"),
-            calib_disp_file=str(block_val_dir / "conformal_calibration_metrics.json"),
-            calib_force_file=str(block_val_dir / "conformal_force_calibration.json"),
-            reaction_cache_file=str(block_val_dir / "reaction_forces_cache_block.npz"),
-            is_conformal=is_conf
-        )
-        d_holes = extract_plot_data(
-            geom="holes",
-            data_file=str(holes_val_dir / "fem_distilled_samples.npz"),
-            calib_disp_file=str(block_val_dir / "conformal_calibration_metrics.json"),
-            calib_force_file=str(block_val_dir / "conformal_force_calibration.json"),
-            reaction_cache_file=str(holes_val_dir / "reaction_forces_cache_holes.npz"),
-            is_conformal=is_conf
-        )
+    for use_clean in [False, True]:
+        for is_conf in [False, True]:
+            conf_tag = "Conformal" if is_conf else "Raw"
+            clean_tag = " (Clean FEM)" if use_clean else " (Observed)"
+            print(f"\n==================================================")
+            print(f"Extracting 2x2 Validation Data ({conf_tag}{clean_tag})")
+            print(f"==================================================")
+            d_block = extract_plot_data(
+                geom="block",
+                data_file=str(block_val_dir / "fem_distilled_samples.npz"),
+                calib_disp_file=str(block_val_dir / "conformal_calibration_metrics.json"),
+                calib_force_file=str(block_val_dir / "conformal_force_calibration.json"),
+                reaction_cache_file=str(block_val_dir / "reaction_forces_cache_block.npz"),
+                is_conformal=is_conf,
+                use_clean=use_clean
+            )
+            d_holes = extract_plot_data(
+                geom="holes",
+                data_file=str(holes_val_dir / "fem_distilled_samples.npz"),
+                calib_disp_file=str(block_val_dir / "conformal_calibration_metrics.json"),
+                calib_force_file=str(block_val_dir / "conformal_force_calibration.json"),
+                reaction_cache_file=str(holes_val_dir / "reaction_forces_cache_holes.npz"),
+                is_conformal=is_conf,
+                use_clean=use_clean
+            )
 
-        print(f"Generating 2x2 Figure for Block ({conf_tag})...")
-        create_merged_2x2_figure(d_block, str(out_dir), make_png=args.make_png)
+            print(f"Generating 2x2 Figure for Block ({conf_tag}{clean_tag})...")
+            create_merged_2x2_figure(d_block, str(out_dir), make_png=args.make_png)
 
-        print(f"Generating 2x2 Figure for Holes ({conf_tag})...")
-        create_merged_2x2_figure(d_holes, str(out_dir), make_png=args.make_png)
+            print(f"Generating 2x2 Figure for Holes ({conf_tag}{clean_tag})...")
+            create_merged_2x2_figure(d_holes, str(out_dir), make_png=args.make_png)
 
 if __name__ == "__main__":
     main()
