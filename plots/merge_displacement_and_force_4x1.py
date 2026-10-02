@@ -41,24 +41,41 @@ def load_cached_reaction_forces(data_file: str, cache_file: str):
     if os.path.exists(cache_file):
         try:
             cached = np.load(cache_file, allow_pickle=True)
-            return {
+            res = {
                 "rx_all": cached["rx_all"],
                 "ry_all": cached["ry_all"],
                 "loads": cached["loads"],
                 "n_steps": int(cached["n_steps"])
             }
+            if "rx_gt" in cached:
+                res["rx_gt"] = cached["rx_gt"]
+            if "ry_gt" in cached:
+                res["ry_gt"] = cached["ry_gt"]
+            if "rx_true_all" in cached:
+                res["rx_true_all"] = cached["rx_true_all"]
+            if "ry_true_all" in cached:
+                res["ry_true_all"] = cached["ry_true_all"]
+            return res
         except Exception:
             pass
 
     res = compute_distilled_reaction_forces(data_file)
     try:
-        np.savez_compressed(
-            cache_file,
-            rx_all=res["rx_all"],
-            ry_all=res["ry_all"],
-            loads=res["loads"],
-            n_steps=res["n_steps"]
-        )
+        save_dict = {
+            "rx_all": res["rx_all"],
+            "ry_all": res["ry_all"],
+            "loads": res["loads"],
+            "n_steps": res["n_steps"]
+        }
+        if "rx_gt" in res:
+            save_dict["rx_gt"] = res["rx_gt"]
+        if "ry_gt" in res:
+            save_dict["ry_gt"] = res["ry_gt"]
+        if "rx_true_all" in res:
+            save_dict["rx_true_all"] = res["rx_true_all"]
+        if "ry_true_all" in res:
+            save_dict["ry_true_all"] = res["ry_true_all"]
+        np.savez_compressed(cache_file, **save_dict)
     except Exception:
         pass
 
@@ -189,6 +206,8 @@ def extract_plot_data(
         "cov_x": cov_x, "cov_y": cov_y, "cov_xy": cov_xy,
         "r2_x": r2_x, "r2_y": r2_y, "rmse_x": rmse_x, "rmse_y": rmse_y,
         "loads": loads, "rx_all": rx_all, "ry_all": ry_all, "n_rf_steps": n_rf_steps,
+        "rx_gt": rf_data.get("rx_gt", None), "ry_gt": rf_data.get("ry_gt", None),
+        "rx_true_all": rf_data.get("rx_true_all", None), "ry_true_all": rf_data.get("ry_true_all", None),
         "alpha": alpha
     }
 
@@ -292,15 +311,15 @@ def populate_axes_column(fig, axes_col, d, show_ylabels: bool = True):
     )
 
     # =============================================================
-    # PANEL 4: Reaction Force Validation (Steps 1 to 20)
+    # PANEL 4: Reaction Force Validation (Steps 0 to 19)
     # =============================================================
     ax4 = axes_col[3]
     rf_title_prefix = "[Conformal]" if is_conformal else "[Uncalibrated]"
-    steps_disp = np.arange(1, d["n_rf_steps"] + 1)
-    ax4.set_xticks([1, 5, 10, 15, 20])
-    ax4.set_xticks(np.arange(1, 21), minor=True)
-    ax4.set_xlim(0.3, 20.7)
-    ax4.set_xlabel("Load Step (1 to 20)", fontsize=10.5)
+    steps_disp = np.arange(0, d["n_rf_steps"])
+    ax4.set_xticks([0, 5, 10, 15, d["n_rf_steps"] - 1])
+    ax4.set_xticks(np.arange(0, d["n_rf_steps"]), minor=True)
+    ax4.set_xlim(-0.6, d["n_rf_steps"] - 0.4)
+    ax4.set_xlabel(f"Load Step (0 to {d['n_rf_steps'] - 1})", fontsize=10.5)
     ax4.tick_params(axis="both", which="major", labelsize=8.8)
     ax4.tick_params(axis="x", which="minor", length=2.5)
     ax4.grid(True, alpha=0.25, linestyle="--")
@@ -336,6 +355,13 @@ def populate_axes_column(fig, axes_col, d, show_ylabels: bool = True):
         err_x = np.vstack([mu_rx - low_rx, high_rx - mu_rx])
         err_y = np.vstack([mu_ry - low_ry, high_ry - mu_ry])
 
+        has_gt = ("rx_gt" in d and d["rx_gt"] is not None and "ry_gt" in d and d["ry_gt"] is not None)
+        if has_gt:
+            r_gt_x = d["rx_gt"]
+            r_gt_y = d["ry_gt"]
+            ax4.plot(steps_disp, r_gt_x, color="#084594", lw=1.2, linestyle="-.", marker="d", markersize=2.8, alpha=0.85, label=r"True $R_{\mathrm{true}, x}$")
+            ax4.plot(steps_disp, r_gt_y, color="#006d2c", lw=1.2, linestyle=":", marker="^", markersize=2.8, alpha=0.85, label=r"True $R_{\mathrm{true}, y}$")
+
         ax4.plot(steps_disp, mu_rx, color='#1f77b4', lw=1.3, linestyle='--', alpha=0.7)
         ax4.fill_between(steps_disp, low_rx, high_rx, color='#1f77b4', alpha=0.15)
         ax4.errorbar(
@@ -358,16 +384,21 @@ def populate_axes_column(fig, axes_col, d, show_ylabels: bool = True):
             marker='s', s=24, zorder=5, label=r"Obs. $R_{\mathrm{obs}, y}$"
         )
 
-        ax4.set_ylim(-0.08, 1.68)
+        all_y = [r_obs_x, r_obs_y, low_rx, high_rx, low_ry, high_ry]
+        if has_gt:
+            all_y.extend([r_gt_x, r_gt_y])
+        flat_y = np.concatenate([np.asarray(v).flatten() for v in all_y])
+        y_min, y_max = float(np.nanmin(flat_y)), float(np.nanmax(flat_y))
+        pad = max(0.08 * (y_max - y_min), 0.1)
+        ax4.set_ylim(min(y_min - 0.05 * (y_max - y_min), -0.05), y_max + pad)
+
         if show_ylabels:
             ax4.set_ylabel("Reaction Force", fontsize=10.5)
         ax4.set_title(rf"(d) {rf_title_prefix} Reaction Force (Block)", fontsize=11.2, pad=6)
 
         handles, labels = ax4.get_legend_handles_labels()
-        order = [1, 0, 3, 2]
         ax4.legend(
-            [handles[i] for i in order], [labels[i] for i in order],
-            loc="upper left", fontsize=7.2, framealpha=0.92, edgecolor='#cccccc',
+            loc="upper left", fontsize=6.8, framealpha=0.92, edgecolor='#cccccc',
             ncol=2, columnspacing=0.5
         )
 
@@ -422,6 +453,11 @@ def populate_axes_column(fig, axes_col, d, show_ylabels: bool = True):
 
         err_y = np.vstack([mu_ry - low_ry, high_ry - mu_ry])
 
+        has_gt_y = ("ry_gt" in d and d["ry_gt"] is not None)
+        if has_gt_y:
+            r_gt_y = d["ry_gt"]
+            ax4.plot(steps_disp, r_gt_y, color='#006d2c', lw=1.2, linestyle='-.', marker='d', markersize=2.8, alpha=0.85, label=r"True $R_{\mathrm{true}, y}$")
+
         ax4.plot(steps_disp, mu_ry, color='#2ca02c', lw=1.3, linestyle='--', alpha=0.7)
         ax4.fill_between(steps_disp, low_ry, high_ry, color='#2ca02c', alpha=0.15, label=band_lbl)
         ax4.errorbar(
@@ -433,7 +469,13 @@ def populate_axes_column(fig, axes_col, d, show_ylabels: bool = True):
             marker='s', s=24, zorder=5, label=r"Obs. $R_{\mathrm{obs}, y}$"
         )
 
-        ax4.set_ylim(-0.08, 1.55)
+        all_y = [r_obs_y, low_ry, high_ry]
+        if has_gt_y:
+            all_y.append(r_gt_y)
+        flat_y = np.concatenate([np.asarray(v).flatten() for v in all_y])
+        y_min, y_max = float(np.nanmin(flat_y)), float(np.nanmax(flat_y))
+        pad = max(0.08 * (y_max - y_min), 0.1)
+        ax4.set_ylim(min(y_min - 0.05 * (y_max - y_min), -0.05), y_max + pad)
         if show_ylabels:
             ax4.set_ylabel(r"Reaction Force $R_y$", fontsize=10.5)
         ax4.set_title(rf"(d) {rf_title_prefix} Reaction Force (Holes)", fontsize=11.2, pad=6)

@@ -635,6 +635,13 @@ for SEED in $SEEDS_LIST; do
         python3 plots/plot_combined_invariant_sensitivity.py --distilled_dir "$DISTILL_DIR" 2>/dev/null || true
         python3 plots/plot_all_invariant_sensitivity.py --distilled_dir "$DISTILL_DIR" 2>/dev/null || true
 
+        echo "Running Pre-FEM Block Validation in $DISTILL_DIR/block_validation..."
+        python3 plots/run_block_validation.py \
+            --distilled_dir "$DISTILL_DIR" \
+            --extracted_dir "$EXTRACT_DIR" \
+            --dataset_path "$TRAIN_DATASET_PATH" \
+            --save_path "$DISTILL_DIR/block_validation" || true
+
         echo "✅ Step 3 (Distillation for Seed $SEED) completed."
     else
         echo "⏭️ Skipping Step 3 (Distillation) for Seed $SEED."
@@ -811,9 +818,18 @@ for SEED in $SEEDS_LIST; do
             if [ -d "$VAL_DIR" ]; then
                 echo "Generating Reaction Force verification plots for Seed $SEED..."
                 python3 plots/plot_reaction_force_distilled.py --model_path "$VAL_DIR" || true
-                python3 plots/plot_free_node_residuals.py --model_path "$VAL_DIR" || true
                 python3 plots/plot_fem_sampled_parameters.py --model_path "$VAL_DIR" || true
                 python3 plots/plot_failed_fem_samples.py --folder "$VAL_DIR" || true
+
+                echo "Generating merged 2x2 displacement & reaction force validation plots..."
+                python3 plots/merge_displacement_and_force_2x2.py \
+                    --exp_dir "$EXPERIMENT_DIR" \
+                    --seed "$SEED" \
+                    --out_dir "$VAL_DIR" || true
+                python3 plots/merge_displacement_and_force_2x2.py \
+                    --exp_dir "$EXPERIMENT_DIR" \
+                    --seed "$SEED" \
+                    --out_dir "$EXPERIMENT_DIR/plots" || true
             fi
 
             # Re-run distilled energy R2 plot and split summary if distilled outputs exist
