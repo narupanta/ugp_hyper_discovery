@@ -37,7 +37,8 @@ class GPRawParams(NamedTuple):
     log_sigma_global: jnp.ndarray = None
     log_kzz_noise: jnp.ndarray = None
     # None (all parameter files saved before 2026-10-07) = legacy transforms: lengthscale bound 2*max(feature),
-    # absolute Kzz jitter. 2 = lengthscale bound by the feature range, jitter relative to sig^2.
+    # absolute Kzz jitter. 2 = lengthscale bound 1x the feature range, jitter relative to sig^2.
+    # 3 = as 2 with the lengthscale bound 2x the feature range.
     param_version: jnp.ndarray = None
 
 class GPParams(NamedTuple) :

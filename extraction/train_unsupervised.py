@@ -694,7 +694,7 @@ if __name__ == "__main__" :
                 log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 0]),
                 log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1]),
                 log_sigma_global=jnp.array(log_sigma0, dtype=jnp.float64),
-                param_version=jnp.array(2.0),
+                param_version=jnp.array(3.0),
                 **aniso_kwargs,
                 **kzz_noise_kwargs
             )
@@ -722,7 +722,7 @@ if __name__ == "__main__" :
                 log_sigma_fix_x=jax.random.normal(k3, (load_noise_std_steps.shape[0],)),
                 log_sigma_fix_y=jax.random.normal(k4, (load_noise_std_steps.shape[0],)),
                 log_sigma_global=jnp.array(log_sigma0, dtype=jnp.float64),
-                param_version=jnp.array(2.0),
+                param_version=jnp.array(3.0),
                 **aniso_kwargs,
                 **kzz_noise_kwargs
             )

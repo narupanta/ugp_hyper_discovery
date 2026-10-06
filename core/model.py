@@ -96,6 +96,9 @@ class SparseHyperelasticityGP:
 
         # Parameter files without param_version were trained with the legacy transforms; keep reading them so.
         self.legacy_transforms = getattr(p, "param_version", None) is None
+        # Upper lengthscale bound in units of the inducing-feature range: 1x for param_version 2, 2x from version 3
+        # (the relative jitter already bounds cond(Kzz), and near-polynomial energies need l of order the range).
+        ls_factor = 2.0 if self.legacy_transforms else jnp.where(p.param_version >= 2.5, 2.0, 1.0)
 
         dev_mu = to_f64(jax.nn.softplus(p.raw_dev_u_mean))
         vol_mu = to_f64(jax.nn.softplus(p.raw_vol_u_mean))
@@ -152,7 +155,7 @@ class SparseHyperelasticityGP:
                 aniso_u_var = aniso_var.at[0].set(self.u_var_anchor)
             
             if "full" not in self.covariance_mode and self.constraint_lengthscale:
-                aniso_ls_val = to_f64((self.max_aniso.mean() * 2 if self.legacy_transforms else self.range_aniso)
+                aniso_ls_val = to_f64((self.max_aniso.mean() * 2 if self.legacy_transforms else ls_factor * self.range_aniso)
                                       * jax.nn.sigmoid(p.raw_aniso_ls))
             else:
                 aniso_ls_val = to_f64(jax.nn.softplus(p.raw_aniso_ls))
@@ -174,8 +177,8 @@ class SparseHyperelasticityGP:
                 dev_ls_val = to_f64(self.max_dev.mean() * 2 * jax.nn.sigmoid(p.raw_dev_ls))
                 vol_ls_val = to_f64(self.max_vol * 2 * jax.nn.sigmoid(p.raw_vol_ls))
             else:
-                dev_ls_val = to_f64(self.range_dev * jax.nn.sigmoid(p.raw_dev_ls))
-                vol_ls_val = to_f64(self.range_vol * jax.nn.sigmoid(p.raw_vol_ls))
+                dev_ls_val = to_f64(ls_factor * self.range_dev * jax.nn.sigmoid(p.raw_dev_ls))
+                vol_ls_val = to_f64(ls_factor * self.range_vol * jax.nn.sigmoid(p.raw_vol_ls))
         else:
             dev_ls_val = to_f64(jax.nn.softplus(p.raw_dev_ls))
             vol_ls_val = to_f64(jax.nn.softplus(p.raw_vol_ls))
