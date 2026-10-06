@@ -273,6 +273,12 @@ if __name__ == "__main__" :
     stress_mode = (args.stress_mode or dataset_stress or rec.get("stress_mode", "plane_strain"))
     stress_mode = str(stress_mode).lower()
 
+    # Dataset filenames do not encode these modes, so a stale file can carry different kinematics/BCs than requested
+    for name, requested, stored in [("control_mode", control_mode, dataset_control), ("stress_mode", stress_mode, dataset_stress)]:
+        if stored is not None and str(stored).lower() != requested:
+            raise ValueError(f"Requested {name}='{requested}' but dataset {prep_dataset_path} was generated with "
+                             f"{name}='{stored}'. Regenerate the dataset or pass the matching {name}.")
+
     # Resolve constraint_lengthscale (default: 1 for backward compatibility)
     constraint_lengthscale = args.constraint_lengthscale
     if constraint_lengthscale is None:
