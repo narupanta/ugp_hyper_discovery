@@ -70,6 +70,13 @@ class SparseHyperelasticityGP:
             w = self.gpweight
         return p, w
 
+    def _effective_kzz_jitter(self, p: GPParams) -> float:
+        """Returns the effective Kzz diagonal: trainable kzz_noise if available, else fixed kzz_jitter.
+        Always adds a tiny 1e-12 floor for Cholesky numerical stability."""
+        if p is not None and getattr(p, "kzz_noise", None) is not None:
+            return p.kzz_noise + 1e-12
+        return self.kzz_jitter
+
     # ---------------------------------------------------------
     # 1. Parameter Management
     # ---------------------------------------------------------
@@ -156,6 +163,16 @@ class SparseHyperelasticityGP:
             dev_ls_val = to_f64(jax.nn.softplus(p.raw_dev_ls))
             vol_ls_val = to_f64(jax.nn.softplus(p.raw_vol_ls))
 
+        if getattr(p, "log_kzz_noise", None) is not None:
+            kzz_noise_val = to_f64(jnp.exp(p.log_kzz_noise))
+        else:
+            kzz_noise_val = None
+
+        sigma_free_x_val = to_f64(jnp.exp(p.log_sigma_free_x)) if getattr(p, "log_sigma_free_x", None) is not None else None
+        sigma_free_y_val = to_f64(jnp.exp(p.log_sigma_free_y)) if getattr(p, "log_sigma_free_y", None) is not None else None
+        sigma_fix_x_val = to_f64(jnp.exp(p.log_sigma_fix_x)) if getattr(p, "log_sigma_fix_x", None) is not None else None
+        sigma_fix_y_val = to_f64(jnp.exp(p.log_sigma_fix_y)) if getattr(p, "log_sigma_fix_y", None) is not None else None
+
         return GPParams(
             dev_ls=dev_ls_val,
             dev_sig=to_f64(jnp.exp(p.raw_dev_sig)),
@@ -169,12 +186,14 @@ class SparseHyperelasticityGP:
             vol_u_var=vol_u_var,
             vol_z=vol_z,
 
-            sigma_free_x=to_f64(jnp.exp(p.log_sigma_free_x)),
-            sigma_free_y=to_f64(jnp.exp(p.log_sigma_free_y)),
-            sigma_fix_x=to_f64(jnp.exp(p.log_sigma_fix_x)),
-            sigma_fix_y=to_f64(jnp.exp(p.log_sigma_fix_y)),
+            sigma_free_x=sigma_free_x_val,
+            sigma_free_y=sigma_free_y_val,
+            sigma_fix_x=sigma_fix_x_val,
+            sigma_fix_y=sigma_fix_y_val,
             sigma_global=to_f64(jnp.exp(p.log_sigma_global)) if getattr(p, "log_sigma_global", None) is not None else None,
             
+            kzz_noise=kzz_noise_val,
+
             **kwargs
         )
 
@@ -182,9 +201,10 @@ class SparseHyperelasticityGP:
     # 2. Core GP Mathematics & Weight Precomputation
     # ---------------------------------------------------------
     def _compute_component_weights(self, z: jnp.ndarray, u_mean: jnp.ndarray, u_var: jnp.ndarray, 
-                                   ls: jnp.ndarray, sig: jnp.ndarray) -> Tuple[jnp.ndarray, ...]:
+                                   ls: jnp.ndarray, sig: jnp.ndarray, kzz_jitter: float = None) -> Tuple[jnp.ndarray, ...]:
         """Helper to precompute reusable covariance matrices and vectors for GP."""
-        Kzz = rbf(z, z, sig, ls) + self.kzz_jitter * jnp.eye(z.shape[0], dtype=jnp.float64)
+        jitter = kzz_jitter if kzz_jitter is not None else self.kzz_jitter
+        Kzz = rbf(z, z, sig, ls) + jitter * jnp.eye(z.shape[0], dtype=jnp.float64)
         K_inv = jnp.linalg.solve(Kzz, jnp.eye(z.shape[0], dtype=jnp.float64))
         
         # We strictly assume a zero-mean prior, so v_diff is just u_mean - 0
@@ -212,12 +232,13 @@ class SparseHyperelasticityGP:
 
     def precompute_weights_from_loaded(self, p: GPParams) -> GPWeights:
         """Precomputes weights directly from loaded GPParams."""
-        d_res = self._compute_component_weights(p.dev_z, p.dev_u_mean, p.dev_u_var, p.dev_ls, p.dev_sig)
-        v_res = self._compute_component_weights(p.vol_z, p.vol_u_mean, p.vol_u_var, p.vol_ls, p.vol_sig)
+        eff_jitter = self._effective_kzz_jitter(p)
+        d_res = self._compute_component_weights(p.dev_z, p.dev_u_mean, p.dev_u_var, p.dev_ls, p.dev_sig, kzz_jitter=eff_jitter)
+        v_res = self._compute_component_weights(p.vol_z, p.vol_u_mean, p.vol_u_var, p.vol_ls, p.vol_sig, kzz_jitter=eff_jitter)
         
         kwargs = {}
         if self.is_anisotropic:
-            a_res = self._compute_component_weights(p.aniso_z, p.aniso_u_mean, p.aniso_u_var, p.aniso_ls, p.aniso_sig)
+            a_res = self._compute_component_weights(p.aniso_z, p.aniso_u_mean, p.aniso_u_var, p.aniso_ls, p.aniso_sig, kzz_jitter=eff_jitter)
             kwargs = dict(
                 aniso_Kzz=a_res[0], aniso_Kzz_inv=a_res[1], aniso_v=a_res[2], aniso_trace_term=a_res[3], 
                 aniso_mahalanobis_term=a_res[4], aniso_M_mat=a_res[5], aniso_logterm=a_res[6]
@@ -444,9 +465,10 @@ class SparseHyperelasticityGP:
     # ---------------------------------------------------------
     # Helper for Numerically Stable Component Covariance / Variance
     # ---------------------------------------------------------
-    def _stable_component_var(self, x: jnp.ndarray, z: jnp.ndarray, sig: jnp.ndarray, ls: jnp.ndarray, u_var: jnp.ndarray) -> jnp.ndarray:
+    def _stable_component_var(self, x: jnp.ndarray, z: jnp.ndarray, sig: jnp.ndarray, ls: jnp.ndarray, u_var: jnp.ndarray, kzz_jitter: float = None) -> jnp.ndarray:
         """Exact closed-form marginal variance without catastrophic cancellation: sig^2 * max(0, 1 - ||v||^2) + var_ind."""
-        Kzz_norm = rbf(z, z, 1.0, ls) + (self.kzz_jitter / (sig**2)) * jnp.eye(z.shape[0], dtype=jnp.float64)
+        jitter = kzz_jitter if kzz_jitter is not None else self.kzz_jitter
+        Kzz_norm = rbf(z, z, 1.0, ls) + (jitter / (sig**2)) * jnp.eye(z.shape[0], dtype=jnp.float64)
         L_norm = jnp.linalg.cholesky(Kzz_norm)
         k_xz_norm = rbf(x, z, 1.0, ls)
         v = jax.scipy.linalg.solve_triangular(L_norm, k_xz_norm.T, lower=True)
@@ -460,9 +482,10 @@ class SparseHyperelasticityGP:
             var_ind = jnp.sum((w.T @ U_cov) * w.T, axis=-1)
         return var_prior + var_ind
 
-    def _stable_component_joint_cov(self, x: jnp.ndarray, z: jnp.ndarray, sig: jnp.ndarray, ls: jnp.ndarray, u_var: jnp.ndarray) -> jnp.ndarray:
+    def _stable_component_joint_cov(self, x: jnp.ndarray, z: jnp.ndarray, sig: jnp.ndarray, ls: jnp.ndarray, u_var: jnp.ndarray, kzz_jitter: float = None) -> jnp.ndarray:
         """Exact closed-form joint covariance without catastrophic cancellation."""
-        Kzz_norm = rbf(z, z, 1.0, ls) + (self.kzz_jitter / (sig**2)) * jnp.eye(z.shape[0], dtype=jnp.float64)
+        jitter = kzz_jitter if kzz_jitter is not None else self.kzz_jitter
+        Kzz_norm = rbf(z, z, 1.0, ls) + (jitter / (sig**2)) * jnp.eye(z.shape[0], dtype=jnp.float64)
         L_norm = jnp.linalg.cholesky(Kzz_norm)
         k_xz_norm = rbf(x, z, 1.0, ls)
         Kxx_norm = rbf(x, x, 1.0, ls)
@@ -486,13 +509,13 @@ class SparseHyperelasticityGP:
             f = f[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f)
         dev, vol = feats[0], feats[1]
-        
-        var_dev = self._stable_component_var(dev, p.dev_z, p.dev_sig, p.dev_ls, p.dev_u_var)
-        var_vol = self._stable_component_var(vol, p.vol_z, p.vol_sig, p.vol_ls, p.vol_u_var)
+        eff_jitter = self._effective_kzz_jitter(p)
+        var_dev = self._stable_component_var(dev, p.dev_z, p.dev_sig, p.dev_ls, p.dev_u_var, kzz_jitter=eff_jitter)
+        var_vol = self._stable_component_var(vol, p.vol_z, p.vol_sig, p.vol_ls, p.vol_u_var, kzz_jitter=eff_jitter)
         res = var_dev + var_vol
         if self.is_anisotropic:
             aniso = feats[2]
-            var_aniso = self._stable_component_var(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls, p.aniso_u_var)
+            var_aniso = self._stable_component_var(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls, p.aniso_u_var, kzz_jitter=eff_jitter)
             res += var_aniso
             
         return res if not is_single else res[0]
@@ -504,13 +527,14 @@ class SparseHyperelasticityGP:
             f = f[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f)
         dev, vol = feats[0], feats[1]
-        cov_mat_dev = self._stable_component_joint_cov(dev, p.dev_z, p.dev_sig, p.dev_ls, p.dev_u_var)
-        cov_mat_vol = self._stable_component_joint_cov(vol, p.vol_z, p.vol_sig, p.vol_ls, p.vol_u_var)
+        eff_jitter = self._effective_kzz_jitter(p)
+        cov_mat_dev = self._stable_component_joint_cov(dev, p.dev_z, p.dev_sig, p.dev_ls, p.dev_u_var, kzz_jitter=eff_jitter)
+        cov_mat_vol = self._stable_component_joint_cov(vol, p.vol_z, p.vol_sig, p.vol_ls, p.vol_u_var, kzz_jitter=eff_jitter)
         
         cov_full = cov_mat_dev + cov_mat_vol
         if self.is_anisotropic:
             aniso = feats[2]
-            cov_mat_aniso = self._stable_component_joint_cov(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls, p.aniso_u_var)
+            cov_mat_aniso = self._stable_component_joint_cov(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls, p.aniso_u_var, kzz_jitter=eff_jitter)
             cov_full += cov_mat_aniso
             
         return 0.5 * (cov_full + cov_full.T)
@@ -521,7 +545,7 @@ class SparseHyperelasticityGP:
             f = f[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f)
         dev = feats[0]
-        return self._stable_component_joint_cov(dev, p.dev_z, p.dev_sig, p.dev_ls, p.dev_u_var)
+        return self._stable_component_joint_cov(dev, p.dev_z, p.dev_sig, p.dev_ls, p.dev_u_var, kzz_jitter=self._effective_kzz_jitter(p))
 
     def vol_psi_joint_cov(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
@@ -529,7 +553,7 @@ class SparseHyperelasticityGP:
             f = f[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f)
         vol = feats[1]
-        return self._stable_component_joint_cov(vol, p.vol_z, p.vol_sig, p.vol_ls, p.vol_u_var)
+        return self._stable_component_joint_cov(vol, p.vol_z, p.vol_sig, p.vol_ls, p.vol_u_var, kzz_jitter=self._effective_kzz_jitter(p))
 
     def aniso_psi_joint_cov(self, f: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         p, w = self._resolve_state(params, weights)
@@ -537,14 +561,15 @@ class SparseHyperelasticityGP:
             f = f[None, ...]
         feats = jax.vmap(self.feature_extractor.extract)(f)
         aniso = feats[2]
-        return self._stable_component_joint_cov(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls, p.aniso_u_var)
+        return self._stable_component_joint_cov(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls, p.aniso_u_var, kzz_jitter=self._effective_kzz_jitter(p))
 
     def piola_gp_cov_pair(self, f1: jnp.ndarray, f2: jnp.ndarray, params: Optional[GPParams] = None, weights: Optional[GPWeights] = None) -> jnp.ndarray:
         """Computes double-differentiation cross-covariance between two deformation gradient tensors using exact stable closed form."""
         p, w = self._resolve_state(params, weights)
+        eff_jitter = self._effective_kzz_jitter(p)
 
         def _stable_single_cov(x1, x2, z, sig, ls, u_var):
-            Kzz_norm = rbf(z, z, 1.0, ls) + (self.kzz_jitter / (sig**2)) * jnp.eye(z.shape[0], dtype=jnp.float64)
+            Kzz_norm = rbf(z, z, 1.0, ls) + (eff_jitter / (sig**2)) * jnp.eye(z.shape[0], dtype=jnp.float64)
             L_norm = jnp.linalg.cholesky(Kzz_norm)
             k_x1z_norm = rbf(x1, z, 1.0, ls)
             k_x2z_norm = rbf(x2, z, 1.0, ls)
@@ -626,7 +651,7 @@ class SparseHyperelasticityGP:
         feats = jax.vmap(self.feature_extractor.extract)(f_mesh)
         dev = feats[0]
         mean = self.dev_gp_mean(dev, params=p, weights=w)
-        var_dev = self._stable_component_var(dev, p.dev_z, p.dev_sig, p.dev_ls, p.dev_u_var)
+        var_dev = self._stable_component_var(dev, p.dev_z, p.dev_sig, p.dev_ls, p.dev_u_var, kzz_jitter=self._effective_kzz_jitter(p))
         if is_single:
             return EnergyDist(mean.reshape(), var_dev[0])
         return EnergyDist(mean.squeeze(), var_dev)
@@ -639,7 +664,7 @@ class SparseHyperelasticityGP:
         feats = jax.vmap(self.feature_extractor.extract)(f_mesh)
         vol = feats[1]
         mean = self.vol_gp_mean(vol, params=p, weights=w)
-        var_vol = self._stable_component_var(vol, p.vol_z, p.vol_sig, p.vol_ls, p.vol_u_var)
+        var_vol = self._stable_component_var(vol, p.vol_z, p.vol_sig, p.vol_ls, p.vol_u_var, kzz_jitter=self._effective_kzz_jitter(p))
         if is_single:
             return EnergyDist(mean.reshape(), var_vol[0])
         return EnergyDist(mean.squeeze(), var_vol)
@@ -654,7 +679,7 @@ class SparseHyperelasticityGP:
         feats = jax.vmap(self.feature_extractor.extract)(f_mesh)
         aniso = feats[2]
         mean = self.aniso_gp_mean(aniso, params=p, weights=w)
-        var_aniso = self._stable_component_var(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls, p.aniso_u_var)
+        var_aniso = self._stable_component_var(aniso, p.aniso_z, p.aniso_sig, p.aniso_ls, p.aniso_u_var, kzz_jitter=self._effective_kzz_jitter(p))
         if is_single:
             return EnergyDist(mean.reshape(), var_aniso[0])
         return EnergyDist(mean.squeeze(), var_aniso)

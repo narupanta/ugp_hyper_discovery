@@ -89,7 +89,7 @@ class HyperelasticGPTrainer:
             "aniso_gp_sigma_scaling": [], "aniso_gp_lengthscales": [],
             "aniso_u_mean": [], "aniso_u_var": [], "aniso_z": [], "aniso_theta_mean": [], "aniso_theta_var": [],
             "sigma_free_x": [], "sigma_free_y": [], "sigma_fix_x": [], "sigma_fix_y": [],
-            "sigma_global": []
+            "sigma_global": [], "kzz_noise": []
         }
         self.steps_history = []
         self.best_loss = float('inf')
@@ -140,6 +140,8 @@ class HyperelasticGPTrainer:
         self.params_hist["sigma_fix_y"].append(cur_params.sigma_fix_y)
         if getattr(cur_params, "sigma_global", None) is not None:
             self.params_hist["sigma_global"].append(cur_params.sigma_global)
+        if getattr(cur_params, "kzz_noise", None) is not None:
+            self.params_hist["kzz_noise"].append(cur_params.kzz_noise)
         
         if hasattr(cur_params, "aniso_sig"):
             self.params_hist["aniso_gp_sigma_scaling"].append(cur_params.aniso_sig)

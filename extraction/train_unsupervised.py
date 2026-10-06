@@ -80,7 +80,8 @@ def parse_args():
     parser.add_argument('--aniso_params', type=float, nargs='+', default=None)
     parser.add_argument('--normalize_ell', type=int, default=0, choices=[0, 1], help="Whether to normalize expected log-likelihood by degrees of freedom to prevent uncertainty collapse (1) or use unnormalized sum (0)")
     parser.add_argument('--u_var_anchor', type=float, default=1e-12, help="Anchor point variance (default 1e-12)")
-    parser.add_argument('--kzz_jitter', type=float, default=1e-8, help="Numerical jitter added to Kzz diagonal (default 1e-8)")
+    parser.add_argument('--kzz_jitter', type=float, default=1e-8, help="Kzz diagonal value: fixed numerical jitter (default), or initial value when --trainable_kzz_noise is set")
+    parser.add_argument('--trainable_kzz_noise', action='store_true', default=False, help="Make Kzz diagonal noise a trainable parameter (learned alongside sigma_free)")
     parser.add_argument('--vfm_mode', type=str, default="linear_triangle",
                         choices=["linear_triangle", "global_vf", "mix"],
                         help="VFM loss mode: 'linear_triangle', 'global_vf', or 'mix'")
@@ -565,6 +566,10 @@ if __name__ == "__main__" :
                 raw_theta = jnp.log(val / (1.0 - val))
                 aniso_kwargs["raw_aniso_theta_mean"] = jnp.array(raw_theta)
 
+        kzz_noise_kwargs = {}
+        if args.trainable_kzz_noise:
+            kzz_noise_kwargs["log_kzz_noise"] = jnp.log(jnp.array(args.kzz_jitter, dtype=jnp.float64))
+
         if is_fixed_reaction_force_noise:
             params = GPRawParams(
                 # Lengthscales and signal variances (Normal(0, 1))
@@ -583,13 +588,14 @@ if __name__ == "__main__" :
                 raw_vol_u_mean=raw_vol_u_mean_init,
                 raw_vol_u_var=raw_vol_u_var_init,
 
-                # Noise parameters (Fixed PDE residual noise to prevent uncertainty collapse)
+                # Noise parameters (PDE residual noise)
                 log_sigma_free_x=jnp.log(jnp.array(1.0)),
                 log_sigma_free_y=jnp.log(jnp.array(1.0)),
                 log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 0]),
                 log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1]),
                 log_sigma_global=jnp.log(jnp.array(1.0)),
-                **aniso_kwargs
+                **aniso_kwargs,
+                **kzz_noise_kwargs
             )
         else :
             params = GPRawParams(
@@ -609,13 +615,14 @@ if __name__ == "__main__" :
                 raw_vol_u_mean=raw_vol_u_mean_init,
                 raw_vol_u_var=raw_vol_u_var_init,
 
-                # Noise parameters (Fixed PDE residual noise to prevent uncertainty collapse)
+                # Noise parameters (PDE residual noise)
                 log_sigma_free_x=jnp.log(jnp.array(1.0)),
                 log_sigma_free_y=jnp.log(jnp.array(1.0)),
                 log_sigma_fix_x=jax.random.normal(k3, (load_noise_std_steps.shape[0],)),
                 log_sigma_fix_y=jax.random.normal(k4, (load_noise_std_steps.shape[0],)),
                 log_sigma_global=jnp.log(jnp.array(1.0)),
-                **aniso_kwargs
+                **aniso_kwargs,
+                **kzz_noise_kwargs
             )
     
     min_dev = jnp.min(dev_z, axis=0)

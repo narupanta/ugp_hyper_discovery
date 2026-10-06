@@ -35,6 +35,7 @@ class GPRawParams(NamedTuple):
     raw_aniso_theta_mean: jnp.ndarray = None
     raw_aniso_theta_var: jnp.ndarray = None
     log_sigma_global: jnp.ndarray = None
+    log_kzz_noise: jnp.ndarray = None
 
 class GPParams(NamedTuple) :
     dev_ls: jnp.ndarray = None
@@ -62,6 +63,7 @@ class GPParams(NamedTuple) :
     aniso_theta_mean: jnp.ndarray = None
     aniso_theta_var: jnp.ndarray = None
     aniso_z: jnp.ndarray = None
+    kzz_noise: jnp.ndarray = None
 
 class GPWeights(NamedTuple) :
     dev_Kzz: jnp.ndarray

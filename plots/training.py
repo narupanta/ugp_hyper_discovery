@@ -245,11 +245,17 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
 
     # Track physics noise parameter separately:
     fig_pn, ax_pn = plt.subplots(figsize=(8, 4))
-    ax_pn.plot(steps_history, np.array(params_hist["sigma_free_x"]), label=r"$\sigma_{\mathrm{free}, x}$")
-    ax_pn.plot(steps_history, np.array(params_hist["sigma_free_y"]), label=r"$\sigma_{\mathrm{free}, y}$")
-    ax_pn.plot(steps_history, np.array(params_hist["sigma_fix_x"]), label=r"$\sigma_{\mathrm{fix}, x}$")
-    ax_pn.plot(steps_history, np.array(params_hist["sigma_fix_y"]), label=r"$\sigma_{\mathrm{fix}, y}$")
-    ax_pn.set_title(r"Physics Residual Noise ($\sigma_{\mathrm{physic}}$)")
+    if "sigma_free_x" in params_hist and len(params_hist["sigma_free_x"]) > 0 and params_hist["sigma_free_x"][0] is not None:
+        ax_pn.plot(steps_history, np.array(params_hist["sigma_free_x"]), label=r"$\sigma_{\mathrm{free}, x}$")
+    if "sigma_free_y" in params_hist and len(params_hist["sigma_free_y"]) > 0 and params_hist["sigma_free_y"][0] is not None:
+        ax_pn.plot(steps_history, np.array(params_hist["sigma_free_y"]), label=r"$\sigma_{\mathrm{free}, y}$")
+    if "sigma_fix_x" in params_hist and len(params_hist["sigma_fix_x"]) > 0 and params_hist["sigma_fix_x"][0] is not None:
+        ax_pn.plot(steps_history, np.array(params_hist["sigma_fix_x"]), label=r"$\sigma_{\mathrm{fix}, x}$")
+    if "sigma_fix_y" in params_hist and len(params_hist["sigma_fix_y"]) > 0 and params_hist["sigma_fix_y"][0] is not None:
+        ax_pn.plot(steps_history, np.array(params_hist["sigma_fix_y"]), label=r"$\sigma_{\mathrm{fix}, y}$")
+    if "kzz_noise" in params_hist and len(params_hist["kzz_noise"]) > 0 and params_hist["kzz_noise"][0] is not None:
+        ax_pn.plot(steps_history, np.array(params_hist["kzz_noise"]), label=r"$k_{zz}\text{ noise}$", linestyle="--")
+    ax_pn.set_title(r"Physics & Inducing Noise ($\sigma_{\mathrm{physic}}, k_{zz}\text{ noise}$)")
     ax_pn.set_yscale('log')
     ax_pn.set_xlabel("Iteration Step")
     ax_pn.legend()
@@ -926,33 +932,62 @@ def _resolve_load_steps(num_steps, save_path=None, train_steps=None, val_steps=N
                 except Exception:
                     pass
 
-    # If test_steps is explicitly provided (not None), clean it; otherwise default to empty list
-    if test_steps is not None:
-        if isinstance(test_steps, (int, float)):
-            test_steps = [int(test_steps)]
-        else:
-            test_steps = [int(s) for s in test_steps if int(s) < num_steps]
-    else:
-        test_steps = []
+    # If test_steps is None, check config file if available
+    if test_steps is None and save_path:
+        for cfg_file in ["recipe_config.yaml", "config.yaml", "config.json"]:
+            cfg_path = os.path.join(save_path, cfg_file)
+            if not os.path.exists(cfg_path):
+                parent_cfg = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(save_path))), cfg_file)
+                if os.path.exists(parent_cfg):
+                    cfg_path = parent_cfg
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r") as f:
+                        if cfg_path.endswith(".json"):
+                            cfg = json.load(f)
+                        else:
+                            cfg = yaml.safe_load(f)
+                        if cfg and "test_load_steps_indices" in cfg and cfg["test_load_steps_indices"] is not None:
+                            test_steps = cfg["test_load_steps_indices"]
+                            break
+                except Exception:
+                    pass
 
-    if val_steps is not None:
-        if isinstance(val_steps, (int, float)):
-            val_steps = [int(val_steps)]
-        else:
-            val_steps = [int(s) for s in val_steps if int(s) < num_steps]
-    else:
-        val_steps = []
-
-    test_set = set(test_steps)
-
+    # Normalize train_steps
     if train_steps is not None and len(train_steps) > 0:
-        train_steps_list = [int(s) for s in train_steps if int(s) < num_steps]
-        train_set = set(train_steps_list) - test_set
+        if isinstance(train_steps, (int, float)):
+            train_steps_list = [int(train_steps)]
+        else:
+            train_steps_list = [int(s) for s in train_steps if int(s) < num_steps]
+        train_set = set(train_steps_list)
     else:
-        train_set = set(range(num_steps)) - set(val_steps) - test_set
+        train_set = set(range(num_steps))
 
-    # Validation steps are all requested val_steps not in train_set or test_set
-    val_set = set(val_steps) - train_set - test_set
+    # Normalize val_steps
+    if val_steps is not None and len(val_steps) > 0:
+        if isinstance(val_steps, (int, float)):
+            val_steps_list = [int(val_steps)]
+        else:
+            val_steps_list = [int(s) for s in val_steps if int(s) < num_steps]
+        # Val steps are those in val_steps_list not in train_set
+        val_set = set(val_steps_list) - train_set
+    else:
+        val_set = set()
+
+    # If train_steps was not explicitly specified, train_set is all steps minus val_set
+    if train_steps is None or len(train_steps) == 0:
+        train_set = train_set - val_set
+
+    # Test load steps is completely optional: only evaluate if explicitly defined and non-empty
+    if test_steps is not None and len(test_steps) > 0:
+        if isinstance(test_steps, (int, float)):
+            test_steps_list = [int(test_steps)]
+        else:
+            test_steps_list = [int(s) for s in test_steps if int(s) < num_steps]
+        # Test steps cannot overlap with train_set or val_set
+        test_set = set(test_steps_list) - train_set - val_set
+    else:
+        test_set = set()
 
     train_steps_clean = [s for s in range(num_steps) if s in train_set]
     val_steps_clean = [s for s in range(num_steps) if s in val_set]
@@ -972,9 +1007,9 @@ def _resolve_load_steps(num_steps, save_path=None, train_steps=None, val_steps=N
 def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_steps=None, val_steps=None, test_steps=None, n_pws_samples: int = 256):
     """
     Plots energy parity across training, validation (calibration), and test (extrapolation) steps.
-    Row 0 displays Raw Energy Parity (Psi).
-    Row 1 displays Recentered Energy Parity (Psi - Psi(I)) where I is the undeformed reference state.
-    Uses pathwise sampling (default 256 draws) to compute predictive uncertainties and correlation with reference state.
+    Row 0 displays Energy Parity (Psi).
+    Row 1 displays True Energy Distribution (Histograms) across train, validation, and test datasets.
+    Uses pathwise sampling (default 256 draws) to compute predictive uncertainties.
     """
     if true_model is None:
         print("[INFO] Ground truth material model is None (experimental data). Skipping true energy parity plots.")
@@ -988,7 +1023,7 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
         )
 
     apply_style()
-    print("Generating Training, Validation & Test Data R2 Plot (Raw and Recentered)...")
+    print("Generating Training, Validation & Test Data Energy Parity & Distribution Plot...")
     num_steps = F_train_full.shape[0]
 
     (
@@ -1033,9 +1068,12 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
     use_pws = (n_pws_samples is not None and n_pws_samples > 0 and hasattr(learned_gp, 'get_path_components_psi_fn'))
     if use_pws:
         print(f"Pre-evaluating energy pathwise realizations (n_samples = {n_pws_samples})...")
-        @jax.jit
-        def _eval_step_energy(F_s, key):
-            keys = jax.random.split(key, n_pws_samples)
+        from functools import partial
+        batch_draws = min(32, n_pws_samples)
+
+        @partial(jax.jit, static_argnums=(2,))
+        def _eval_batch_energy(F_s, key, n_draws):
+            keys = jax.random.split(key, n_draws)
             def single_draw(k):
                 fn = learned_gp.get_path_components_psi_fn(k)
                 dev_F, vol_F, aniso_F = jax.vmap(fn)(F_s)
@@ -1053,7 +1091,19 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
 
         for s in range(num_steps):
             if s in train_set or s in val_set or s in test_set:
-                step_energy_samples[s] = _eval_step_energy(F_train_full[s], jax.random.PRNGKey(42 + s))
+                step_key = jax.random.PRNGKey(42 + s)
+                accum_tuples = []
+                for b_start in range(0, n_pws_samples, batch_draws):
+                    b_size = min(batch_draws, n_pws_samples - b_start)
+                    step_key, subk = jax.random.split(step_key)
+                    batch_res = _eval_batch_energy(F_train_full[s], subk, b_size)
+                    accum_tuples.append([np.array(x) for x in batch_res])
+                
+                # Concatenate across sample dimension (axis=0)
+                step_energy_samples[s] = tuple(
+                    np.concatenate([accum_tuples[b_idx][i] for b_idx in range(len(accum_tuples))], axis=0)
+                    for i in range(len(accum_tuples[0]))
+                )
 
     comp_metrics = {}
     ret_train = {"r2": 0.0, "rmse": 0.0, "ec": 0.0}
@@ -1118,13 +1168,13 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
             true_rec = true_psi - psi_I_true
             mean_rec = mean_psi - psi_I_gp
 
-            if step in test_set:
-                test_true.append(true_psi)
-                test_mean.append(mean_psi)
-                test_std.append(std_psi)
-                test_true_rec.append(true_rec)
-                test_mean_rec.append(mean_rec)
-                test_std_rec.append(std_psi_rec)
+            if step in train_set:
+                train_true.append(true_psi)
+                train_mean.append(mean_psi)
+                train_std.append(std_psi)
+                train_true_rec.append(true_rec)
+                train_mean_rec.append(mean_rec)
+                train_std_rec.append(std_psi_rec)
             elif step in val_set:
                 val_true.append(true_psi)
                 val_mean.append(mean_psi)
@@ -1132,122 +1182,148 @@ def plot_training_r2(learned_gp, true_model, F_train_full, save_path, train_step
                 val_true_rec.append(true_rec)
                 val_mean_rec.append(mean_rec)
                 val_std_rec.append(std_psi_rec)
+            elif step in test_set:
+                test_true.append(true_psi)
+                test_mean.append(mean_psi)
+                test_std.append(std_psi)
+                test_true_rec.append(true_rec)
+                test_mean_rec.append(mean_rec)
+                test_std_rec.append(std_psi_rec)
+
+        # Row 0: Energy Parity Plot
+        ax_parity = axes[0, col_idx]
+        tr_t, tr_m, tr_s = train_true, train_mean, train_std
+        v_t, v_m, v_s = val_true, val_mean, val_std
+        te_t, te_m, te_s = test_true, test_mean, test_std
+        title_str = f"Energy Parity: {comp_name}"
+        xlabel_str = f"True {comp_label}"
+        ylabel_str = f"Predicted GP Mean {comp_label}"
+
+        if len(te_t) > 0:
+            ax_parity.errorbar(jnp.concatenate(te_t), jnp.concatenate(te_m),
+                               yerr=1.96 * jnp.concatenate(te_s), fmt='o',
+                               color='#d62728', ecolor='#e45756', alpha=0.40,
+                               markersize=3.5, elinewidth=0.85,
+                               label=f"Test Steps ({test_steps_str})")
+        if len(v_t) > 0:
+            ax_parity.errorbar(jnp.concatenate(v_t), jnp.concatenate(v_m),
+                               yerr=1.96 * jnp.concatenate(v_s), fmt='o',
+                               color='#1f77b4', ecolor='#4ba3e3', alpha=0.35,
+                               markersize=3.2, elinewidth=0.8,
+                               label=f"Val/Calib Steps ({val_steps_str})")
+        if len(tr_t) > 0:
+            ax_parity.errorbar(jnp.concatenate(tr_t), jnp.concatenate(tr_m),
+                               yerr=1.96 * jnp.concatenate(tr_s), fmt='o',
+                               color='gray', ecolor='#b0b0b0', alpha=0.25,
+                               markersize=3.0, elinewidth=0.8,
+                               label=f"Train Steps ({train_steps_str})")
+
+        r2_tr, rmse_tr, cov_tr = compute_metrics(tr_t, tr_m, tr_s)
+        r2_v, rmse_v, cov_v = compute_metrics(v_t, v_m, v_s)
+        r2_te, rmse_te, cov_te = compute_metrics(te_t, te_m, te_s)
+        r2_tot, rmse_tot, cov_tot = compute_metrics(
+            tr_t + v_t + te_t,
+            tr_m + v_m + te_m,
+            tr_s + v_s + te_s
+        )
+
+        all_pts_t = tr_t + v_t + te_t
+        all_pts_m = tr_m + v_m + te_m
+        if len(all_pts_t) > 0:
+            cat_true = jnp.concatenate(all_pts_t)
+            cat_mean = jnp.concatenate(all_pts_m)
+            min_val = min(float(cat_true.min()), float(cat_mean.min()))
+            max_val = max(float(cat_true.max()), float(cat_mean.max()))
+            margin = max((max_val - min_val) * 0.05, 1e-4)
+            ax_parity.plot([min_val - margin, max_val + margin], [min_val - margin, max_val + margin], 'k--', lw=1.5, label="Parity")
+
+        box_lines = []
+        if len(tr_t) > 0:
+            box_lines.append(f"Train ({train_steps_str}):")
+            box_lines.append(f"  $R^2$: {r2_tr:.4f}")
+            box_lines.append(f"  RMSE: {rmse_tr:.4f}")
+            box_lines.append(f"  EC: {cov_tr:.1f}%")
+
+        if len(v_t) > 0:
+            if len(box_lines) > 0:
+                box_lines.append("")
+            box_lines.append(f"Val ({val_steps_str}):")
+            box_lines.append(f"  $R^2$: {r2_v:.4f}")
+            box_lines.append(f"  RMSE: {rmse_v:.4f}")
+            box_lines.append(f"  EC: {cov_v:.1f}%")
+
+        if len(te_t) > 0:
+            if len(box_lines) > 0:
+                box_lines.append("")
+            box_lines.append(f"Test ({test_steps_str}):")
+            box_lines.append(f"  $R^2$: {r2_te:.4f}")
+            box_lines.append(f"  RMSE: {rmse_te:.4f}")
+            box_lines.append(f"  EC: {cov_te:.1f}%")
+
+        box_text = "\n".join(box_lines)
+        ax_parity.text(0.05, 0.95, box_text, transform=ax_parity.transAxes, verticalalignment='top',
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='#cccccc'), fontsize=9.0)
+
+        ax_parity.set_title(title_str, fontsize=13, fontweight='bold')
+        ax_parity.set_xlabel(xlabel_str, fontsize=11)
+        ax_parity.set_ylabel(ylabel_str, fontsize=11)
+        ax_parity.grid(True, alpha=0.25)
+        ax_parity.set_aspect('equal', adjustable='datalim')
+        ax_parity.legend(loc='lower right', fontsize=8.5, framealpha=0.85)
+
+        comp_metrics[comp_name] = {
+            "train": {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr},
+            "val": {"r2": r2_v, "rmse": rmse_v, "ec": cov_v},
+            "test": {"r2": r2_te, "rmse": rmse_te, "ec": cov_te},
+            "overall": {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot}
+        }
+        if comp_name == "Total Energy":
+            ret_train = {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr, "steps": train_steps_clean}
+            ret_val = {"r2": r2_v, "rmse": rmse_v, "ec": cov_v, "steps": val_steps_clean}
+            ret_test = {"r2": r2_te, "rmse": rmse_te, "ec": cov_te, "steps": test_steps_clean}
+            ret_overall = {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot, "steps": list(range(num_steps))}
+
+        # Row 1: True Energy Distribution (Histogram)
+        ax_hist = axes[1, col_idx]
+        hist_bins = 30
+        
+        # Determine common bin range across datasets for this component
+        vals_to_bin = []
+        if len(tr_t) > 0:
+            vals_to_bin.append(np.array(jnp.concatenate(tr_t)))
+        if len(v_t) > 0:
+            vals_to_bin.append(np.array(jnp.concatenate(v_t)))
+        if len(te_t) > 0:
+            vals_to_bin.append(np.array(jnp.concatenate(te_t)))
+
+        if len(vals_to_bin) > 0:
+            all_cat = np.concatenate(vals_to_bin)
+            bin_min, bin_max = float(np.min(all_cat)), float(np.max(all_cat))
+            if bin_max == bin_min:
+                bin_edges = np.linspace(bin_min - 0.1, bin_max + 0.1, hist_bins + 1)
             else:
-                train_true.append(true_psi)
-                train_mean.append(mean_psi)
-                train_std.append(std_psi)
-                train_true_rec.append(true_rec)
-                train_mean_rec.append(mean_rec)
-                train_std_rec.append(std_psi_rec)
+                bin_edges = np.linspace(bin_min, bin_max, hist_bins + 1)
+        else:
+            bin_edges = hist_bins
 
-        for row_idx, is_recentered in enumerate([False, True]):
-            ax = axes[row_idx, col_idx]
-            if not is_recentered:
-                tr_t, tr_m, tr_s = train_true, train_mean, train_std
-                v_t, v_m, v_s = val_true, val_mean, val_std
-                te_t, te_m, te_s = test_true, test_mean, test_std
-                title_str = f"Raw Energy Parity: {comp_name}"
-                xlabel_str = f"True {comp_label}"
-                ylabel_str = f"Predicted GP Mean {comp_label}"
-            else:
-                tr_t, tr_m, tr_s = train_true_rec, train_mean_rec, train_std_rec
-                v_t, v_m, v_s = val_true_rec, val_mean_rec, val_std_rec
-                te_t, te_m, te_s = test_true_rec, test_mean_rec, test_std_rec
-                title_str = rf"Recentered Energy Parity: {comp_name} ($\Psi - \Psi(\mathbf{{I}})$)"
-                xlabel_str = rf"True Recentered {comp_name} Energy ($\Psi - \Psi(\mathbf{{I}})$)"
-                ylabel_str = rf"Predicted GP Mean Recentered {comp_name} Energy ($\Psi - \Psi(\mathbf{{I}})$)"
+        if len(tr_t) > 0:
+            ax_hist.hist(np.array(jnp.concatenate(tr_t)), bins=bin_edges, density=True,
+                         alpha=0.45, color='gray', edgecolor='dimgray',
+                         label=f"Train ({train_steps_str})")
+        if len(v_t) > 0:
+            ax_hist.hist(np.array(jnp.concatenate(v_t)), bins=bin_edges, density=True,
+                         alpha=0.45, color='#1f77b4', edgecolor='#17598c',
+                         label=f"Val/Calib ({val_steps_str})")
+        if len(te_t) > 0:
+            ax_hist.hist(np.array(jnp.concatenate(te_t)), bins=bin_edges, density=True,
+                         alpha=0.45, color='#d62728', edgecolor='#a81f20',
+                         label=f"Test ({test_steps_str})")
 
-            if len(te_t) > 0:
-                ax.errorbar(jnp.concatenate(te_t), jnp.concatenate(te_m),
-                            yerr=1.96 * jnp.concatenate(te_s), fmt='o',
-                            color='#d62728', ecolor='#e45756', alpha=0.40,
-                            markersize=3.5, elinewidth=0.85,
-                            label=f"Test Steps ({test_steps_str})")
-            if len(v_t) > 0:
-                ax.errorbar(jnp.concatenate(v_t), jnp.concatenate(v_m),
-                            yerr=1.96 * jnp.concatenate(v_s), fmt='o',
-                            color='#1f77b4', ecolor='#4ba3e3', alpha=0.35,
-                            markersize=3.2, elinewidth=0.8,
-                            label=f"Val/Calib Steps ({val_steps_str})")
-            if len(tr_t) > 0:
-                ax.errorbar(jnp.concatenate(tr_t), jnp.concatenate(tr_m),
-                            yerr=1.96 * jnp.concatenate(tr_s), fmt='o',
-                            color='gray', ecolor='#b0b0b0', alpha=0.25,
-                            markersize=3.0, elinewidth=0.8,
-                            label=f"Train Steps ({train_steps_str})")
-
-            r2_tr, rmse_tr, cov_tr = compute_metrics(tr_t, tr_m, tr_s)
-            r2_v, rmse_v, cov_v = compute_metrics(v_t, v_m, v_s)
-            r2_te, rmse_te, cov_te = compute_metrics(te_t, te_m, te_s)
-            r2_tot, rmse_tot, cov_tot = compute_metrics(
-                tr_t + v_t + te_t,
-                tr_m + v_m + te_m,
-                tr_s + v_s + te_s
-            )
-
-            all_pts_t = tr_t + v_t + te_t
-            all_pts_m = tr_m + v_m + te_m
-            if len(all_pts_t) > 0:
-                cat_true = jnp.concatenate(all_pts_t)
-                cat_mean = jnp.concatenate(all_pts_m)
-                min_val = min(float(cat_true.min()), float(cat_mean.min()))
-                max_val = max(float(cat_true.max()), float(cat_mean.max()))
-                margin = max((max_val - min_val) * 0.05, 1e-4)
-                ax.plot([min_val - margin, max_val + margin], [min_val - margin, max_val + margin], 'k--', lw=1.5, label="Parity")
-
-            box_lines = []
-            if len(tr_t) > 0:
-                box_lines.append(f"Train ({train_steps_str}):")
-                box_lines.append(f"  $R^2$: {r2_tr:.4f}")
-                box_lines.append(f"  RMSE: {rmse_tr:.4f}")
-                box_lines.append(f"  EC: {cov_tr:.1f}%")
-
-            if len(v_t) > 0:
-                if len(box_lines) > 0:
-                    box_lines.append("")
-                box_lines.append(f"Val ({val_steps_str}):")
-                box_lines.append(f"  $R^2$: {r2_v:.4f}")
-                box_lines.append(f"  RMSE: {rmse_v:.4f}")
-                box_lines.append(f"  EC: {cov_v:.1f}%")
-
-            if len(te_t) > 0:
-                if len(box_lines) > 0:
-                    box_lines.append("")
-                box_lines.append(f"Test ({test_steps_str}):")
-                box_lines.append(f"  $R^2$: {r2_te:.4f}")
-                box_lines.append(f"  RMSE: {rmse_te:.4f}")
-                box_lines.append(f"  EC: {cov_te:.1f}%")
-
-            box_text = "\n".join(box_lines)
-            ax.text(0.05, 0.95, box_text, transform=ax.transAxes, verticalalignment='top',
-                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='#cccccc'), fontsize=9.0)
-
-            ax.set_title(title_str, fontsize=13, fontweight='bold')
-            ax.set_xlabel(xlabel_str, fontsize=11)
-            ax.set_ylabel(ylabel_str, fontsize=11)
-            ax.grid(True, alpha=0.25)
-            ax.set_aspect('equal', adjustable='datalim')
-            ax.legend(loc='lower right', fontsize=8.5, framealpha=0.85)
-
-            if not is_recentered:
-                comp_metrics[comp_name] = {
-                    "train": {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr},
-                    "val": {"r2": r2_v, "rmse": rmse_v, "ec": cov_v},
-                    "test": {"r2": r2_te, "rmse": rmse_te, "ec": cov_te},
-                    "overall": {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot}
-                }
-                if comp_name == "Total Energy":
-                    ret_train = {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr, "steps": train_steps_clean}
-                    ret_val = {"r2": r2_v, "rmse": rmse_v, "ec": cov_v, "steps": val_steps_clean}
-                    ret_test = {"r2": r2_te, "rmse": rmse_te, "ec": cov_te, "steps": test_steps_clean}
-                    ret_overall = {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot, "steps": list(range(num_steps))}
-            else:
-                comp_metrics[f"{comp_name}_recentered"] = {
-                    "train": {"r2": r2_tr, "rmse": rmse_tr, "ec": cov_tr},
-                    "val": {"r2": r2_v, "rmse": rmse_v, "ec": cov_v},
-                    "test": {"r2": r2_te, "rmse": rmse_te, "ec": cov_te},
-                    "overall": {"r2": r2_tot, "rmse": rmse_tot, "ec": cov_tot}
-                }
+        ax_hist.set_title(f"True Energy Distribution: {comp_name}", fontsize=13, fontweight='bold')
+        ax_hist.set_xlabel(f"True {comp_label}", fontsize=11)
+        ax_hist.set_ylabel("Probability Density", fontsize=11)
+        ax_hist.grid(True, alpha=0.25)
+        ax_hist.legend(loc='upper right', fontsize=8.5, framealpha=0.85)
 
     plt.tight_layout()
     save_figure(fig, os.path.join(save_path, "training_r2_energy.pdf"))
