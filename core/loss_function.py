@@ -211,14 +211,15 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
         # The tangent is the posterior-mean one (delta-method noise propagation): per-path tangents of unstable
         # GP samples are near-singular, which makes E[eps_hat^2] heavy-tailed and the ELBO estimator unusable.
         mean_psi = lambda f: model.psi_det(f, params=params, weights=gpweight)
-        K_ff, K_rf = jax.lax.map(
-            jax.checkpoint(lambda f_step: eiv_linearisation(mean_psi, f_step, cells, n_nodes, dNdX, dA, eiv)), f3x3)
+        # Batched over load steps and MC samples (one fused GPU computation, as in the residual likelihood):
+        # only the mean energy is differentiated twice; sampled paths need first derivatives only.
+        K_ff, K_rf = jax.vmap(lambda f_step: eiv_linearisation(mean_psi, f_step, cells, n_nodes, dNdX, dA, eiv))(f3x3)
 
         def sample_forces(k):
             psi_fn = model.get_path_psi_fn(k, params=params, weights=gpweight)
-            return jax.lax.map(jax.checkpoint(lambda f_step: internal_force(psi_fn, f_step, cells, n_nodes, dNdX, dA)), f3x3)
+            return jax.vmap(lambda f_step: internal_force(psi_fn, f_step, cells, n_nodes, dNdX, dA))(f3x3)
 
-        f_int = jax.lax.map(sample_forces, subkey)                                    # (S, T, 2n)
+        f_int = jax.vmap(sample_forces)(subkey)                                        # (S, T, 2n)
         eps_hat = jax.vmap(lambda K_t, r_t: jnp.linalg.solve(K_t, r_t.T).T, in_axes=(0, 1), out_axes=1)(
             K_ff, f_int[..., dof_free])                                                # (S, T, m)
         R_obs = jnp.stack([f_int[..., eiv["dof_rx"]].sum(-1), f_int[..., eiv["dof_ry"]].sum(-1)], axis=-1)  # (S, T, 2)
