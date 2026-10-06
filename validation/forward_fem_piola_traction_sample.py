@@ -7,27 +7,19 @@ from pathlib import Path
 # Import JAX-FEM specific modules.
 from jax_fem.problem import Problem
 from jax_fem.solver import solver
-from jax_fem.utils import save_sol
-from jax_fem.generate_mesh import box_mesh_gmsh, get_meshio_cell_type, Mesh
+from jax_fem.generate_mesh import get_meshio_cell_type, Mesh
 import jax.random as jr 
 jax.config.update("jax_enable_x64", True)
 
 from core.utils import *
 from core.model import SparseHyperelasticityGP
-from core.dataclass import GPParams, GPRawParams
+from core.dataclass import GPRawParams
 from core.material_models import get_material
-from core.datasetclass import BenchmarkDataset
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.tri as tri
-from matplotlib.colors import LinearSegmentedColormap
 
-import matplotlib.pyplot as plt
-import matplotlib.tri as tri
-import numpy as np
-import matplotlib.pyplot as plt
-import numpy as np
 import argparse
 from sklearn.metrics import r2_score
 
@@ -131,14 +123,8 @@ def plot_fem_verification(I1_bar_true, I2_bar_true, J_true,
 
 
 import matplotlib.pyplot as plt
-import matplotlib.tri as tri
-import numpy as np
-import os
 
 import matplotlib.pyplot as plt
-import matplotlib.tri as tri
-import numpy as np
-import os
 
 def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_pred_std, save_path):
     # --- Color Definitions ---

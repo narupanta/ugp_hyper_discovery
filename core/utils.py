@@ -172,14 +172,6 @@ def deformation_gradient_element(coords_elem, disp_elem):
     return F, dNdx
 
 
-def calculate_min_ls(z):
-    # For a 2D/3D point cloud, a quick way is to use the 
-    # average distance to the nearest neighbor.
-    nbrs = NearestNeighbors(n_neighbors=2).fit(z)
-    distances, _ = nbrs.kneighbors(z)
-    avg_dist = jnp.mean(distances[:, 1])
-    return avg_dist * 0.5 # Minimum allowable lengthscale
-
 def invariants_and_derivatives(f):
     # Calculate invariants
     C = f.T @ f

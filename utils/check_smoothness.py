@@ -1,4 +1,3 @@
-import jax
 from jax import config
 config.update("jax_enable_x64", True)
 import jax.numpy as jnp
@@ -7,7 +6,6 @@ import numpy as np
 
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
-from core.material_models import get_material
 
 def check_smoothness():
     saved_model_dir = "extraction/extracted_models/20260714T093804_isihara_0.0001_0.01_8.0_0.95_5_80.0_1"

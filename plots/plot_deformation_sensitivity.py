@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from plots.theme import apply_style, save_figure, MODE_NAMES
-from plots.sensitivity import load_sobol_csv, find_sensitivity_dir
+from plots.sensitivity import load_sobol_csv
 from core.utils import load_f3x3_from_distilled
 
 

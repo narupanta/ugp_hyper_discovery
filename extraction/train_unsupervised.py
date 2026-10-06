@@ -2,13 +2,9 @@ import os
 import json
 import yaml
 import datetime
-from pathlib import Path
 import argparse
-import ast
 import numpy as np
-import matplotlib as mpl
 import matplotlib.pyplot as plt
-from tqdm import tqdm
 
 import jax
 import jax.numpy as jnp
@@ -19,17 +15,17 @@ import optax
 jax.config.update("jax_enable_x64", True)
 
 from core.model import SparseHyperelasticityGP
-from core.utils import transform_input_features, fto3x3, farthest_point_sampling_with_fixed_point, load_f3x3_from_dataset
-from core.dataclass import GPRawParams, GPParams, GPWeights
+from core.utils import fto3x3, farthest_point_sampling_with_fixed_point, load_f3x3_from_dataset
+from core.dataclass import GPRawParams
 from core.material_models import get_material
 from core.trainer import HyperelasticGPTrainer
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
-from core.datasetclass import TractionDataset, DatasetFactory
-from core.loss_function import total_stochastic_loss
+from core.datasetclass import DatasetFactory
+from core.loss_function import (total_stochastic_loss, build_eiv_indices, eiv_force_equivalent_sigma,
+                                eiv_linearisation, internal_force, eiv_noise_estimate)
 from core.fem_engine import make_plane_stress_piola
 from core.plotter import (
-    plot_loss_analysis,
-    plot_parameters_hist, plot_inducing_points, plot_combined_validation, plot_training_r2,
+    plot_inducing_points, plot_training_r2,
     plot_domain_invariants, plot_reaction_forces_noise_comparison
 )
 
@@ -98,6 +94,14 @@ def parse_args():
     parser.add_argument('--free_noise_mode', type=str, default="constant",
                         choices=["constant", "nodal", "diagonal"],
                         help="Noise variance parameterization for free PDE nodes: 'constant' (single scalar for all free nodes) or 'nodal'/'diagonal' (independent per-node variance).")
+    parser.add_argument('--likelihood', type=str, default=None, choices=["auto", "residual", "eiv"],
+                        help="'residual': iid Gaussian nodal force residuals. 'eiv': errors-in-variables likelihood in displacement space "
+                             "(Gauss-Newton step eps = K^-1 r; scale-invariant, so no reaction re-weighting is needed). "
+                             "'auto' (default) picks 'eiv' for displacement control with linear_triangle VFM. If None, loaded from recipe.")
+    parser.add_argument('--noise_prior_dof', type=float, default=None,
+                        help="Degrees of freedom nu of the hierarchical prior sigma_i^2 ~ InvGamma(nu/2, nu/2 * sigma_global^2) on per-node "
+                             "noise (nodal/diagonal free_noise_mode); larger = stronger pooling towards sigma_global. Integrated out under "
+                             "'eiv', MAP penalty under 'residual' (<= 0 disables there). If None, loaded from recipe or defaults to 4.")
     return parser.parse_args()
 
 def sigma_fix_to_log_sigma_fix(sigma_fix) :
@@ -331,6 +335,28 @@ if __name__ == "__main__" :
     free_noise_mode = args.free_noise_mode if args.free_noise_mode != "constant" else rec_free_noise_mode
     free_noise_mode = str(free_noise_mode).lower()
 
+    # Resolve likelihood: errors-in-variables (displacement space) is the default for displacement control
+    likelihood = str(args.likelihood or rec.get("likelihood", "auto")).lower()
+    if likelihood == "auto":
+        likelihood = "eiv" if (control_mode == "displacement" and args.vfm_mode == "linear_triangle") else "residual"
+    if likelihood == "eiv":
+        if control_mode != "displacement":
+            raise ValueError("likelihood='eiv' is implemented for displacement control only.")
+        if args.vfm_mode != "linear_triangle":
+            raise ValueError("likelihood='eiv' requires vfm_mode='linear_triangle'.")
+        if args.normalize_ell == 1:
+            raise ValueError("likelihood='eiv' requires normalize_ell=0 (normalisation breaks the ELBO).")
+        if args.sampling_mode not in ("pathwise", "pws"):
+            raise ValueError("likelihood='eiv' requires pathwise sampling (it differentiates each GP path twice).")
+        if reaction_loss_weight != 1.0:
+            print(f"[CONFIGURATION] Warning: reaction_loss_weight={reaction_loss_weight} tempers the EIV likelihood; "
+                  f"the EIV free-DOF term is scale-invariant, so 1.0 is the principled value.")
+
+    noise_prior_dof = args.noise_prior_dof if args.noise_prior_dof is not None else float(rec.get("noise_prior_dof", 4.0))
+    if likelihood == "eiv" and free_noise_mode in ["nodal", "diagonal"] and noise_prior_dof <= 0:
+        raise ValueError("likelihood='eiv' with per-node noise needs noise_prior_dof > 0 (each DOF has only a few load steps).")
+    print(f"[CONFIGURATION] Likelihood: '{likelihood}' | per-node noise prior dof: {noise_prior_dof}")
+
     # Identify free nodes for boundary freezing and noise initialization
     is_fix_x = (node_type[:, 1] == 1)
     is_fix_y = (node_type[:, 2] == 1)
@@ -344,14 +370,22 @@ if __name__ == "__main__" :
     is_free_x_jnp = jnp.asarray(is_free_x)
     is_free_y_jnp = jnp.asarray(is_free_y)
 
+    # Free noise is a force-residual std ('residual') or a displacement std ('eiv'). Under 'eiv' the noise is
+    # integrated out during training (only sigma_global is learned, as the per-node prior scale) and written back
+    # after training; it starts at 0.1% of the RMS training displacement, a data-derived scale.
+    if likelihood == "eiv":
+        u_obs_train = np.asarray(prep_data["u_obs"] if "u_obs" in prep_data else prep_data["u"])[train_load_steps_indices]
+        log_sigma0 = float(np.log(1e-3 * np.sqrt(np.mean(u_obs_train**2))))
+    else:
+        log_sigma0 = 0.0
     if free_noise_mode in ["nodal", "diagonal"]:
         n_nodes = node_type.shape[0]
-        log_sigma_free_x_init = jnp.zeros((n_nodes,), dtype=jnp.float64)
-        log_sigma_free_y_init = jnp.zeros((n_nodes,), dtype=jnp.float64)
+        log_sigma_free_x_init = jnp.full((n_nodes,), log_sigma0, dtype=jnp.float64)
+        log_sigma_free_y_init = jnp.full((n_nodes,), log_sigma0, dtype=jnp.float64)
         print(f"[CONFIGURATION] Heteroscedastic free residual noise enabled: {free_noise_mode.upper()} ({n_nodes} nodes)")
     else:
-        log_sigma_free_x_init = jnp.log(jnp.array(1.0, dtype=jnp.float64))
-        log_sigma_free_y_init = jnp.log(jnp.array(1.0, dtype=jnp.float64))
+        log_sigma_free_x_init = jnp.array(log_sigma0, dtype=jnp.float64)
+        log_sigma_free_y_init = jnp.array(log_sigma0, dtype=jnp.float64)
         print(f"[CONFIGURATION] Constant free residual noise scalar enabled.")
 
     config_dict["control_mode"] = control_mode
@@ -361,6 +395,8 @@ if __name__ == "__main__" :
     config_dict["trainable_kzz_noise"] = trainable_kzz_noise
     config_dict["kzz_jitter"] = kzz_jitter
     config_dict["free_noise_mode"] = free_noise_mode
+    config_dict["likelihood"] = likelihood
+    config_dict["noise_prior_dof"] = noise_prior_dof
     with open(os.path.join(save_path, "config.json"), "w") as f:
         json.dump(config_dict, f, indent=4)
     with open(os.path.join(save_path, "config.yaml"), "w") as f:
@@ -650,7 +686,7 @@ if __name__ == "__main__" :
                 log_sigma_free_y=log_sigma_free_y_init,
                 log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 0]),
                 log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1]),
-                log_sigma_global=jnp.log(jnp.array(1.0)),
+                log_sigma_global=jnp.array(log_sigma0, dtype=jnp.float64),
                 **aniso_kwargs,
                 **kzz_noise_kwargs
             )
@@ -677,7 +713,7 @@ if __name__ == "__main__" :
                 log_sigma_free_y=log_sigma_free_y_init,
                 log_sigma_fix_x=jax.random.normal(k3, (load_noise_std_steps.shape[0],)),
                 log_sigma_fix_y=jax.random.normal(k4, (load_noise_std_steps.shape[0],)),
-                log_sigma_global=jnp.log(jnp.array(1.0)),
+                log_sigma_global=jnp.array(log_sigma0, dtype=jnp.float64),
                 **aniso_kwargs,
                 **kzz_noise_kwargs
             )
@@ -710,6 +746,8 @@ if __name__ == "__main__" :
 
 
 
+
+    eiv_indices = build_eiv_indices(node_type, np.asarray(cells)) if likelihood == "eiv" else None
 
     V_basis = None
     if args.vfm_mode in ["global_vf", "mix"]:
@@ -751,7 +789,8 @@ if __name__ == "__main__" :
             k_loss, number_of_mci_sampling, args.normalize_ell,
             vfm_mode=args.vfm_mode, V_basis=V_basis,
             control_mode=control_mode, loads=loads_train,
-            reaction_loss_weight=reaction_loss_weight
+            reaction_loss_weight=reaction_loss_weight,
+            likelihood=likelihood, eiv=eiv_indices, noise_prior_dof=noise_prior_dof
         )
 
     if args.final_learning_rate is not None and args.final_learning_rate != learning_rate:
@@ -883,6 +922,32 @@ if __name__ == "__main__" :
     ru_maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     peak_mb = ru_maxrss / (1024 ** 2) if sys.platform == "darwin" else ru_maxrss / 1024.0
 
+    # Under 'eiv' the displacement noise was integrated out: store its posterior estimate at the posterior-mean
+    # material in best_params (log_sigma_free_*), so saved parameters keep the displacement-noise meaning.
+    if likelihood == "eiv":
+        mean_params = learned_gp.load_params(best_params)
+        mean_psi = learned_gp.psi_det
+        dof_free = eiv_indices["dof_free"]
+        K_ff_m, _ = jax.lax.map(lambda f_step: eiv_linearisation(mean_psi, f_step, cells, cells.max() + 1, dNdX, dA, eiv_indices), f3x3)
+        r_m = jax.lax.map(lambda f_step: internal_force(mean_psi, f_step, cells, cells.max() + 1, dNdX, dA)[dof_free], f3x3)
+        eps_m = jax.vmap(jnp.linalg.solve)(K_ff_m, r_m)
+        nodal = free_noise_mode in ["nodal", "diagonal"]
+        sig_dof = np.asarray(eiv_noise_estimate(eps_m, dof_free % 2, nodal_noise=nodal,
+                                                sigma_global=mean_params.sigma_global, prior_dof=noise_prior_dof))
+        if nodal:
+            n_nodes_all = node_type.shape[0]
+            g = float(mean_params.sigma_global)
+            sx_n, sy_n = np.full(n_nodes_all, g), np.full(n_nodes_all, g)
+            sx_n[dof_free[dof_free % 2 == 0] // 2] = sig_dof[dof_free % 2 == 0]
+            sy_n[dof_free[dof_free % 2 == 1] // 2] = sig_dof[dof_free % 2 == 1]
+            new_lx, new_ly = jnp.log(jnp.asarray(sx_n)), jnp.log(jnp.asarray(sy_n))
+        else:
+            new_lx = jnp.log(jnp.asarray(sig_dof[dof_free % 2 == 0][0]))
+            new_ly = jnp.log(jnp.asarray(sig_dof[dof_free % 2 == 1][0]))
+        best_params = best_params._replace(log_sigma_free_x=new_lx, log_sigma_free_y=new_ly)
+        with open(os.path.join(save_path, "best_params.npy"), "wb") as f:
+            jnp.save(f, best_params._asdict())
+
     # Capture physical parameters
     phys_params = learned_gp.load_params(best_params)
     
@@ -932,6 +997,23 @@ if __name__ == "__main__" :
     if np.ndim(phys_params.sigma_free_x) > 0:
         metrics["sigma_free_x_mean"] = float(np.mean(phys_params.sigma_free_x))
         metrics["sigma_free_y_mean"] = float(np.mean(phys_params.sigma_free_y))
+    metrics["likelihood"] = likelihood
+    if likelihood == "eiv":
+        # Learned noise is a displacement std; downstream validation expects a force-residual std, so also
+        # report the nodal force noise it implies through the posterior-mean tangent, Cov(r) = K diag(sigma_u^2) K^T.
+        n_nodes_all = node_type.shape[0]
+        dof_free = eiv_indices["dof_free"]
+        sx_nodes = np.broadcast_to(np.asarray(phys_params.sigma_free_x), (n_nodes_all,))
+        sy_nodes = np.broadcast_to(np.asarray(phys_params.sigma_free_y), (n_nodes_all,))
+        sigma_u_dof = jnp.asarray(np.where(dof_free % 2 == 0, sx_nodes[dof_free // 2], sy_nodes[dof_free // 2]))
+        sigma_r_dof = np.asarray(eiv_force_equivalent_sigma(
+            learned_gp.psi_det, f3x3, cells, n_nodes_all, dNdX, dA, eiv_indices, sigma_u_dof))
+        metrics["sigma_u_x"] = metrics["sigma_free_x"]
+        metrics["sigma_u_y"] = metrics["sigma_free_y"]
+        metrics["sigma_free_x"] = float(np.sqrt(np.mean(sigma_r_dof[dof_free % 2 == 0]**2)))
+        metrics["sigma_free_y"] = float(np.sqrt(np.mean(sigma_r_dof[dof_free % 2 == 1]**2)))
+        print(f"[EIV] displacement noise sigma_u: x={np.mean(sx_nodes):.3e}, y={np.mean(sy_nodes):.3e} | "
+              f"implied force-residual sigma_free: x={metrics['sigma_free_x']:.3e}, y={metrics['sigma_free_y']:.3e}")
     
     with open(os.path.join(save_path, "extraction_metrics.json"), "w") as f:
         json.dump(metrics, f, indent=4)

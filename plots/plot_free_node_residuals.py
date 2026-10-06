@@ -175,6 +175,7 @@ def compute_gp_free_residuals(data_file: str, gp_dir: str = None, step: int = 16
         data = np.load(data_file, allow_pickle=True)
         coords = jnp.array(data["node_coords"])
         cells = jnp.array(data["cells"])
+        coords_elems = coords[cells]
         node_type = np.array(data["node_type"])
         loads = jnp.array(data["loads"])
         u_obs = jnp.array(data["u_exp"] if "u_exp" in data else data["u_true"])
@@ -228,7 +229,6 @@ def compute_gp_free_residuals(data_file: str, gp_dir: str = None, step: int = 16
         free_y_idx = np.where(~is_constrained_y)[0]
         free_nodes_idx = np.where((~is_constrained_x) | (~is_constrained_y))[0]
 
-        coords_elems = coords[cells]
         J = transformation_jacobian(coords_elems)
         dA = 0.5 * jnp.abs(jnp.linalg.det(J))
         disp_elems = u_obs[step_eval][cells]

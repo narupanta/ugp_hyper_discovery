@@ -1,11 +1,11 @@
 # material_models.py
 import os
 from abc import ABC, abstractmethod
-from typing import Dict, Type, Any, Optional, List, Tuple
+from typing import Dict, Type, Any, Optional, List
 import jax
 import jax.numpy as jnp
 
-from .utils import C_func, B_func, I1_func, I2_func, I3_func, J_func, load_model_config
+from .utils import C_func, I1_func, I2_func, I3_func, load_model_config
 
 # Registry
 _material_registry: Dict[str, Type["BaseMaterialModel"]] = {}

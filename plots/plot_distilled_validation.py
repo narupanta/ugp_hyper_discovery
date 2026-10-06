@@ -8,7 +8,7 @@ import matplotlib.ticker as ticker
 import numpy as np
 import os
 
-from plots.theme import apply_style, save_figure
+from plots.theme import apply_style
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material

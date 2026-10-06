@@ -3,11 +3,8 @@ import os
 import subprocess
 import argparse
 import numpy as np
-import datetime
 from pathlib import Path
 import time
-from core.material_models import get_material
-from core.utils import infer_material_model_name
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'UQInModelDiscovery')))
@@ -29,14 +26,11 @@ from uqmodeldisc.parameterdistillation.distillation import (
     load_normalizing_flow_parameter_distribution,
 )
 from uqmodeldisc.io import ProjectDirectory
-from uqmodeldisc.models import OutputSelectorProtocol
 from uqmodeldisc.testcases import (
-    TestCases,
     test_case_identifier_uniaxial_tension,
     test_case_identifier_equibiaxial_tension,
     test_case_identifier_pure_shear,
 )
-from uqmodeldisc.customtypes import Device
 from uqmodeldisc.models.base import (
     init_parameter_mask,
     init_parameter_population_matrix,
@@ -1356,7 +1350,6 @@ def main():
 
     # Generate correlation pairplot for active parameters using matplotlib
     try:
-        from scipy.stats import gaussian_kde
         
         # Filter df to only include active parameters
         active_params_list = [col for col in full_param_names if col in model.parameter_names]

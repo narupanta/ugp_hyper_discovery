@@ -11,7 +11,7 @@ config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from plots.theme import apply_style, save_figure
+from plots.theme import apply_style
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material

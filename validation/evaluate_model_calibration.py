@@ -1,11 +1,9 @@
 import os
-import sys
 import json
 import argparse
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 import matplotlib.tri as tri
 from scipy import stats
 

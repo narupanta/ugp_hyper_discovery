@@ -10,13 +10,11 @@ Merged unified legend at bottom outside the plots.
 import os
 import sys
 import argparse
-import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from plots.theme import apply_style, save_figure
+from plots.theme import apply_style
 from plots.sensitivity import load_sobol_csv
 from core.utils import compute_invariants_np, load_f3x3_from_distilled
 

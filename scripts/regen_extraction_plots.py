@@ -18,7 +18,7 @@ from core.plotter import (
     plot_training_r2,
     plot_domain_invariants
 )
-from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
+from core.features import AnisotropicFeatureExtractor
 from core.utils import infer_material_model_name, fto3x3
 
 def find_dataset_path(saved_model_dir, true_model_name):

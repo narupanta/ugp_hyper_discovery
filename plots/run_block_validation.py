@@ -20,7 +20,6 @@ Outputs produced:
 """
 
 import os
-import sys
 import json
 import argparse
 from pathlib import Path
@@ -32,9 +31,7 @@ jax.config.update("jax_enable_x64", True)
 
 from plots.theme import apply_style
 from plots.plot_reaction_force_distilled import (
-    compute_distilled_reaction_forces,
-    format_sci,
-    get_experiment_load_noise
+    compute_distilled_reaction_forces
 )
 from plots.plot_reaction_force_block_full import plot_full_reaction_forces
 from plots.plot_free_node_coverage import compute_residuals_and_coverage

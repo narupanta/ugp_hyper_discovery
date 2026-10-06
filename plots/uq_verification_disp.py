@@ -4,18 +4,9 @@ import jax.numpy as jnp
 import os
 from pathlib import Path
 # Import JAX-FEM specific modules.
-from jax_fem.problem import Problem
-from jax_fem.solver import solver
-from jax_fem.utils import save_sol
-from jax_fem.generate_mesh import box_mesh_gmsh, get_meshio_cell_type, Mesh
-import jax.random as jr 
 jax.config.update("jax_enable_x64", True)
 
 from core.utils import *
-from core.model import SparseHyperelasticityGP
-from core.dataclass import GPParams, GPRawParams
-from core.material_models import get_material
-from core.datasetclass import BenchmarkDataset
 
 import argparse
 import json
@@ -23,11 +14,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.tri as tri
 import matplotlib.ticker as ticker
-from matplotlib.colors import LinearSegmentedColormap
 from sklearn.metrics import r2_score
-from scipy.stats import norm
 
-from plots.theme import apply_style, save_figure
+from plots.theme import apply_style
 
 def plot_comprehensive_analysis(u_true, u_pred_samples, node_type, node_to_plot, save_path):
     """
@@ -128,10 +117,6 @@ def plot_comprehensive_analysis(u_true, u_pred_samples, node_type, node_to_plot,
         save_file = os.path.join(save_path, f"analysis_{label}_{node_to_plot}_direction.pdf")
         plt.savefig(save_file, dpi=300, bbox_inches='tight')
         plt.show()
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 
 def plot_node_distributions(u_true, u_pred_samples, u_pred_piola_traction_samples, node_to_plot, save_path):
     """
@@ -358,13 +343,7 @@ def plot_node_distributions(u_true, u_pred_samples, u_pred_piola_traction_sample
 # plot_global_index_analysis(u_true, u_pred_samples, "plots/")
 # Example Usage:
 # plot_global_analysis(u_true, u_pred_samples, node_coords, "plots/")
-import os
-import matplotlib.pyplot as plt
-import matplotlib.tri as tri
-import numpy as np
-import matplotlib.ticker as ticker
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from sklearn.metrics import r2_score
 
 def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, mode_str="", filename_base="displacement_analysis", banner_prefix="", is_clean=False):
     apply_style()

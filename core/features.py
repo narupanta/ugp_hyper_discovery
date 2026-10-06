@@ -1,8 +1,7 @@
-import jax
 import jax.numpy as jnp
 from abc import ABC, abstractmethod
 from typing import Tuple
-from .utils import invariants_and_derivatives, transform_input_features, C_func, I3_func, I4_func, I5_func
+from .utils import invariants_and_derivatives, transform_input_features, C_func, I3_func, I4_func
 
 class FeatureExtractor(ABC):
     @abstractmethod

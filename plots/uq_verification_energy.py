@@ -5,25 +5,18 @@ import jax.numpy as jnp
 import os
 from pathlib import Path
 # Import JAX-FEM specific modules.
-from jax_fem.problem import Problem
-from jax_fem.solver import solver
-from jax_fem.utils import save_sol
-from jax_fem.generate_mesh import box_mesh_gmsh, get_meshio_cell_type, Mesh
-import jax.random as jr 
 jax.config.update("jax_enable_x64", True)
 import argparse
 from core.utils import *
 from core.model import SparseHyperelasticityGP
-from core.dataclass import GPParams, GPRawParams
+from core.dataclass import GPRawParams
 from core.material_models import get_material
-from core.datasetclass import BenchmarkDataset
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
 from sklearn.metrics import r2_score
 
-from plots.theme import apply_style, save_figure
+from plots.theme import apply_style
 
 
 def plot_combined_validation(learned_gp, true_model, save_path, step):

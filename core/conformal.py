@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any
 
 def compute_conformal_scale(
     y_true: np.ndarray,

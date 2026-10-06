@@ -1,17 +1,18 @@
 import os
+import json
 import argparse
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
-from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+from matplotlib.gridspec import GridSpecFromSubplotSpec
 import jax
 from jax import config
 config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
-from plots.theme import apply_style, save_figure
+from plots.theme import apply_style
 from plots.sensitivity import load_sobol_csv
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams

@@ -16,7 +16,6 @@ Generates:
 """
 
 import os
-import sys
 import json
 import argparse
 import numpy as np
@@ -27,7 +26,6 @@ import matplotlib.tri as tri
 from scipy.stats import gaussian_kde
 
 import jax
-import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from plots.theme import apply_style, save_figure

@@ -3,7 +3,6 @@
 syn_force_control_holes.py: Backward-compatible wrapper forwarding to syn_force_control.py with --geometry holes.
 """
 import sys
-import os
 
 from dataset.synthetic.force_control.syn_force_control import main
 

@@ -16,14 +16,12 @@ Generates:
 3. JSON summary of non-dominated vs dominated points across all metrics
 """
 
-import os
 import json
 from pathlib import Path
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
 from plots.theme import apply_style, save_figure
 

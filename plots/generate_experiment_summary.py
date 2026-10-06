@@ -692,17 +692,6 @@ def format_param_md(p_dict):
     return f"{m:.4f}<br>({l:.4f}, {u:.4f})"
 
 
-def format_param_latex(p_dict):
-    if not p_dict:
-        return "-"
-    m = p_dict.get("mean")
-    l = p_dict.get("95ci_lower")
-    u = p_dict.get("95ci_upper")
-    if m is None or np.isnan(m):
-        return "-"
-    return f"\\begin{{tabular}}{{@{{}}c@{{}}}}{m:.4f}\\\\({l:.4f}, {u:.4f})\\end{{tabular}}"
-
-
 def format_summary_markdown(ranked_seeds, exp_dir, config):
     """Generates summary_across_seeds.md with Top 5 seeds and aggregate stats across all seeds."""
     out_md = os.path.join(exp_dir, "summary_across_seeds.md")

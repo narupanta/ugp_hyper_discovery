@@ -1,6 +1,4 @@
 import os
-import sys
-import json
 import shutil
 import argparse
 from pathlib import Path
@@ -10,11 +8,10 @@ import matplotlib.tri as tri
 import matplotlib.ticker as ticker
 import matplotlib.lines as mlines
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from sklearn.metrics import r2_score
 
 from plots.theme import apply_style
 from plots.plot_reaction_force_distilled import format_sci
-from plots.merge_displacement_and_force_4x1 import extract_plot_data, load_cached_reaction_forces
+from plots.merge_displacement_and_force_4x1 import extract_plot_data
 
 apply_style()
 

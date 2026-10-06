@@ -9,7 +9,6 @@ import os
 import logging
 from typing import Optional, Dict, Any, List
 import matplotlib.pyplot as plt
-import matplotlib as mpl
 
 # Silence benign fontTools warnings regarding font metadata timestamp epoch
 logging.getLogger("fontTools").setLevel(logging.ERROR)

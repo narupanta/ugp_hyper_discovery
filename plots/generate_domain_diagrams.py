@@ -76,68 +76,6 @@ def draw_dim_v(ax, y0, y1, x, text, offset_text=0.050, text_color="#0f172a", arr
     )
 
 
-def draw_roller_support_left(ax, x=0.0, y_min=0.1, y_max=1.0, n_rollers=6):
-    """Draws roller support symbols along a vertical left boundary (ux = 0, uy free)."""
-    y_pos = np.linspace(y_min + 0.07, y_max - 0.07, n_rollers)
-    tri_w = 0.035
-    tri_h = 0.024
-    r_roller = 0.009
-    
-    for yp in y_pos:
-        # Triangular bracket
-        pts = np.array([
-            [x, yp],
-            [x - tri_w, yp + tri_h],
-            [x - tri_w, yp - tri_h]
-        ])
-        poly = patches.Polygon(pts, closed=True, facecolor="#e2e8f0", edgecolor="#1e293b", lw=1.0, zorder=5)
-        ax.add_patch(poly)
-        
-        # Roller circles
-        c1 = patches.Circle((x - tri_w - r_roller, yp + tri_h * 0.5), r_roller, facecolor="white", edgecolor="#1e293b", lw=0.9, zorder=6)
-        c2 = patches.Circle((x - tri_w - r_roller, yp - tri_h * 0.5), r_roller, facecolor="white", edgecolor="#1e293b", lw=0.9, zorder=6)
-        ax.add_patch(c1)
-        ax.add_patch(c2)
-        
-        # Ground bar
-        gb_x = x - tri_w - 2.0 * r_roller
-        ax.plot([gb_x, gb_x], [yp - tri_h - 0.01, yp + tri_h + 0.01], color="#1e293b", lw=1.2, zorder=5)
-        # Hatching lines
-        for hp in np.linspace(yp - tri_h, yp + tri_h, 4):
-            ax.plot([gb_x, gb_x - 0.016], [hp, hp - 0.016], color="#64748b", lw=0.8, zorder=5)
-
-
-def draw_roller_support_bottom(ax, y=0.0, x_min=0.1, x_max=1.0, n_rollers=6):
-    """Draws roller support symbols along a horizontal bottom boundary (uy = 0, ux free)."""
-    x_pos = np.linspace(x_min + 0.07, x_max - 0.07, n_rollers)
-    tri_h = 0.035
-    tri_w = 0.024
-    r_roller = 0.009
-    
-    for xp in x_pos:
-        # Triangular bracket
-        pts = np.array([
-            [xp, y],
-            [xp - tri_w, y - tri_h],
-            [xp + tri_w, y - tri_h]
-        ])
-        poly = patches.Polygon(pts, closed=True, facecolor="#e2e8f0", edgecolor="#1e293b", lw=1.0, zorder=5)
-        ax.add_patch(poly)
-        
-        # Roller circles
-        c1 = patches.Circle((xp - tri_w * 0.5, y - tri_h - r_roller), r_roller, facecolor="white", edgecolor="#1e293b", lw=0.9, zorder=6)
-        c2 = patches.Circle((xp + tri_w * 0.5, y - tri_h - r_roller), r_roller, facecolor="white", edgecolor="#1e293b", lw=0.9, zorder=6)
-        ax.add_patch(c1)
-        ax.add_patch(c2)
-        
-        # Ground bar
-        gb_y = y - tri_h - 2.0 * r_roller
-        ax.plot([xp - tri_w - 0.01, xp + tri_w + 0.01], [gb_y, gb_y], color="#1e293b", lw=1.2, zorder=5)
-        # Hatching lines
-        for hp in np.linspace(xp - tri_w, xp + tri_w, 4):
-            ax.plot([hp, hp - 0.016], [gb_y, gb_y - 0.016], color="#64748b", lw=0.8, zorder=5)
-
-
 def draw_clamped_support_bottom(ax, y=0.0, x_min=0.0, x_max=1.0, n_hatches=32):
     """Draws fixed/clamped ground hatching along bottom boundary (ux = 0, uy = 0)."""
     ax.plot([x_min, x_max], [y, y], color="#0f172a", lw=2.4, zorder=5)

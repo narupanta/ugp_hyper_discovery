@@ -11,7 +11,6 @@ the target extracted directory for downstream distillation and FEM validation.
 
 import os
 import sys
-import glob
 import json
 import shutil
 import argparse

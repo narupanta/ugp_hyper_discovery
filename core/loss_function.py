@@ -1,3 +1,4 @@
+import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -10,17 +11,176 @@ from .utils import deformation_gradient_element, transformation_jacobian, fto3x3
 from .model import SparseHyperelasticityGP
 
 
-def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, cells: jnp.ndarray, 
-                          n_nodes: int, f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, dNdX: jnp.ndarray, 
+def build_eiv_indices(node_type: np.ndarray, cells: np.ndarray) -> dict:
+    """
+    Static (numpy) DOF bookkeeping for the errors-in-variables likelihood (displacement control).
+    Flat DOF index = 2 * node + direction.
+      dof_free:  (m,) DOFs carrying displacement measurement noise (not Dirichlet).
+      dof_rx/ry: DOFs whose internal forces sum to the measured x/y reaction.
+      k_rows/k_cols: (C*36,) scatter indices of element stiffness blocks into the global matrix.
+    """
+    node_type = np.asarray(node_type)
+    cells = np.asarray(cells)
+    is_fix_x, is_fix_y = node_type[:, 1] == 1, node_type[:, 2] == 1
+    is_loaded_x, is_loaded_y = node_type[:, 3] == 1, node_type[:, 4] == 1
+    free_mask = np.stack([~(is_fix_x | is_loaded_x), ~(is_fix_y | is_loaded_y)], axis=-1).reshape(-1)
+    elem_dofs = (2 * cells[:, :, None] + np.arange(2)[None, None, :]).reshape(cells.shape[0], 6)  # (C, 6)
+    return dict(
+        dof_free=np.where(free_mask)[0],
+        dof_rx=2 * np.where(is_loaded_x)[0],
+        dof_ry=2 * np.where(is_loaded_y)[0] + 1,
+        k_rows=np.repeat(elem_dofs[:, :, None], 6, axis=2).reshape(-1),
+        k_cols=np.repeat(elem_dofs[:, None, :], 6, axis=1).reshape(-1),
+    )
+
+
+def assemble_internal_force_and_tangent(psi_fn: Any, f3x3_cells: jnp.ndarray, cells: jnp.ndarray, n_nodes: int,
+                                        dNdX: jnp.ndarray, dA: jnp.ndarray, eiv: dict):
+    """
+    Internal nodal forces and tangent stiffness K = d f_int / d u for one load step and energy psi(F).
+    Out-of-plane entries of F (F33 = 1 or the dataset's lambda3) are held fixed, consistent with the residual.
+    f3x3_cells: (C, 3, 3).  Returns f_flat: (2n,), K: (2n, 2n) with flat DOF index 2 * node + direction.
+    """
+    def psi_inplane(f2, f3):
+        return psi_fn(f3.at[:2, :2].set(f2))
+
+    piola_2d = jax.grad(psi_inplane)                     # (2,2)
+    tangent_2d = jax.jacfwd(piola_2d)                    # (2,2,2,2) = dP_ij / dF_kl
+    f2_cells = f3x3_cells[:, :2, :2]
+    P = jax.vmap(piola_2d)(f2_cells, f3x3_cells)          # (C,2,2)
+    A = jax.vmap(tangent_2d)(f2_cells, f3x3_cells)        # (C,2,2,2,2)
+
+    f_int_cell = jnp.einsum("cij,caj->cai", P, dNdX) * dA[:, None, None]                        # (C,3,2)
+    f_flat = jnp.zeros((n_nodes, 2), dtype=jnp.float64).at[cells].add(f_int_cell).reshape(-1)  # (2n,)
+    k_cell = jnp.einsum("caj,cijkl,cbl->caibk", dNdX, A, dNdX) * dA[:, None, None, None, None]  # (C,3,2,3,2)
+    K = jnp.zeros((2 * n_nodes, 2 * n_nodes), dtype=jnp.float64).at[eiv["k_rows"], eiv["k_cols"]].add(k_cell.reshape(-1))
+    return f_flat, K
+
+
+def internal_force(psi_fn: Any, f3x3_cells: jnp.ndarray, cells: jnp.ndarray, n_nodes: int,
+                   dNdX: jnp.ndarray, dA: jnp.ndarray) -> jnp.ndarray:
+    """Internal nodal forces f_int (2n,) for one load step, out-of-plane F entries held fixed."""
+    P = jax.vmap(jax.grad(lambda f2, f3: psi_fn(f3.at[:2, :2].set(f2))))(f3x3_cells[:, :2, :2], f3x3_cells)
+    f_int_cell = jnp.einsum("cij,caj->cai", P, dNdX) * dA[:, None, None]
+    return jnp.zeros((n_nodes, 2), dtype=jnp.float64).at[cells].add(f_int_cell).reshape(-1)
+
+
+def eiv_linearisation(mean_psi_fn: Any, f3x3_cells: jnp.ndarray, cells: jnp.ndarray, n_nodes: int,
+                      dNdX: jnp.ndarray, dA: jnp.ndarray, eiv: dict):
+    """
+    Tangent blocks of the posterior-mean energy at the observed state of one load step.
+    Returns K_ff: (m, m) free-free stiffness and K_rf: (2, m) sensitivity of the x/y reactions to free DOFs.
+    """
+    _, K = assemble_internal_force_and_tangent(mean_psi_fn, f3x3_cells, cells, n_nodes, dNdX, dA, eiv)
+    dof_free = eiv["dof_free"]
+    K_rf = jnp.stack([K[eiv["dof_rx"]][:, dof_free].sum(axis=0), K[eiv["dof_ry"]][:, dof_free].sum(axis=0)])
+    return K[dof_free][:, dof_free], K_rf
+
+
+def eiv_force_equivalent_sigma(psi_fn: Any, f3x3: jnp.ndarray, cells: jnp.ndarray, n_nodes: int,
+                               dNdX: jnp.ndarray, dA: jnp.ndarray, eiv: dict, sigma_u_dof: jnp.ndarray):
+    """
+    Nodal force-residual noise implied by displacement noise: Cov(r_f) = K_ff diag(sigma_u^2) K_ff^T.
+    Returns the per-free-DOF std averaged (in variance) over load steps f3x3: (T, C, 3, 3) -> (m,).
+    Lets downstream tools that expect a force-residual sigma_free keep working under the EIV likelihood.
+    """
+    dof_free = eiv["dof_free"]
+
+    def step_var(f_step):
+        _, K = assemble_internal_force_and_tangent(psi_fn, f_step, cells, n_nodes, dNdX, dA, eiv)
+        K_ff = K[dof_free][:, dof_free]
+        return jnp.sum(K_ff**2 * sigma_u_dof[None, :]**2, axis=1)
+
+    return jnp.sqrt(jnp.mean(jax.lax.map(step_var, f3x3), axis=0))
+
+
+def eiv_log_likelihood(eps_hat: jnp.ndarray, reaction_res: jnp.ndarray, dof_dir: np.ndarray,
+                       sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, reaction_loss_weight: float = 1.0,
+                       nodal_noise: bool = False, sigma_global: jnp.ndarray = None, prior_dof: float = 4.0):
+    """
+    Log-likelihood of one GP path under the errors-in-variables model, with the displacement noise
+    variance integrated out analytically (no noise parameter has to chase the residual scale):
+      constant noise, Jeffreys prior p(sigma^2) ~ 1/sigma^2, per direction d with N_d residuals:
+          log p = -N_d/2 * (log(2 pi s_d / N_d) + 1),    s_d = sum eps_hat^2
+        (equal to the Gaussian log-likelihood at the profile estimate sigma^2 = s_d / N_d).
+      per-DOF noise, conjugate hierarchical prior sigma_i^2 ~ InvGamma(a, a sigma_global^2), a = prior_dof / 2:
+          log p_i = log Student-t marginal of the T residuals of DOF i (bounded gradient in log sigma_global).
+    Reaction residuals keep a Gaussian likelihood with the load-cell noise sigma_fix.
+    eps_hat: (T, m), reaction_res: (T, 2), dof_dir: (m,) 0 for x / 1 for y.
+    """
+    T = eps_hat.shape[0]
+    if nodal_noise:
+        a = 0.5 * prior_dof
+        b = a * sigma_global**2
+        s_i = jnp.sum(eps_hat**2, axis=0)                                                       # (m,)
+        ll_i = (jax.scipy.special.gammaln(a + 0.5 * T) - jax.scipy.special.gammaln(a) + a * jnp.log(b)
+                - (a + 0.5 * T) * jnp.log(b + 0.5 * s_i) - 0.5 * T * jnp.log(2 * jnp.pi))
+        free_x_ll = jnp.sum(jnp.where(dof_dir == 0, ll_i, 0.0))
+        free_y_ll = jnp.sum(jnp.where(dof_dir == 1, ll_i, 0.0))
+    else:
+        def profile_ll(mask):
+            n_d = T * int(np.sum(mask))
+            s_d = jnp.sum(jnp.where(mask[None, :], eps_hat**2, 0.0))
+            return -0.5 * n_d * (jnp.log(2 * jnp.pi * s_d / n_d) + 1.0)
+        free_x_ll = profile_ll(dof_dir == 0)
+        free_y_ll = profile_ll(dof_dir == 1)
+
+    sx = jnp.maximum(sigma_fix_x, 1e-3)
+    sy = jnp.maximum(sigma_fix_y, 1e-3)
+    fix_x_ll = reaction_loss_weight * jnp.sum(-0.5 * reaction_res[:, 0]**2 / sx**2 - 0.5 * jnp.log(2 * jnp.pi * sx**2))
+    fix_y_ll = reaction_loss_weight * jnp.sum(-0.5 * reaction_res[:, 1]**2 / sy**2 - 0.5 * jnp.log(2 * jnp.pi * sy**2))
+
+    total = free_x_ll + free_y_ll + fix_x_ll + fix_y_ll
+    return total, (free_x_ll, free_y_ll, fix_x_ll, fix_y_ll, jnp.sum(eps_hat**2), jnp.sum(reaction_res**2))
+
+
+def eiv_noise_estimate(eps_hat: jnp.ndarray, dof_dir: np.ndarray, nodal_noise: bool = False,
+                       sigma_global: jnp.ndarray = None, prior_dof: float = 4.0) -> jnp.ndarray:
+    """
+    Point estimate of the displacement noise std per free DOF from residuals eps_hat: (T, m):
+    profile estimate sqrt(mean eps^2) per direction, or the InvGamma posterior mode per DOF.
+    """
+    T = eps_hat.shape[0]
+    s_i = jnp.sum(eps_hat**2, axis=0)
+    if nodal_noise:
+        a = 0.5 * prior_dof
+        return jnp.sqrt((a * sigma_global**2 + 0.5 * s_i) / (a + 0.5 * T + 1.0))
+    sig = [jnp.sqrt(jnp.sum(jnp.where(dof_dir == d, s_i, 0.0)) / (T * np.sum(dof_dir == d))) for d in (0, 1)]
+    return jnp.where(dof_dir == 0, sig[0], sig[1])
+
+
+def noise_log_prior(params: Any, is_free_x: np.ndarray, is_free_y: np.ndarray, prior_dof: float) -> jnp.ndarray:
+    """
+    Hierarchical prior for explicitly learned per-node noise ('residual' likelihood, nodal mode):
+        sigma_i^2 ~ InvGamma(a, a * sigma_global^2),  a = prior_dof / 2,
+    the same conjugate prior that the 'eiv' likelihood integrates out. Nodes are shrunk towards the learned
+    shared level instead of being fitted from a handful of load steps. Density is taken in log(sigma^2) space
+    to match the log parameterisation. Returns 0 for scalar noise or prior_dof <= 0.
+    """
+    sx, sy = params.sigma_free_x, params.sigma_free_y
+    if prior_dof is None or prior_dof <= 0 or sx is None or jnp.ndim(sx) == 0 or params.sigma_global is None:
+        return jnp.zeros((), dtype=jnp.float64)
+    a = 0.5 * prior_dof
+    b = a * params.sigma_global**2
+    var = jnp.concatenate([sx[is_free_x], sy[is_free_y]])**2
+    return jnp.sum(a * jnp.log(b) - jax.scipy.special.gammaln(a) - a * jnp.log(var) - b / var)
+
+
+def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndarray, cells: jnp.ndarray,
+                          n_nodes: int, f_neu_nodes: jnp.ndarray, node_type: jnp.ndarray, dNdX: jnp.ndarray,
                           dA: jnp.ndarray, key: jnp.ndarray, n_s: int, normalize_ell: int = 0,
                           vfm_mode: str = "linear_triangle", V_basis: jnp.ndarray = None,
                           control_mode: str = "force", loads: jnp.ndarray = None,
-                          reaction_loss_weight: float = 1.0) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+                          reaction_loss_weight: float = 1.0, likelihood: str = "residual",
+                          eiv: dict = None, noise_prior_dof: float = 4.0) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
     """
     Computes the variational stochastic VFM loss and KL divergence ELBO objective.
     Strictly preserves functional purity without mutating stateful class instance attributes.
     Supports vfm_mode: 'linear_triangle', 'global_vf', or 'mix'.
     Supports control_mode: 'force' or 'displacement'.
+    likelihood: 'residual' (iid Gaussian nodal force residuals) or 'eiv' (errors-in-variables,
+    displacement-space likelihood; displacement control only, requires `eiv` from build_eiv_indices).
+    Returns aux = (ell, kl, free_x, free_y, fix_x, fix_y, sum_free_loss, sum_fix_loss, noise_log_prior).
     """
     params = model.load_params(p)
     gpweight = model.precompute_weights_from_loaded(params)
@@ -29,6 +189,47 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
 
     main_key = jr.split(key, n_s + 1)
     subkey = main_key[1:]
+
+    node_type_np = np.asarray(node_type)
+    is_fix_x, is_fix_y = node_type_np[:, 1] == 1, node_type_np[:, 2] == 1
+    if control_mode == "displacement":
+        is_free_x = ~(is_fix_x | (node_type_np[:, 3] == 1))
+        is_free_y = ~(is_fix_y | (node_type_np[:, 4] == 1))
+    else:
+        is_free_x, is_free_y = ~is_fix_x, ~is_fix_y
+    nodal_noise = params.sigma_free_x is not None and jnp.ndim(params.sigma_free_x) > 0
+    log_prior = noise_log_prior(params, is_free_x, is_free_y, noise_prior_dof) if likelihood != "eiv" else jnp.zeros(())
+
+    if likelihood == "eiv":
+        dof_free = eiv["dof_free"]
+        dof_dir = dof_free % 2
+
+        # Errors-in-variables: with u_obs = z + eps on the free DOFs, linearising equilibrium f_free(z) = 0 at
+        # u_obs gives one Gauss-Newton step eps_hat = K_ff^{-1} r_f, and the reaction at the corrected state is
+        # R(u_obs) - K_rf eps_hat. Both are invariant to rescaling psi, so the free-DOF term carries no
+        # information on the stress magnitude (equilibrium cannot identify it) and the measured reaction sets it.
+        # The tangent is the posterior-mean one (delta-method noise propagation): per-path tangents of unstable
+        # GP samples are near-singular, which makes E[eps_hat^2] heavy-tailed and the ELBO estimator unusable.
+        mean_psi = lambda f: model.psi_det(f, params=params, weights=gpweight)
+        K_ff, K_rf = jax.lax.map(
+            jax.checkpoint(lambda f_step: eiv_linearisation(mean_psi, f_step, cells, n_nodes, dNdX, dA, eiv)), f3x3)
+
+        def sample_forces(k):
+            psi_fn = model.get_path_psi_fn(k, params=params, weights=gpweight)
+            return jax.lax.map(jax.checkpoint(lambda f_step: internal_force(psi_fn, f_step, cells, n_nodes, dNdX, dA)), f3x3)
+
+        f_int = jax.lax.map(sample_forces, subkey)                                    # (S, T, 2n)
+        eps_hat = jax.vmap(lambda K_t, r_t: jnp.linalg.solve(K_t, r_t.T).T, in_axes=(0, 1), out_axes=1)(
+            K_ff, f_int[..., dof_free])                                                # (S, T, m)
+        R_obs = jnp.stack([f_int[..., eiv["dof_rx"]].sum(-1), f_int[..., eiv["dof_ry"]].sum(-1)], axis=-1)  # (S, T, 2)
+        reaction_res = R_obs - jnp.einsum("tim,stm->sti", K_rf, eps_hat) - loads[None, :, :2]
+
+        ell_, terms = jax.vmap(lambda e, r: eiv_log_likelihood(
+            e, r, dof_dir, sigma_fix_x, sigma_fix_y, reaction_loss_weight,
+            nodal_noise=nodal_noise, sigma_global=params.sigma_global, prior_dof=noise_prior_dof))(eps_hat, reaction_res)
+        kl_div = model.kl_divergence(params=params, weights=gpweight)
+        total_loss = -jnp.mean(ell_) + kl_div - log_prior
+        return total_loss, (jnp.mean(ell_), kl_div) + tuple(jnp.mean(t) for t in terms) + (log_prior,)
 
     piola2x2 = lambda f, k: model.piola(f, k, params=params, weights=gpweight)[:2, :2]
     piola_cells = jax.vmap(piola2x2, in_axes=(0, None))
@@ -43,10 +244,11 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
     )
     
     kl_div = model.kl_divergence(params=params, weights=gpweight)
-    
-    total_loss = -jnp.mean(ell_) + kl_div
-    return total_loss, (jnp.mean(ell_), kl_div, jnp.mean(free_x_log_likelihood), jnp.mean(free_y_log_likelihood), 
-                        jnp.mean(fix_x_log_likelihood), jnp.mean(fix_y_log_likelihood), jnp.mean(sum_free_loss), jnp.mean(sum_fix_loss))
+
+    total_loss = -jnp.mean(ell_) + kl_div - log_prior
+    return total_loss, (jnp.mean(ell_), kl_div, jnp.mean(free_x_log_likelihood), jnp.mean(free_y_log_likelihood),
+                        jnp.mean(fix_x_log_likelihood), jnp.mean(fix_y_log_likelihood), jnp.mean(sum_free_loss), jnp.mean(sum_fix_loss),
+                        log_prior)
 
 
 def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.ndarray, n_nodes: int, 
@@ -247,17 +449,6 @@ def neumann_cell_force(coords_el: jnp.ndarray, onehot_types_el: jnp.ndarray, t3:
         f_cell = f_cell.at[j, 1].add(jnp.where(is_top, 0.5 * L * t4, 0.0))
 
     return f_cell
-
-
-def total_physical_loss(u_array: jnp.ndarray, loads: jnp.ndarray, piola_func: Any, 
-                        coords: jnp.ndarray, cells: jnp.ndarray, node_type: jnp.ndarray,
-                        control_mode: str = "force"):
-    if control_mode == "displacement":
-        plpl = jax.vmap(physical_loss_displacement_controlled, in_axes=(0, 0, None, None, None, None))
-    else:
-        plpl = jax.vmap(physical_loss_per_loadstep_force_controlled, in_axes=(0, 0, None, None, None, None))
-    free_node_residual, reaction_loss = plpl(u_array, loads, piola_func, coords, cells, node_type)
-    return free_node_residual, reaction_loss
 
 
 def physical_loss_per_loadstep_force_controlled(u: jnp.ndarray, load: jnp.ndarray, piola_func: Any, 

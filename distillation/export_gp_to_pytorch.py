@@ -9,7 +9,7 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
-from core.utils import fto3x3, farthest_point_sampling, stratified_high_strain_fps, uniform_energy_fps, compute_invariants_np, infer_material_model_name
+from core.utils import farthest_point_sampling, stratified_high_strain_fps, uniform_energy_fps, compute_invariants_np, infer_material_model_name
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 import json
 import datetime

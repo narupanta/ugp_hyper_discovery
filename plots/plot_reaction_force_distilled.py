@@ -57,11 +57,6 @@ def eval_psi_3d(F_3d, p, a0=None, a1=None):
     return w_dev + w_vol + w_aniso
 
 
-def eval_hyperelastic_psi(F_2d, p, a0=None, a1=None):
-    F_3d = jnp.eye(3, dtype=jnp.float64).at[:2, :2].set(F_2d)
-    return eval_psi_3d(F_3d, p, a0, a1)
-
-
 def p_3d_func(F_3d, p, a0=None, a1=None):
     return jax.grad(eval_psi_3d, argnums=0)(F_3d, p, a0, a1)
 

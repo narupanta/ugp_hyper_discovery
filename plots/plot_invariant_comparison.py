@@ -2,9 +2,8 @@ import os
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
-from pathlib import Path
 
-from plots.theme import apply_style, save_figure
+from plots.theme import apply_style
 
 def main():
     apply_style()

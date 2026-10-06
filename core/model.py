@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from jax import random, vmap, grad, jit
+from jax import random, vmap, grad
 from typing import Optional, Tuple, Callable, Any
 
 # Enforce mandatory 64-bit precision standard for hyperelastic computations
@@ -218,7 +218,7 @@ class SparseHyperelasticityGP:
             M_mat = K_inv @ (Kzz - U_cov_true) @ K_inv.T
             trace_term = jnp.trace(U_cov)
             mahalanobis_term = jnp.sum(u_mean ** 2)
-            log_term = - jnp.log(jnp.linalg.det(U_cov))
+            log_term = - jnp.linalg.slogdet(U_cov)[1]
         else:
             v_diff = u_mean
             U_cov_true = U_cov
@@ -226,7 +226,8 @@ class SparseHyperelasticityGP:
             M_mat = K_inv @ (Kzz - U_cov_true) @ K_inv.T
             trace_term = jnp.trace(K_inv @ U_cov_true)
             mahalanobis_term = v_diff.T @ K_inv @ v_diff
-            log_term = jnp.log(jnp.linalg.det(Kzz)) - jnp.log(jnp.linalg.det(U_cov_true))
+            # slogdet avoids det() under/overflow as the number of inducing points grows
+            log_term = jnp.linalg.slogdet(Kzz)[1] - jnp.linalg.slogdet(U_cov_true)[1]
         
         return Kzz, K_inv, v_diff, trace_term, mahalanobis_term, M_mat, log_term
 

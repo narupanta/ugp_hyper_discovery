@@ -137,24 +137,3 @@ class TractionDataset(HyperelasticDataset):
 
     def get_data(self):
         return [self[i] for i in range(len(self))]
-
-        
-# Example usage
-if __name__ == "__main__":
-    dataset = BenchmarkDataset("dataset/benchmarks", "noise=low", "Isihara")
-    loadsteps = [10, 50, 80]
-    check = dataset[10]
-    data = TestSpecimen("dataset/benchmarks/test-specimen", "Isihara-GT")
-    check = data[10]
-    print('')
-    # dataset = UniaxialGenerator(n_samples=10, gamma_range=(0.5, 2.0), mat_model="MooneyRivlin")
-    # F = dataset.get_F()
-    # invariants = dataset.get_invariants(F)
-    # sigma = dataset.get_cauchy_stress(F)
-    # coeffs = dataset.get_coeffs(F)
-
-    # print("F shape:", F.shape)
-    # print("Invariants shape:", invariants.shape)
-    # print("Cauchy stress shape:", sigma.shape)
-    # print("Coefficients shape:", coeffs.shape)
-

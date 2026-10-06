@@ -4,7 +4,6 @@ represents the Sobol sensitivity index of a specific distilled parameter.
 Supports standalone generation across load steps.
 """
 import os
-import sys
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt

@@ -12,10 +12,10 @@ from core.plotter import (
     plot_vfm_loss_analysis,
     plot_parameters_hist,
     plot_combined_validation,
-    plot_energy_decomposition_validation,
-    plot_training_r2
+    plot_energy_decomposition_validation
 )
 from core.model import SparseHyperelasticityGP
+from core.features import AnisotropicFeatureExtractor
 
 # Enforce mandatory 64-bit precision standard for hyperelastic computations
 jax.config.update("jax_enable_x64", True)
@@ -98,13 +98,14 @@ class HyperelasticGPTrainer:
         self.best_params = initial_params
 
     def _record_metrics(self, step, loss, aux, params):
-        log_like_loss, kl_loss, free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, phy_loss, phys_loss2 = aux
+        log_like_loss, kl_loss, free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, phy_loss, phys_loss2 = aux[:8]
+        noise_prior = aux[8] if len(aux) > 8 else 0.0
         
         log_message = (
             f"step {step:04d} | loss={loss:.6f} | "
             f"log_like={log_like_loss:.6f} | kl={kl_loss:.6f} | free_x={free_x_log_likelihood:.6f} | "
             f"free_y={free_y_log_likelihood:.6f} | fix_x={fix_x_log_likelihood:.6f} | "
-            f"fix_y={fix_y_log_likelihood:.6f} | "
+            f"fix_y={fix_y_log_likelihood:.6f} | noise_prior={float(noise_prior):.6f} | "
             f"phy={phy_loss:.6f} | phy2 ={phys_loss2:.6f}\n"
         )
         cur_params = self.model.load_params(params)
@@ -180,6 +181,32 @@ class HyperelasticGPTrainer:
             "phy2": f"{phys_loss2:.4f}"
         }
         
+    def _rebuild_model(self, raw_params) -> SparseHyperelasticityGP:
+        """GP for post-training plots with exactly the training configuration (transforms, jitter, RFF count).
+        In unknown-fiber mode the feature extractor uses the fiber angle learned in raw_params."""
+        m = self.model
+        extractor = m.feature_extractor
+        raw_theta = getattr(raw_params, "raw_aniso_theta_mean", None)
+        if raw_theta is not None:
+            theta = jnp.pi * (jax.nn.sigmoid(raw_theta) - 0.5)
+            extractor = AnisotropicFeatureExtractor(
+                jnp.array([jnp.cos(theta), jnp.sin(theta), 0.0]),
+                cap_compression=getattr(m.feature_extractor, "cap_compression", False))
+        return SparseHyperelasticityGP(
+            raw_params=raw_params, I_z=self.I_z, min_dev=self.min_dev, min_vol=self.min_vol,
+            max_dev=self.max_dev, max_vol=self.max_vol, beta=m.beta,
+            sampling_mode=m.sampling_mode, L=m.L,
+            feature_extractor=extractor,
+            min_aniso=getattr(m, 'min_aniso', None),
+            max_aniso=getattr(m, 'max_aniso', None),
+            aniso_z=getattr(m, 'aniso_z', None),
+            covariance_mode=m.covariance_mode,
+            normalize_ell=m.normalize_ell,
+            u_var_anchor=m.u_var_anchor,
+            kzz_jitter=m.kzz_jitter,
+            constraint_lengthscale=m.constraint_lengthscale
+        )
+
     def train(self, n_iterations, main_key, log_info_str, block_size: int = 50):
         with open(self.log_file_path, "w") as f:
             f.write(f"{log_info_str} \n Optimization Start\n" + "="*20 + "\n")
@@ -214,10 +241,13 @@ class HyperelasticGPTrainer:
             # Extract final metrics from the block
             loss = float(losses[-1])
             aux_step = tuple(a[-1] for a in aux_out)
+            # Select checkpoints on the block-averaged loss: a single MC estimate of the negative ELBO is
+            # noisy, and taking its minimum systematically favours lucky Monte Carlo draws.
+            block_loss = float(jnp.mean(losses))
             
             # Decoupled parameter disk I/O: save only when best loss is broken at block boundary
-            if loss < self.best_loss:
-                self.best_loss = loss
+            if block_loss < self.best_loss:
+                self.best_loss = block_loss
                 self.best_params = self.params
                 with open(os.path.join(self.save_path, "best_params.npy"), "wb") as f:
                     jnp.save(f, self.best_params._asdict())
@@ -236,16 +266,7 @@ class HyperelasticGPTrainer:
         # Final plots and post-training evolution validation
         print("Generating training progress evolution plots...")
         for m_step, m_params in milestone_params:
-            plot_model = SparseHyperelasticityGP(
-                raw_params=m_params, I_z=self.I_z, min_dev=self.min_dev, min_vol=self.min_vol,
-                max_dev=self.max_dev, max_vol=self.max_vol, beta=self.model.beta,
-                sampling_mode=getattr(self.model, 'sampling_mode', 'pathwise'),
-                feature_extractor=self.model.feature_extractor,
-                min_aniso=getattr(self.model, 'min_aniso', None),
-                max_aniso=getattr(self.model, 'max_aniso', None),
-                aniso_z=getattr(self.model, 'aniso_z', None),
-                covariance_mode=getattr(self.model, 'covariance_mode', 'diag')
-            )
+            plot_model = self._rebuild_model(m_params)
             plot_combined_validation(plot_model, self.true_mat_model, self.save_path, m_step)
 
         plot_loss_analysis(self.loss_components_hist, self.params_hist, self.steps_history, self.save_path)
@@ -253,16 +274,7 @@ class HyperelasticGPTrainer:
         if getattr(self, "vfm_mode", "linear_triangle") in ["global_vf", "mix"]:
             plot_vfm_loss_analysis(self.loss_components_hist, self.params_hist, self.steps_history, self.save_path, self.vfm_mode)
         
-        learned_gp = SparseHyperelasticityGP(
-            raw_params=self.best_params, I_z=self.I_z, min_dev=self.min_dev, min_vol=self.min_vol,
-            max_dev=self.max_dev, max_vol=self.max_vol, beta=self.model.beta,
-            sampling_mode=getattr(self.model, 'sampling_mode', 'pathwise'),
-            feature_extractor=self.model.feature_extractor,
-            min_aniso=getattr(self.model, 'min_aniso', None),
-            max_aniso=getattr(self.model, 'max_aniso', None),
-            aniso_z=getattr(self.model, 'aniso_z', None),
-            covariance_mode=getattr(self.model, 'covariance_mode', 'diag')
-        )
+        learned_gp = self._rebuild_model(self.best_params)
         plot_combined_validation(learned_gp, self.true_mat_model, self.save_path, step_idx)
         
         # New Energy Validation Plots

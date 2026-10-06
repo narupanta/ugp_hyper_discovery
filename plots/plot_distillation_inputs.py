@@ -9,7 +9,7 @@ jax.config.update("jax_enable_x64", True)
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from core.utils import fto3x3 as core_fto3x3, farthest_point_sampling
+from core.utils import farthest_point_sampling
 
 def fto3x3(f):
     f3x3 = jnp.array([[f[0,0], f[0,1], 0.0],

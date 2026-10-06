@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import Tuple, Optional
 
 # Enforce mandatory 64-bit precision standard
 jax.config.update("jax_enable_x64", True)

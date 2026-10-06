@@ -16,10 +16,8 @@ Generates:
 """
 
 import os
-import sys
 import json
 import argparse
-from pathlib import Path
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')

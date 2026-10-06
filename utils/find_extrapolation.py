@@ -3,8 +3,6 @@ import jax.numpy as jnp
 import numpy as np
 import os
 from core.features import IsotropicFeatureExtractor
-from core.datasetclass import DatasetFactory
-from core.utils import fto3x3
 
 def generate_standard_modes(num_points=500, max_gamma=3.0):
     gamma = jnp.linspace(0.0, max_gamma, num_points)

@@ -14,12 +14,11 @@ If non-empty, plots:
 import os
 import glob
 import argparse
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import yaml
 import jax
 import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)

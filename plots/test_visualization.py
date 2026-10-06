@@ -1,12 +1,9 @@
 import os
-import glob
-import pickle
 import jax
 from jax import config
 config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-from sklearn.metrics import r2_score
 import numpy as np
 
 from core.datasetclass import DatasetFactory
