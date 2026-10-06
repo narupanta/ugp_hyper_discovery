@@ -6,6 +6,7 @@ Supports standalone generation across load steps.
 import os
 import argparse
 import numpy as np
+from core.dataset_store import load_dataset
 import matplotlib.pyplot as plt
 import matplotlib.tri as tri
 from SALib.sample import sobol as sobol_sample
@@ -126,7 +127,7 @@ def plot_domain_sensitivities(dataset_path, distilled_dir, step_idx=14, num_salt
     os.makedirs(save_dir, exist_ok=True)
     
     # 1. Load dataset mesh and deformation gradient
-    data = np.load(dataset_path)
+    data = load_dataset(dataset_path)
     mesh_pos = data['mesh_pos']
     cells = data['cells']
     

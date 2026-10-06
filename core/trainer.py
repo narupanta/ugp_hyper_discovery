@@ -267,7 +267,7 @@ class HyperelasticGPTrainer:
         print("Generating training progress evolution plots...")
         for m_step, m_params in milestone_params:
             plot_model = self._rebuild_model(m_params)
-            plot_combined_validation(plot_model, self.true_mat_model, self.save_path, m_step)
+            plot_combined_validation(plot_model, self.true_mat_model, self.save_path, m_step, I_obs=self.I_all)
 
         plot_loss_analysis(self.loss_components_hist, self.params_hist, self.steps_history, self.save_path)
         plot_parameters_hist(self.params_hist, self.steps_history, self.save_path)
@@ -275,10 +275,10 @@ class HyperelasticGPTrainer:
             plot_vfm_loss_analysis(self.loss_components_hist, self.params_hist, self.steps_history, self.save_path, self.vfm_mode)
         
         learned_gp = self._rebuild_model(self.best_params)
-        plot_combined_validation(learned_gp, self.true_mat_model, self.save_path, step_idx)
+        plot_combined_validation(learned_gp, self.true_mat_model, self.save_path, step_idx, I_obs=self.I_all)
         
         # New Energy Validation Plots
-        plot_energy_decomposition_validation(learned_gp, self.true_mat_model, self.save_path)
+        plot_energy_decomposition_validation(learned_gp, self.true_mat_model, self.save_path, I_obs=self.I_all)
         
         return self.best_params
 

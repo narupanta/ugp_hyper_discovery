@@ -15,8 +15,10 @@ from core.fem_engine import (
     create_default_bc_config,
     HyperElasticityProblem,
     solve_adaptive_fem,
-    export_fem_dataset,
     make_plane_stress_piola
+)
+from core.dataset_store import (
+    CLEAN_DIR, clean_dataset_path, make_dataset_spec, save_clean_dataset, displacement_reactions
 )
 
 import matplotlib.pyplot as plt
@@ -78,10 +80,14 @@ def main():
     parser.add_argument('--target_top', type=float, default=None)
     parser.add_argument('--asym', type=float, default=None)
     parser.add_argument('--n_steps', type=int, default=None)
-    parser.add_argument('--seed', type=int, default=42, help="Random seed for data generation")
+    parser.add_argument('--seed', type=int, default=42, help="Seed of the noise realisation (the FEM solve is seed-independent)")
     parser.add_argument('--mesh_dir', type=str, default="mesh")
-    parser.add_argument('--raw_data_dir', type=str, default="dataset/synthetic/force_control")
-    parser.add_argument('--precomputed_dir', type=str, default="dataset/preprocessed/syn_f")
+    parser.add_argument('--clean_dir', type=str, default=CLEAN_DIR, help="Directory of clean (noise-free) datasets")
+    parser.add_argument('--spec_out', type=str, default=None,
+                        help="Write the dataset spec (clean path + seed + noise levels) to this file")
+    parser.add_argument('--spec_only', action='store_true',
+                        help="Only resolve and write the spec of an existing clean dataset (no FEM solve)")
+    parser.add_argument('--force_regen', action='store_true', help="Re-solve the FEM even if the clean dataset exists")
     parser.add_argument('--geometry', type=str, default='block')
     parser.add_argument('--mesh_size', type=float, default=0.08)
     parser.add_argument('--control_mode', type=str, default=None, choices=["force", "displacement"])
@@ -95,9 +101,6 @@ def main():
     args = parser.parse_args()
 
     material_model_name = args.model
-    mesh_dir = args.mesh_dir
-    raw_data_dir = args.raw_data_dir
-    precomputed_dir = args.precomputed_dir
     geometry_name = args.geometry.lower()
 
     # Load defaults from recipe if available
@@ -132,11 +135,46 @@ def main():
     else:
         prescribe_right = bool(rec.get("prescribe_right", (geometry_name != "holes")))
 
-    os.makedirs(mesh_dir, exist_ok=True)
-    mesh_msh_path = os.path.join(mesh_dir, f"{geometry_name}_mesh.msh")
-    mesh_npz_path = os.path.join(mesh_dir, f"{geometry_name}_mesh.npz")
+    mat_kwargs = {}
+    if args.angles is not None: mat_kwargs["angles"] = args.angles
+    if args.dev_params is not None: mat_kwargs["dev_params"] = args.dev_params
+    if args.vol_params is not None: mat_kwargs["vol_params"] = args.vol_params
+    if args.aniso_params is not None: mat_kwargs["aniso_params"] = args.aniso_params
 
-    # 1. Geometry & Mesh Generation
+    mat_p = rec.get("material_params", {})
+    for k in ("dev_params", "vol_params", "aniso_params", "angles"):
+        if k not in mat_kwargs and k in mat_p:
+            mat_kwargs[k] = mat_p[k]
+
+    # Everything that determines the noise-free FEM solution; its hash names the clean dataset.
+    config = dict(
+        material_model=material_model_name,
+        material_kwargs={k: [float(x) for x in np.atleast_1d(v)] for k, v in mat_kwargs.items()},
+        geometry=geometry_name, mesh_size=float(args.mesh_size),
+        control_mode=control_mode, stress_mode=stress_mode,
+        target_load=float(target_load), asym_factor=float(asym_factor), n_steps=int(num_steps),
+        prescribe_right=bool(prescribe_right), clamp_top_x=bool(clamp_top_x_val),
+    )
+    clean_path = clean_dataset_path(config, root=args.clean_dir)
+    spec = make_dataset_spec(clean_path, args.seed, disp_noise, load_noise)
+
+    def write_spec():
+        if args.spec_out:
+            with open(args.spec_out, "w") as f:
+                f.write(spec + "\n")
+        print(f"DATASET_SPEC={spec}")
+
+    if args.spec_only or (os.path.exists(clean_path) and not args.force_regen):
+        if not os.path.exists(clean_path):
+            raise FileNotFoundError(f"--spec_only: clean dataset {clean_path} does not exist; run generation first.")
+        print(f"✅ Clean dataset exists, skipping FEM solve: {clean_path}")
+        write_spec()
+        return
+
+    # 1. Geometry & Mesh Generation (cache keyed by geometry and mesh size)
+    os.makedirs(args.mesh_dir, exist_ok=True)
+    mesh_msh_path = os.path.join(args.mesh_dir, f"{geometry_name}_h{args.mesh_size}_mesh.msh")
+    mesh_npz_path = os.path.join(args.mesh_dir, f"{geometry_name}_h{args.mesh_size}_mesh.npz")
     geom = get_geometry(geometry_name, mesh_size=args.mesh_size)
     if not os.path.exists(mesh_npz_path):
         geom.generate_mesh(mesh_msh_path, mesh_npz_path)
@@ -161,22 +199,6 @@ def main():
     node_type = bc_config.create_node_type_array(node_coords)
 
     # 3. Material Constitutive Model
-    mat_kwargs = {}
-    if args.angles is not None: mat_kwargs["angles"] = args.angles
-    if args.dev_params is not None: mat_kwargs["dev_params"] = args.dev_params
-    if args.vol_params is not None: mat_kwargs["vol_params"] = args.vol_params
-    if args.aniso_params is not None: mat_kwargs["aniso_params"] = args.aniso_params
-
-    mat_p = rec.get("material_params", {})
-    if "dev_params" not in mat_kwargs and "dev_params" in mat_p:
-        mat_kwargs["dev_params"] = mat_p["dev_params"]
-    if "vol_params" not in mat_kwargs and "vol_params" in mat_p:
-        mat_kwargs["vol_params"] = mat_p["vol_params"]
-    if "aniso_params" not in mat_kwargs and "aniso_params" in mat_p:
-        mat_kwargs["aniso_params"] = mat_p["aniso_params"]
-    if "angles" not in mat_kwargs and "angles" in mat_p:
-        mat_kwargs["angles"] = mat_p["angles"]
-
     true_mat_model = get_material(material_model_name, **mat_kwargs)
     if stress_mode == "plane_stress":
         true_piola_stress_func, solve_lambda3 = make_plane_stress_piola(true_mat_model)
@@ -210,98 +232,41 @@ def main():
         "pc_factor_mat_solver_type": "mumps",
     }
 
-    # 5. Schedule (Force or Displacement)
-    key = jax.random.PRNGKey(args.seed)
+    # 5. True loading schedule (noise is added at load time, see core.dataset_store.observe_dataset)
+    ramp = jnp.linspace(0.0, target_load, num_steps).reshape(-1, 1)
     if control_mode == "force":
-        noise_std = load_noise * target_load
-        target_load_noisy = target_load + noise_std * jax.random.normal(key)
-
-        noisy_load_top_base = jnp.linspace(0.0, target_load_noisy, num_steps).reshape(-1, 1)
-        if geometry_name == "holes" or not prescribe_right:
-            noisy_load_right_base = jnp.zeros_like(noisy_load_top_base)
-        else:
-            noisy_load_right_base = noisy_load_top_base * asym_factor
-        loads_noisy = jnp.concatenate([noisy_load_right_base, noisy_load_top_base], axis=1)
-
-        loads_top_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1, 1)
-        if geometry_name == "holes" or not prescribe_right:
-            loads_right_true = jnp.zeros_like(loads_top_true)
-        else:
-            loads_right_true = loads_top_true * asym_factor
-        loads_true = jnp.concatenate([loads_right_true, loads_top_true], axis=1)
-
-        schedule_solve = loads_true
-        load_noise_std = load_noise * loads_true
-        load_noise_std_steps = load_noise_std * np.linspace(0, 1, num_steps).reshape(-1, 1)
-    else: # displacement
-        disps_top_true = jnp.linspace(0.0, target_load, num_steps).reshape(-1, 1)
-        if prescribe_right:
-            disps_right_true = disps_top_true * asym_factor
-            schedule_solve = jnp.concatenate([disps_right_true, disps_top_true], axis=1)
-        else:
-            schedule_solve = disps_top_true
-        loads_noisy = np.zeros((num_steps, 2))
-        load_noise_std = np.zeros((num_steps, 2))
-        load_noise_std_steps = np.zeros((num_steps, 2))
+        right = jnp.zeros_like(ramp) if (geometry_name == "holes" or not prescribe_right) else ramp * asym_factor
+        schedule_solve = jnp.concatenate([right, ramp], axis=1)
+    else:
+        schedule_solve = jnp.concatenate([ramp * asym_factor, ramp], axis=1) if prescribe_right else ramp
 
     # 6. Solve Adaptive FEM
     print(f"Solving forward FEM ({geometry_name}, {material_model_name}, {num_steps} steps, mode={control_mode})...")
-    u_true = solve_adaptive_fem(problem_true, bc_config, schedule_solve, petsc_options)
+    u_true = np.array(solve_adaptive_fem(problem_true, bc_config, schedule_solve, petsc_options))
 
-    # Save per-step raw datasets
-    save_raw_dataset_dir = os.path.join(raw_data_dir, f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}_{args.seed}")
-    os.makedirs(save_raw_dataset_dir, exist_ok=True)
-    for step in range(u_true.shape[0]):
-        step_data = {
-            "mesh_pos": node_coords,
-            "cells": cells,
-            "u": u_true[step],
-            "node_type": node_type,
-            "load": loads_noisy[step],
-            "load_noise_std": load_noise_std
-        }
-        np.savez_compressed(f"{save_raw_dataset_dir}/disp_{step:02d}.npz", **step_data)
+    # 7. Clean dataset: true state only
+    loads_true = np.array(schedule_solve)
+    if loads_true.shape[1] == 1:
+        loads_true = np.concatenate([np.zeros_like(loads_true), loads_true], axis=1)
+    reactions_true = (displacement_reactions(u_true, node_coords, cells, node_type, true_piola_stress_func)
+                      if control_mode == "displacement" else None)
+    lam3_true = None
+    if solve_lambda3 is not None:
+        from core.utils import deformation_gradient_element
+        F_true = [deformation_gradient_element(node_coords[cells], u_true[t][cells])[0] for t in range(num_steps)]
+        lam3_true = np.array([np.array(jax.vmap(solve_lambda3)(F)) for F in F_true])
 
-    # 7. Comprehensive Dataset Exporter
-    dataset_name = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}_{geometry_name}_{args.seed}"
-    output_npz_path = os.path.join(precomputed_dir, f"{dataset_name}.npz")
-
-    a0 = getattr(true_mat_model, 'a0', None)
-    a1 = getattr(true_mat_model, 'a1', None)
-    a2 = getattr(true_mat_model, 'a2', None)
-
-    export_fem_dataset(
-        output_npz_path=output_npz_path,
-        mesh_pos=node_coords,
-        cells=cells,
-        node_type=node_type,
-        u_true=np.array(u_true),
-        loads_noisy=loads_noisy,
-        disp_noise=disp_noise,
-        load_noise_std=load_noise_std,
-        load_noise_std_steps=load_noise_std_steps,
-        seed=args.seed,
-        a0=a0,
-        a1=a1,
-        a2=a2,
-        mode=control_mode,
-        stress_mode=stress_mode,
-        solve_lambda3_fn=solve_lambda3,
-        piola_func_2d=true_piola_stress_func,
-        load_noise=load_noise
+    save_clean_dataset(
+        clean_path, config, node_coords, cells, node_type, u_true, loads_true,
+        reaction_forces_true=reactions_true, lam3_true=lam3_true,
+        a0=getattr(true_mat_model, 'a0', None), a1=getattr(true_mat_model, 'a1', None), a2=getattr(true_mat_model, 'a2', None),
     )
 
-    # Create unseeded fallback copy for standard single-seed workflows if seed in [0, 42, 1]
-    fallback_name = f"{material_model_name}_{disp_noise}_{load_noise}_{target_load}_{asym_factor}_{geometry_name}.npz"
-    fallback_path = os.path.join(precomputed_dir, fallback_name)
-    if not os.path.exists(fallback_path):
-        import shutil
-        shutil.copyfile(output_npz_path, fallback_path)
-
-    # Diagnostic visual verification
+    # Diagnostic visual verification (once per clean dataset)
     viz_data = dict(u=u_true, mesh_pos=node_coords, cells=cells, node_type=node_type)
-    plot_dataset_viz(viz_data, dataset_name, "dataset_viz_jax")
-    print(f"✅ Generated and exported dataset successfully to {output_npz_path}")
+    plot_dataset_viz(viz_data, os.path.splitext(os.path.basename(clean_path))[0], "dataset_viz_jax")
+    print(f"✅ Solved and stored clean dataset: {clean_path}")
+    write_spec()
 
 
 if __name__ == "__main__":

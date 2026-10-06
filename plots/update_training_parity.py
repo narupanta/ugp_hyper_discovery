@@ -2,6 +2,7 @@ import os
 import json
 import yaml
 import numpy as np
+from core.dataset_store import load_dataset
 import jax
 jax.config.update('jax_enable_x64', True)
 import jax.numpy as jnp
@@ -23,7 +24,7 @@ def update_seed(exp_dir, seed):
     dataset_path = f"/home/mmdiscovery/shared/dataset/preprocessed/syn_f/isihara_0.0005_0.05_1.0_0.5_block_{seed}.npz"
     if not os.path.exists(dataset_path):
         dataset_path = os.path.join("/home/mmdiscovery/shared", cfg.get("dataset_path", ""))
-    data = np.load(dataset_path)
+    data = load_dataset(dataset_path)
 
     dev_params = cfg['dev_params']
     vol_params = cfg['vol_params']

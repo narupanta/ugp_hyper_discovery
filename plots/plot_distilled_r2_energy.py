@@ -17,6 +17,7 @@ from core.dataclass import GPRawParams
 from core.material_models import get_material
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 from core.utils import infer_material_model_name, deformation_gradient_element
+from core.dataset_store import dataset_exists, load_dataset
 
 def find_dataset_path(saved_model_dir, true_model_name):
     meta_path = os.path.join(saved_model_dir, "metadata.json")
@@ -24,7 +25,7 @@ def find_dataset_path(saved_model_dir, true_model_name):
         try:
             with open(meta_path, "r") as mf:
                 mdata = json.load(mf)
-                if "dataset_path" in mdata and os.path.exists(mdata["dataset_path"]):
+                if "dataset_path" in mdata and dataset_exists(mdata["dataset_path"]):
                     return mdata["dataset_path"]
         except Exception:
             pass
@@ -123,10 +124,10 @@ def main():
 
     # 1. Load Dataset F field
     dataset_path = find_dataset_path(saved_model_dir, true_model_name)
-    if dataset_path is None or not os.path.exists(dataset_path):
+    if dataset_path is None or not dataset_exists(dataset_path):
         raise FileNotFoundError(f"Could not locate dataset .npz file for {true_model_name} from {saved_model_dir}")
 
-    prep_data = np.load(dataset_path, allow_pickle=True)
+    prep_data = load_dataset(dataset_path)
     F_all_steps_2x2 = prep_data["F"]  # [num_steps, num_elements, 2, 2]
     total_steps = F_all_steps_2x2.shape[0]
 

@@ -94,7 +94,9 @@ def main():
     if os.path.exists(trans_path):
         transitions = np.load(trans_path)
     else:
-        transitions, _, _ = _compute_regime_transitions(learned_gp, F_all, gamma)
+        obs_file = os.path.join(saved_model_dir, "I_obs_all.npy")
+        transitions, _, _ = _compute_regime_transitions(learned_gp, F_all, gamma,
+                                                        I_obs=np.load(obs_file) if os.path.exists(obs_file) else None)
 
     psi_true = jax.vmap(true_model.psi)(F_all)
     P_true = jax.vmap(jax.vmap(true_model.P))(F_all)

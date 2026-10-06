@@ -28,9 +28,9 @@ class PrecomputedVFMDataset(HyperelasticDataset):
         self.data_path = data_path
         
     def get_data(self):
-        if not os.path.exists(self.data_path):
-            raise FileNotFoundError(f"Dataset not found at {self.data_path}")
-        return dict(np.load(self.data_path, allow_pickle=True))
+        # data_path may be a dataset spec (clean dataset + seed + noise levels) or a legacy npz path
+        from .dataset_store import load_dataset
+        return dict(load_dataset(self.data_path))
 
 class DatasetFactory:
     @staticmethod

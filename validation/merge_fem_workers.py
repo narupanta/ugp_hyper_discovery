@@ -3,7 +3,7 @@ import glob
 import argparse
 import numpy as np
 
-def merge_worker_files(folder_path, pattern="fem_distilled_samples_worker*.npz"):
+def merge_worker_files(folder_path, pattern="fem_distilled_samples_worker*.npz", keep_shards=False):
     worker_files = sorted(glob.glob(os.path.join(folder_path, pattern)))
     if not worker_files:
         print(f"No worker files found matching {pattern} in {folder_path}")
@@ -43,8 +43,9 @@ def merge_worker_files(folder_path, pattern="fem_distilled_samples_worker*.npz")
 
     target_file = os.path.join(folder_path, "fem_distilled_samples.npz")
     save_dict = {
-        "u_pred": final_u,
+        "u_pred": final_u.astype(np.float32),
         "selected_samples": final_params,
+        "merged_complete": True,
         **base_dict
     }
 
@@ -52,8 +53,19 @@ def merge_worker_files(folder_path, pattern="fem_distilled_samples_worker*.npz")
     print(f"🎉 Successfully merged {len(worker_files)} worker files into {target_file}!")
     print(f"Total unique non-repeated samples: {final_u.shape[0]}")
 
+    # Shards duplicate the merged file; remove them once the merged file reads back intact.
+    if not keep_shards:
+        check = np.load(target_file, allow_pickle=True)
+        if check["u_pred"].shape == final_u.shape and bool(check["merged_complete"]):
+            for wf in worker_files:
+                os.remove(wf)
+            print(f"🧹 Removed {len(worker_files)} worker shard files (pass --keep_shards to keep them).")
+        else:
+            print("⚠️ Merged file failed read-back verification; keeping worker shards.")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--folder", type=str, required=True)
+    parser.add_argument("--keep_shards", action="store_true", help="Keep fem_distilled_samples_worker*.npz after merging")
     args = parser.parse_args()
-    merge_worker_files(args.folder)
+    merge_worker_files(args.folder, keep_shards=args.keep_shards)

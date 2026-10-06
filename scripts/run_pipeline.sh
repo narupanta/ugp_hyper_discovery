@@ -232,7 +232,7 @@ FIXED_NOISE=$(get_cfg_default "is_fixed_reaction_force_noise" "1")
 FIXED_IP=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('is_fixed_inducing_points', 1))" 2>/dev/null || echo "1")
 EXT_ITERS=$(get_cfg_default "extraction_n_iterations" "100")
 EXT_LR=$(get_cfg_default "extraction_learning_rate" "0.01")
-EXT_FINAL_LR=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('extraction_final_learning_rate', d.get('extraction_learning_rate')))" 2>/dev/null || echo "$EXT_LR")
+EXT_FINAL_LR=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('extraction_final_learning_rate', d.get('final_learning_rate', d.get('extraction_learning_rate'))))" 2>/dev/null || echo "$EXT_LR")
 CAP_COMPRESSION=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('cap_compression', 1))" 2>/dev/null || echo "1")
 TRAIN_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(*(d.get('train_load_steps_indices', [0])))" 2>/dev/null || echo "0")
 MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('model_mode', 'isotropic'))" 2>/dev/null || echo "isotropic")
@@ -352,15 +352,23 @@ for SEED in $SEEDS_LIST; do
 
     mkdir -p "$SEED_DIR"
 
-    if [ -n "$CUSTOM_DATASET_PATH" ]; then
-        TRAIN_DATASET_PATH="$CUSTOM_DATASET_PATH"
+    # --- STEP 1: DATA GENERATION ---
+    # One clean (noise-free) FEM dataset per configuration is solved once and reused by every seed; the seed's
+    # noise is added at load time. The generator writes the dataset spec (clean file + seed + noise levels).
+    TRAIN_SPEC_FILE="$SEED_DIR/dataset_train.spec"
+    VAL_SPEC_FILE="$SEED_DIR/dataset_val.spec"
+    if [ "$RUN_GEN" = true ]; then
+        GEN_MODE_FLAG=""
+        echo "--- Step 1: Data Generation (Seed: $SEED) ---"
     else
-        TRAIN_DATASET_PATH="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${GEOMETRY_TRAIN}_${SEED}.npz"
+        GEN_MODE_FLAG="--spec_only"
+        echo "⏭️ Skipping Step 1 (Data Generation) for Seed $SEED (resolving existing clean datasets)."
     fi
 
-    # --- STEP 1: DATA GENERATION ---
-    if [ "$RUN_GEN" = true ]; then
-        echo "--- Step 1: Data Generation (Seed: $SEED) ---"
+    if [ -n "$CUSTOM_DATASET_PATH" ]; then
+        TRAIN_DATASET_PATH="$CUSTOM_DATASET_PATH"
+        VAL_DATASET_PATH="$CUSTOM_DATASET_PATH"
+    else
         python3 dataset/synthetic/force_control/syn_force_control.py \
             --recipe "$CONFIG_YAML" \
             --model "$MODEL" \
@@ -375,7 +383,9 @@ for SEED in $SEEDS_LIST; do
             --stress_mode "$STRESS_MODE" \
             --clamp_top_x 0 \
             --seed "$SEED" \
+            --spec_out "$TRAIN_SPEC_FILE" $GEN_MODE_FLAG \
             $MAT_EXTRA_ARGS
+        TRAIN_DATASET_PATH=$(cat "$TRAIN_SPEC_FILE")
 
         if [ "$GEOMETRY_VAL" != "$GEOMETRY_TRAIN" ]; then
             python3 dataset/synthetic/force_control/syn_force_control.py \
@@ -392,11 +402,17 @@ for SEED in $SEEDS_LIST; do
                 --stress_mode "$STRESS_MODE" \
                 --clamp_top_x "$CLAMP_TOP_X" \
                 --seed "$SEED" \
+                --spec_out "$VAL_SPEC_FILE" $GEN_MODE_FLAG \
                 $MAT_EXTRA_ARGS
+            VAL_DATASET_PATH=$(cat "$VAL_SPEC_FILE")
+        else
+            VAL_DATASET_PATH="$TRAIN_DATASET_PATH"
         fi
+        echo "ℹ️ Train dataset: $TRAIN_DATASET_PATH"
+        echo "ℹ️ Val dataset:   $VAL_DATASET_PATH"
+    fi
+    if [ "$RUN_GEN" = true ]; then
         echo "✅ Step 1 (Data Generation for Seed $SEED) completed."
-    else
-        echo "⏭️ Skipping Step 1 (Data Generation) for Seed $SEED."
     fi
 
     # --- STEP 2: EXTRACTION ---
@@ -700,8 +716,8 @@ for SEED in $SEEDS_LIST; do
             mkdir -p "$VAL_DIR/block"
             mkdir -p "$VAL_DIR/holes"
 
-            VAL_DATASET_BLOCK="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${GEOMETRY_TRAIN}_${SEED}.npz"
-            VAL_DATASET_HOLES="dataset/preprocessed/syn_f/${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD_HOLES}_${ASYM}_${GEOMETRY_VAL}_${SEED}.npz"
+            VAL_DATASET_BLOCK="$TRAIN_DATASET_PATH"
+            VAL_DATASET_HOLES="$VAL_DATASET_PATH"
 
             echo "Running FEM workers for $GEOMETRY_TRAIN geometry..."
             BLOCK_PIDS=()

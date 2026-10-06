@@ -24,6 +24,7 @@ import json
 import argparse
 from pathlib import Path
 import numpy as np
+from core.dataset_store import dataset_exists, load_dataset
 
 import jax
 import jax.numpy as jnp
@@ -82,20 +83,20 @@ def resolve_data_bundle(distilled_dir: Path, extracted_dir: Path = None, dataset
 
     # Resolve dataset path
     ds_path = None
-    if dataset_path and os.path.exists(dataset_path):
-        ds_path = Path(dataset_path)
+    if dataset_path and dataset_exists(dataset_path):
+        ds_path = dataset_path
     else:
         # Check metadata.json in extracted dir
         if extracted_dir and (extracted_dir / "metadata.json").exists():
             try:
                 with open(extracted_dir / "metadata.json", "r") as f:
                     meta = json.load(f)
-                if "dataset_path" in meta and os.path.exists(meta["dataset_path"]):
-                    ds_path = Path(meta["dataset_path"])
+                if "dataset_path" in meta and dataset_exists(meta["dataset_path"]):
+                    ds_path = meta["dataset_path"]
             except Exception:
                 pass
 
-    if ds_path is None or not ds_path.exists():
+    if ds_path is None or not dataset_exists(str(ds_path)):
         # Search candidate datasets
         for cand_dir in [Path("dataset/preprocessed/syn_f"), Path("dataset/synthetic/force_control")]:
             if cand_dir.exists():
@@ -104,11 +105,11 @@ def resolve_data_bundle(distilled_dir: Path, extracted_dir: Path = None, dataset
                         ds_path = f
                         break
 
-    if ds_path is None or not ds_path.exists():
+    if ds_path is None or not dataset_exists(str(ds_path)):
         raise FileNotFoundError("Could not locate training dataset npz file for block geometry.")
 
     print(f"📂 Loading dataset from: {ds_path}")
-    raw_data = np.load(ds_path, allow_pickle=True)
+    raw_data = load_dataset(str(ds_path))
     coords = raw_data["mesh_pos"][:, :2] if "mesh_pos" in raw_data else raw_data["node_coords"][:, :2]
     cells = raw_data["cells"]
     node_type = raw_data["node_type"]

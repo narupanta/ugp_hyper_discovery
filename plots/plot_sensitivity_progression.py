@@ -6,6 +6,7 @@ Can plot across the 4 training steps [2, 6, 10, 14], or all load steps.
 import os
 import argparse
 import numpy as np
+from core.dataset_store import load_dataset
 import matplotlib.pyplot as plt
 from plots.plot_domain_sensitivities import compute_element_sobol_sensitivities
 
@@ -21,7 +22,7 @@ def plot_sensitivity_progression(
     os.makedirs(save_dir, exist_ok=True)
 
     # 1. Load dataset
-    data = np.load(dataset_path)
+    data = load_dataset(dataset_path)
     if 'F_3d' in data:
         F_3d = data['F_3d']
     else:

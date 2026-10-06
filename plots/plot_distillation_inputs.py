@@ -1,4 +1,5 @@
 import numpy as np
+from core.dataset_store import load_dataset
 import jax.numpy as jnp
 import jax
 import matplotlib.pyplot as plt
@@ -33,7 +34,7 @@ def main():
     args = parser.parse_args()
 
     print(f"Loading dataset {args.dataset}...")
-    data = np.load(args.dataset)
+    data = load_dataset(args.dataset)
     F_all_steps_2x2 = data["F"]
     
     load_steps = None

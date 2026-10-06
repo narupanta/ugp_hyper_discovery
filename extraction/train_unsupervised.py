@@ -21,6 +21,7 @@ from core.material_models import get_material
 from core.trainer import HyperelasticGPTrainer
 from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 from core.datasetclass import DatasetFactory
+from core.dataset_store import dataset_exists
 from core.loss_function import (total_stochastic_loss, build_eiv_indices, eiv_force_equivalent_sigma,
                                 eiv_linearisation, internal_force, eiv_noise_estimate)
 from core.fem_engine import make_plane_stress_piola
@@ -230,8 +231,8 @@ if __name__ == "__main__" :
             material_model_name = rec["material_model_name"]
 
     # load precomputed dataset
-    if args.dataset_path and os.path.exists(args.dataset_path):
-        prep_dataset_path = os.path.abspath(args.dataset_path)
+    if args.dataset_path and dataset_exists(args.dataset_path):
+        prep_dataset_path = args.dataset_path
         print(f"[DATASET] Loading explicitly specified dataset: {prep_dataset_path}")
     elif args.dataset_path:
         raise FileNotFoundError(f"Explicitly specified --dataset_path not found: {args.dataset_path}")
@@ -693,6 +694,7 @@ if __name__ == "__main__" :
                 log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 0]),
                 log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1]),
                 log_sigma_global=jnp.array(log_sigma0, dtype=jnp.float64),
+                param_version=jnp.array(2.0),
                 **aniso_kwargs,
                 **kzz_noise_kwargs
             )
@@ -720,6 +722,7 @@ if __name__ == "__main__" :
                 log_sigma_fix_x=jax.random.normal(k3, (load_noise_std_steps.shape[0],)),
                 log_sigma_fix_y=jax.random.normal(k4, (load_noise_std_steps.shape[0],)),
                 log_sigma_global=jnp.array(log_sigma0, dtype=jnp.float64),
+                param_version=jnp.array(2.0),
                 **aniso_kwargs,
                 **kzz_noise_kwargs
             )

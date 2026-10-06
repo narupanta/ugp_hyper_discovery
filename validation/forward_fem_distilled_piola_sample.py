@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 # Import JAX-FEM specific modules.
 from jax_fem.generate_mesh import get_meshio_cell_type, Mesh
+from core.dataset_store import dataset_exists, load_dataset
 import jax.random as jr 
 jax.config.update("jax_enable_x64", True)
 
@@ -252,8 +253,8 @@ if __name__ == "__main__" :
 
     u_exp = None
     prep_dataset_path = None
-    if args.dataset_path and os.path.exists(args.dataset_path):
-        prep_dataset_path = os.path.abspath(args.dataset_path)
+    if args.dataset_path and dataset_exists(args.dataset_path):
+        prep_dataset_path = args.dataset_path
         print(f"[VAL] Using explicit dataset path: {prep_dataset_path}")
     else:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -286,7 +287,7 @@ if __name__ == "__main__" :
     u_true = None
     if prep_dataset_path is not None:
         try:
-            prep_data = np.load(prep_dataset_path, allow_pickle=True)
+            prep_data = load_dataset(prep_dataset_path)
             if "u_true" in prep_data:
                 u_true = prep_data["u_true"]
             elif "u" in prep_data:
@@ -559,6 +560,19 @@ if __name__ == "__main__" :
         except Exception as e:
             print(f"Could not load existing consolidated file: {e}. Starting fresh.")
 
+    # Worker shards are deleted after merging; a completed merged file in this folder means the work is done.
+    # Delete fem_distilled_samples.npz to force regeneration.
+    merged_file = os.path.join(save_path, "fem_distilled_samples.npz")
+    if file_name != "fem_distilled_samples.npz" and existing_u_pred is None and os.path.exists(merged_file):
+        try:
+            md = np.load(merged_file, allow_pickle=True)
+            if (bool(md.get("merged_complete", False)) and md["u_pred"].shape[1] == num_steps
+                    and str(md["control_mode"]) == control_mode and str(md["stress_mode"]) == stress_mode):
+                print(f"[VAL] Completed merged file {merged_file} ({md['u_pred'].shape[0]} samples) found; worker {args.worker_id} has nothing to do.")
+                num_existing = target_total_samples
+        except Exception as e:
+            print(f"[VAL] Could not inspect merged file {merged_file}: {e}")
+
     n_needed = target_total_samples - num_existing
     if n_needed <= 0:
         print(f"Target sample count ({target_total_samples}) already reached (current count: {num_existing}). Exiting.")
@@ -756,7 +770,8 @@ if __name__ == "__main__" :
 
             t_fem_duration = float(time.time() - t_fem_start)
             save_dict = {
-                "u_pred": combined_u,
+                # float32 halves the dominant array; ~1e-7 relative precision is ample for UQ metrics/plots
+                "u_pred": combined_u.astype(np.float32),
                 "selected_samples": combined_params,
                 "node_coords": node_coords,
                 "cells": cells,

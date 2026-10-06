@@ -527,41 +527,92 @@ def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path, aniso_z=None, an
     plt.close(fig2)
 
 
-def _compute_regime_transitions(learned_gp, F_all, gamma):
+def compute_interpolation_masks(learned_gp, F_all, I_obs=None, dev_tol: float = 1e-3, vol_tol: float = 1e-3):
     """
-    Computes interpolation/extrapolation transition gamma values for each deformation mode.
-    Returns: trans_tot, trans_dev, trans_vol as lists of float gamma values.
+    Interpolation/extrapolation masks of standard deformation modes with respect to the TRAINING DATA support.
+
+    psi = psi_dev(I1_bar, I2_bar) + psi_vol(J) [+ psi_aniso], so each GP component interpolates when its own
+    input lies in its data support: the convex hull of the observed (I1_bar, I2_bar), the observed J range and,
+    if anisotropic, the observed range of each anisotropic invariant.
+
+    F_all: (n_modes, n_points, 3, 3). I_obs: observed features (..., d) as saved in I_obs_all.npy
+    (dev in [:2], vol in [2:3], aniso in [3:]); falls back to the inducing points if None.
+    Returns dict of boolean arrays (n_modes, n_points): 'dev', 'vol', 'aniso', 'tot'.
     """
-    true_min_dev = jnp.array(learned_gp.min_dev) - 1e-4
-    true_max_dev = jnp.array(learned_gp.max_dev) + 1e-4
-    true_min_vol = jnp.array(learned_gp.min_vol) - 1e-4
-    true_max_vol = jnp.array(learned_gp.max_vol) + 1e-4
+    from scipy.spatial import ConvexHull, QhullError
 
-    trans_tot, trans_dev, trans_vol = [], [], []
+    if I_obs is None:
+        print("[regimes] Warning: no observed features given; using inducing points as data support.")
+        parts = [np.asarray(learned_gp.dev_z), np.asarray(learned_gp.vol_z)]
+        if getattr(learned_gp, "is_anisotropic", False):
+            parts.append(np.asarray(learned_gp.aniso_z))
+        I_obs = np.concatenate(parts, axis=-1)
+    I_obs = np.asarray(I_obs).reshape(-1, np.asarray(I_obs).shape[-1])
+    dev_obs, vol_obs, aniso_obs = I_obs[:, :2], I_obs[:, 2:3], I_obs[:, 3:]
 
+    try:
+        hull_eqs = ConvexHull(dev_obs).equations
+    except QhullError:  # degenerate (e.g. collinear) data: fall back to the bounding box
+        lo, hi = dev_obs.min(0), dev_obs.max(0)
+        hull_eqs = np.array([[-1, 0, lo[0]], [1, 0, -hi[0]], [0, -1, lo[1]], [0, 1, -hi[1]]], dtype=float)
+    vol_lo, vol_hi = vol_obs.min() - vol_tol, vol_obs.max() + vol_tol
+
+    masks = {"dev": [], "vol": [], "aniso": [], "tot": []}
     for mode in range(F_all.shape[0]):
         feats = jax.vmap(learned_gp.feature_extractor.extract)(F_all[mode])
-        dev_m, vol_m = feats[0], feats[1]
-        in_dev = ((dev_m[:, 0] >= true_min_dev[0]) & (dev_m[:, 0] <= true_max_dev[0]) &
-                  (dev_m[:, 1] >= true_min_dev[1]) & (dev_m[:, 1] <= true_max_dev[1]))
-        in_vol = (vol_m[:, 0] >= true_min_vol[0]) & (vol_m[:, 0] <= true_max_vol[0])
-        in_tot = in_dev & in_vol
-
-        def _get_trans(mask):
-            if not jnp.all(mask):
-                idx = int(jnp.argmax(~mask))
-                val = float(gamma[idx])
-                return float(gamma[1]) if idx == 0 else val
-            return float(gamma.max())
-
-        trans_dev.append(_get_trans(in_dev))
-        trans_vol.append(_get_trans(in_vol))
-        trans_tot.append(_get_trans(in_tot))
-
-    return trans_tot, trans_dev, trans_vol
+        dev_m, vol_m = np.asarray(feats[0]), np.asarray(feats[1])
+        in_dev = np.all(dev_m @ hull_eqs[:, :-1].T + hull_eqs[:, -1] <= dev_tol, axis=1)
+        in_vol = (vol_m[:, 0] >= vol_lo) & (vol_m[:, 0] <= vol_hi)
+        in_aniso = np.ones_like(in_dev)
+        if len(feats) > 2 and aniso_obs.shape[1] > 0:
+            a_m = np.asarray(feats[2])
+            in_aniso = np.all((a_m >= aniso_obs.min(0) - dev_tol) & (a_m <= aniso_obs.max(0) + dev_tol), axis=1)
+        masks["dev"].append(in_dev)
+        masks["vol"].append(in_vol)
+        masks["aniso"].append(in_aniso)
+        masks["tot"].append(in_dev & in_vol & in_aniso)
+    return {k: np.stack(v) for k, v in masks.items()}
 
 
-def plot_combined_validation(learned_gp, true_model, save_path, step):
+def shade_regimes(ax, gamma, inside, label: bool = False):
+    """Shades interpolation (green) / extrapolation (red) segments of one mode; a mode may cross the data
+    support several times, and every crossing is marked with a dotted line."""
+    gamma = np.asarray(gamma)
+    inside = np.asarray(inside, dtype=bool)
+    cross = np.where(np.diff(inside.astype(int)) != 0)[0]
+    # boundary halfway between the last point on one side and the first on the other
+    bounds = [gamma[0]] + [0.5 * (gamma[i] + gamma[i + 1]) for i in cross] + [gamma[-1]]
+    states = [inside[0]] + [inside[i + 1] for i in cross]
+    labelled = set()
+    if label:  # proxies: both regimes appear in the legend even if this mode never leaves one of them
+        for name, color in (("Interpolation", "green"), ("Extrapolation", "red")):
+            ax.fill_between([], [], color=color, alpha=0.10, label=name)
+            labelled.add(name)
+    for g0, g1, ins in zip(bounds[:-1], bounds[1:], states):
+        name = "Interpolation" if ins else "Extrapolation"
+        ax.axvspan(g0, g1, color="green" if ins else "red", alpha=0.10, zorder=1,
+                   label=name if (label and name not in labelled) else "")
+        labelled.add(name)
+    for b in bounds[1:-1]:
+        ax.axvline(x=b, color="darkred", linestyle=":", lw=1.5, alpha=0.8, zorder=4)
+
+
+def _compute_regime_transitions(learned_gp, F_all, gamma, I_obs=None):
+    """
+    First gamma at which each mode leaves the data support (gamma.max() if it never does).
+    Returns: trans_tot, trans_dev, trans_vol as lists of float gamma values.
+    """
+    masks = compute_interpolation_masks(learned_gp, F_all, I_obs)
+    gamma = np.asarray(gamma)
+
+    def first_exit(mask):
+        return float(gamma[int(np.argmax(~mask))]) if not mask.all() else float(gamma.max())
+
+    return ([first_exit(m) for m in masks["tot"]], [first_exit(m) for m in masks["dev"]],
+            [first_exit(m) for m in masks["vol"]])
+
+
+def plot_combined_validation(learned_gp, true_model, save_path, step, I_obs=None):
     """Plots clamped strain energy density and stress predictions against ground truth across 6 deformation modes."""
     apply_style()
     num_points = 50
@@ -609,7 +660,7 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
 
     P_samples = jax.vmap(piola_vmap, in_axes=(None, 0))(F_all, keys)
     P_dets = [jax.vmap(learned_gp.piola_det)(F_all[mode]) for mode in range(len(mode_names))]
-    trans_tot, _, _ = _compute_regime_transitions(learned_gp, F_all, gamma)
+    regime = compute_interpolation_masks(learned_gp, F_all, I_obs)
 
     fig, axes = plt.subplots(6, 2, figsize=(12, 24))
     fig.suptitle(f"Material Discovery Validation - Step {step}", fontsize=18, y=1.01)
@@ -669,13 +720,8 @@ def plot_combined_validation(learned_gp, true_model, save_path, step):
 
         ax_psi.set_title(f"{name}: Energy")
         ax_p.set_title(f"{name}: Stress")
-        trans_g = trans_tot[i]
-        max_g = float(gamma.max())
         for ax in [ax_psi, ax_p]:
-            ax.axvspan(0, min(trans_g, max_g), color='green', alpha=0.10, zorder=1, label="Interpolation" if (i == 0 and ax == ax_psi) else "")
-            if trans_g < max_g:
-                ax.axvspan(trans_g, max_g, color='red', alpha=0.10, zorder=1, label="Extrapolation" if (i == 0 and ax == ax_psi) else "")
-                ax.axvline(x=trans_g, color='darkred', linestyle=':', lw=1.5, alpha=0.8, zorder=4)
+            shade_regimes(ax, gamma, regime["tot"][i], label=(i == 0 and ax == ax_psi))
             ax.set_xlabel(r"$\gamma$")
             ax.grid(True, alpha=0.25)
             if i == 0:
@@ -760,7 +806,7 @@ def plot_stress_validation(gp_model, true_model, save_path):
     plt.close(fig)
 
 
-def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
+def plot_energy_decomposition_validation(learned_gp, true_model, save_path, I_obs=None):
     """Plots energy decomposition (Deviatoric, Volumetric, Anisotropic, Total) across 6 deformation modes."""
     apply_style()
     print("Generating Energy Decomposition Validation Plot...")
@@ -832,7 +878,7 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
     psi_samples_vol = jnp.stack(psi_samples_vol, axis=0)
     psi_samples_aniso = jnp.stack(psi_samples_aniso_list, axis=0)
     psi_samples_tot = jnp.stack(psi_samples_tot, axis=0)
-    trans_tot, trans_dev, trans_vol = _compute_regime_transitions(learned_gp, F_all, gamma)
+    regime = compute_interpolation_masks(learned_gp, F_all, I_obs)
 
     def calc_metrics(true, mean, std):
         rmse = jnp.sqrt(jnp.mean((true - mean)**2))
@@ -846,12 +892,12 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
 
     for i, name in enumerate(mode_names):
         configs = [
-            (0, "Deviatoric", psi_true_dev[i] if psi_true_dev is not None else None, psi_mean_dev[i], psi_std_dev[i], psi_samples_dev[:, i, :], trans_dev[i]),
-            (1, "Volumetric", psi_true_vol[i] if psi_true_vol is not None else None, psi_mean_vol[i], psi_std_vol[i], psi_samples_vol[:, i, :], trans_vol[i]),
-            (2, "Anisotropic", psi_true_aniso[i] if psi_true_aniso is not None else None, psi_mean_aniso[i], psi_std_aniso[i], psi_samples_aniso[:, i, :], trans_tot[i]),
-            (3, "Total Energy", psi_true_tot[i] if psi_true_tot is not None else None, psi_mean_tot[i], psi_std_tot[i], psi_samples_tot[:, i, :], trans_tot[i])
+            (0, "Deviatoric", psi_true_dev[i] if psi_true_dev is not None else None, psi_mean_dev[i], psi_std_dev[i], psi_samples_dev[:, i, :], regime["dev"][i]),
+            (1, "Volumetric", psi_true_vol[i] if psi_true_vol is not None else None, psi_mean_vol[i], psi_std_vol[i], psi_samples_vol[:, i, :], regime["vol"][i]),
+            (2, "Anisotropic", psi_true_aniso[i] if psi_true_aniso is not None else None, psi_mean_aniso[i], psi_std_aniso[i], psi_samples_aniso[:, i, :], regime["aniso"][i]),
+            (3, "Total Energy", psi_true_tot[i] if psi_true_tot is not None else None, psi_mean_tot[i], psi_std_tot[i], psi_samples_tot[:, i, :], regime["tot"][i])
         ]
-        for col, col_name, true_val, mean_val, std_val, samples, trans_g in configs:
+        for col, col_name, true_val, mean_val, std_val, samples, inside in configs:
             ax = axes[i, col]
             if true_val is not None:
                 ax.plot(gamma, true_val, 'k--', lw=1.8, label="True", zorder=5)
@@ -859,11 +905,7 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
             ax.plot(gamma, mean_val, color="#1f77b4", lw=2, label="GP Mean", zorder=3)
             ax.fill_between(gamma, mean_val - 1.96 * std_val, mean_val + 1.96 * std_val, color="#1f77b4", alpha=0.2, zorder=2)
 
-            max_g = float(gamma.max())
-            ax.axvspan(0, min(trans_g, max_g), color='green', alpha=0.10, zorder=1, label="Interpolation" if (i == 0 and col == 3) else "")
-            if trans_g < max_g:
-                ax.axvspan(trans_g, max_g, color='red', alpha=0.10, zorder=1, label="Extrapolation" if (i == 0 and col == 3) else "")
-                ax.axvline(x=trans_g, color='darkred', linestyle=':', lw=1.5, alpha=0.8, zorder=4)
+            shade_regimes(ax, gamma, inside, label=(i == 0 and col == 3))
 
             if true_val is not None:
                 rmse, coverage = calc_metrics(true_val, mean_val, std_val)
@@ -879,7 +921,7 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path):
 
             pad = (y_max - y_min) * 0.1 if y_max != y_min else 1.0
             ax.set_ylim(y_min - pad, y_max + pad)
-            ax.set_xlim(0, max_g)
+            ax.set_xlim(0, float(gamma.max()))
             if i == 0 and col == 3:
                 ax.legend(loc="upper left", framealpha=0.9)
 

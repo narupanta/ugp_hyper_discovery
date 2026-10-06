@@ -6,6 +6,7 @@ deformation modes and material components, and uniform save utilities.
 """
 
 import os
+from core.figure_policy import png_enabled
 import logging
 from typing import Optional, Dict, Any, List
 import matplotlib.pyplot as plt
@@ -211,7 +212,7 @@ def save_figure(
 
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
     
-    if make_png and path.endswith(".pdf"):
+    if make_png and path.endswith(".pdf") and png_enabled():
         png_path = path[:-4] + ".png"
         fig.savefig(png_path, dpi=dpi, bbox_inches="tight")
 

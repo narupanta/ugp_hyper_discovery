@@ -3,6 +3,7 @@ import sys
 import json
 import argparse
 import numpy as np
+from core.dataset_store import dataset_exists, load_dataset
 import jax
 from jax import config
 config.update("jax_enable_x64", True)
@@ -21,7 +22,29 @@ from core.plotter import (
 from core.features import AnisotropicFeatureExtractor
 from core.utils import infer_material_model_name, fto3x3
 
+def gp_config_from_run(saved_model_dir):
+    """GP settings the run was trained with (parameter transforms, jitter, RFF count) from its config.json."""
+    cfg_file = os.path.join(saved_model_dir, "config.json")
+    if not os.path.exists(cfg_file):
+        return {}
+    with open(cfg_file, "r") as f:
+        cfg = json.load(f)
+    keys = {"num_rff": "L", "kzz_jitter": "kzz_jitter", "u_var_anchor": "u_var_anchor",
+            "constraint_lengthscale": "constraint_lengthscale", "normalize_ell": "normalize_ell"}
+    return {dst: cfg[src] for src, dst in keys.items() if cfg.get(src) is not None}
+
+
 def find_dataset_path(saved_model_dir, true_model_name):
+    meta_path = os.path.join(saved_model_dir, "metadata.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r") as mf:
+                recorded = json.load(mf).get("dataset_path")
+            if recorded and dataset_exists(recorded):
+                return recorded
+        except Exception:
+            pass
+
     saved_dir_abs = os.path.abspath(saved_model_dir)
     all_parts = saved_dir_abs.split(os.sep)
 
@@ -104,22 +127,24 @@ def main():
         raw_params=best_params, I_z=I_z, min_dev=min_dev, min_vol=min_vol, max_dev=max_dev, max_vol=max_vol,
         beta=1.0, feature_extractor=feature_extractor,
         min_aniso=min_aniso, max_aniso=max_aniso, aniso_z=aniso_z,
-        covariance_mode=cov_mode
+        covariance_mode=cov_mode, **gp_config_from_run(saved_model_dir)
     )
+    obs_file = os.path.join(saved_model_dir, "I_obs_all.npy")
+    I_obs = np.load(obs_file) if os.path.exists(obs_file) else None
 
     # 1. Combined Validation Plot (Standard loading paths)
     print("Generating combined validation plot (standard loading paths)...")
-    plot_combined_validation(learned_gp, true_model, saved_model_dir, step=40000)
+    plot_combined_validation(learned_gp, true_model, saved_model_dir, step=40000, I_obs=I_obs)
 
     # 2. Energy Decomposition Plot
     print("Generating energy decomposition plot...")
-    plot_energy_decomposition_validation(learned_gp, true_model, saved_model_dir)
+    plot_energy_decomposition_validation(learned_gp, true_model, saved_model_dir, I_obs=I_obs)
 
     # 3. Training Parity Plot
     dataset_path = find_dataset_path(saved_model_dir, true_model_name)
-    if dataset_path and os.path.exists(dataset_path):
+    if dataset_path and dataset_exists(dataset_path):
         print(f"Generating training parity plot from dataset: {dataset_path}...")
-        prep_data = np.load(dataset_path, allow_pickle=True)
+        prep_data = load_dataset(dataset_path)
         F_train_full_3x3 = jax.vmap(jax.vmap(fto3x3))(prep_data["F"])
         r2_res = plot_training_r2(learned_gp, true_model, F_train_full_3x3, saved_model_dir)
         r2, rmse, coverage = r2_res[0], r2_res[1], r2_res[2]

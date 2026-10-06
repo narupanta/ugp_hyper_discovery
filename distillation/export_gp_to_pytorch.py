@@ -7,6 +7,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import jax
 import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
+from core.dataset_store import dataset_exists, load_dataset
 from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.utils import farthest_point_sampling, stratified_high_strain_fps, uniform_energy_fps, compute_invariants_np, infer_material_model_name
@@ -373,8 +374,8 @@ def main():
             
         prep_dataset_path = None
         load_steps = None
-        if args.dataset_path and os.path.exists(args.dataset_path):
-            prep_dataset_path = os.path.abspath(args.dataset_path)
+        if args.dataset_path and dataset_exists(args.dataset_path):
+            prep_dataset_path = args.dataset_path
             print(f"[EXPORT] Using explicit dataset path: {prep_dataset_path}")
         else:
             # Check config.json in saved_model_dir or parent
@@ -394,7 +395,7 @@ def main():
                                     os.path.abspath(cfg_dsp)
                                 ]
                                 for cand in candidates:
-                                    if os.path.exists(cand):
+                                    if dataset_exists(cand):
                                         prep_dataset_path = cand
                                         print(f"[EXPORT] Found dataset path from config.json: {prep_dataset_path}")
                                         break
@@ -412,7 +413,7 @@ def main():
                             mdata = json.load(mf)
                             seed_val = mdata.get("seed")
                             meta_dsp = mdata.get("dataset_path")
-                            if meta_dsp and os.path.exists(meta_dsp):
+                            if meta_dsp and dataset_exists(meta_dsp):
                                 prep_dataset_path = meta_dsp
                                 print(f"[EXPORT] Found dataset path from metadata.json: {prep_dataset_path}")
                     except Exception as e:
@@ -428,7 +429,7 @@ def main():
                             with open(yaml_file, "r") as yf:
                                 ycfg = yaml.safe_load(yf) or {}
                                 y_dsp = ycfg.get("dataset_path")
-                                if y_dsp and os.path.exists(y_dsp):
+                                if y_dsp and dataset_exists(y_dsp):
                                     prep_dataset_path = y_dsp
                                     print(f"[EXPORT] Found dataset path from config.yaml: {prep_dataset_path}")
                                     break
@@ -475,7 +476,7 @@ def main():
             if prep_dataset_path is not None:
                 print(f"[EXPORT] Found matching dataset: {prep_dataset_path}")
         if prep_dataset_path is not None:
-            prep_data = np.load(prep_dataset_path, allow_pickle=True)
+            prep_data = load_dataset(prep_dataset_path)
             F_all_steps_2x2 = prep_data["F"]
             F_all_steps_3d = prep_data.get("F_3d", None)
             
@@ -728,7 +729,9 @@ def main():
         try:
             from core.plotter import plot_energy_decomposition_validation
             print(f"Generating energy decomposition validation plot (GP Posterior vs Ground Truth) for {out_dir}...")
-            plot_energy_decomposition_validation(gp_model, true_model, out_dir)
+            obs_file = os.path.join(args.saved_model_dir, "I_obs_all.npy")
+            plot_energy_decomposition_validation(gp_model, true_model, out_dir,
+                                                 I_obs=np.load(obs_file) if os.path.exists(obs_file) else None)
             print("Successfully saved energy_decomposition.pdf in export directory.")
         except Exception as e:
             print(f"Failed to plot energy decomposition validation: {e}")
