@@ -22,7 +22,7 @@ jax.config.update("jax_enable_x64", True)
 
 
 class HyperelasticGPTrainer:
-    def __init__(self, model: SparseHyperelasticityGP, initial_params, loss_fn, opt_state, optimizer, save_path, true_mat_model, I_z, I_all, min_dev, min_vol, max_dev, max_vol, freeze_fn=None, seed=None, vfm_mode: str = "linear_triangle"):
+    def __init__(self, model: SparseHyperelasticityGP, initial_params, loss_fn, opt_state, optimizer, save_path, true_mat_model, I_z, I_all, min_dev, min_vol, max_dev, max_vol, freeze_fn=None, seed=None, vfm_mode: str = "linear_triangle", free_noise_mode: str = "constant"):
         self.model = model
         self.params = initial_params
         self.opt_state = opt_state
@@ -30,6 +30,7 @@ class HyperelasticGPTrainer:
         self.save_path = save_path
         self.true_mat_model = true_mat_model
         self.vfm_mode = vfm_mode
+        self.free_noise_mode = free_noise_mode
         
         import json
         with open(f"{self.save_path}/metadata.json", "w") as f:
@@ -39,7 +40,8 @@ class HyperelasticGPTrainer:
                 "augmented_var_dist": 1,
                 "normalize_ell": getattr(self.model, "normalize_ell", 0),
                 "constraint_lengthscale": getattr(self.model, "constraint_lengthscale", 1),
-                "vfm_mode": vfm_mode
+                "vfm_mode": vfm_mode,
+                "free_noise_mode": free_noise_mode
             }
             if seed is not None:
                 meta["seed"] = seed
@@ -106,10 +108,15 @@ class HyperelasticGPTrainer:
             f"phy={phy_loss:.6f} | phy2 ={phys_loss2:.6f}\n"
         )
         cur_params = self.model.load_params(params)
-        clean_params = jax.tree_util.tree_map(
-            lambda x: x.tolist() if hasattr(x, 'tolist') else x, 
-            cur_params
-        )
+        def _clean_for_log(x):
+            if hasattr(x, 'tolist'):
+                x_np = np.asarray(x)
+                if x_np.ndim > 0 and x_np.size > 10:
+                    return f"arr(shape={x_np.shape}, mean={float(np.mean(x_np)):.4e}, min={float(np.min(x_np)):.4e}, max={float(np.max(x_np)):.4e})"
+                return x.tolist()
+            return x
+
+        clean_params = jax.tree_util.tree_map(_clean_for_log, cur_params)
         log_message += f"params: {clean_params}\n"
         log_message += "-"*50 + "\n"
 

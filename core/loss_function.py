@@ -61,7 +61,7 @@ def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.n
 
     sigma_global = getattr(p, "sigma_global", None)
     if sigma_global is None:
-        sigma_global = 0.5 * (sigma_free_x + sigma_free_y)
+        sigma_global = 0.5 * (jnp.mean(sigma_free_x) + jnp.mean(sigma_free_y))
     sigma_global = jnp.maximum(sigma_global, 1e-6)
 
     # vmap over load steps for the VFM loss
@@ -85,15 +85,58 @@ def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.n
         fix_x_log_likelihood = reaction_loss_weight * jnp.sum(- (1.0 / (2 * (sigma_fix_x**2))) * (fix_x_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_x**2)))
         fix_y_log_likelihood = reaction_loss_weight * jnp.sum(- (1.0 / (2 * (sigma_fix_y**2))) * (fix_y_loss**2) - 0.5 * jnp.log(2 * jnp.pi * (sigma_fix_y**2)))
 
-    # Nodal residuals log-likelihood (free DOFs)
-    if normalize_ell == 1:
-        n_free_total_x = n_steps * n_freedofs_x
-        n_free_total_y = n_steps * n_freedofs_y
-        free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * (jnp.sum(free_x_loss**2) / n_free_total_x) - 0.5 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
-        free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * (jnp.sum(free_y_loss**2) / n_free_total_y) - 0.5 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
+    # Identify free nodes masks for nodal-diagonal variance resolution
+    is_fix_x = (node_type[:, 1] == 1)
+    is_fix_y = (node_type[:, 2] == 1)
+    if control_mode == "displacement":
+        is_free_x = ~(is_fix_x | (node_type[:, 3] == 1))
+        is_free_y = ~(is_fix_y | (node_type[:, 4] == 1))
     else:
-        free_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(free_x_loss**2) - (n_steps * n_freedofs_x) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
-        free_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(free_y_loss**2) - (n_steps * n_freedofs_y) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
+        is_free_x = ~is_fix_x
+        is_free_y = ~is_fix_y
+
+    def _extract_active_sigma(sigma, is_free_mask):
+        if sigma.ndim == 0 or sigma.size == 1:
+            return jnp.squeeze(sigma)
+        if sigma.shape[0] == is_free_mask.shape[0]:
+            return sigma[is_free_mask]
+        return sigma
+
+    sig_x = _extract_active_sigma(sigma_free_x, is_free_x)
+    sig_y = _extract_active_sigma(sigma_free_y, is_free_y)
+
+    # Nodal residuals log-likelihood (supports both constant scalar and diagonal nodal vectors)
+    if sig_x.ndim == 0:
+        if normalize_ell == 1:
+            n_free_total_x = n_steps * n_freedofs_x
+            free_x_log_likelihood = - (1.0 / (2 * (sig_x**2))) * (jnp.sum(free_x_loss**2) / n_free_total_x) - 0.5 * jnp.log(2 * jnp.pi * (sig_x**2))
+        else:
+            free_x_log_likelihood = - (1.0 / (2 * (sig_x**2))) * jnp.sum(free_x_loss**2) - (n_steps * n_freedofs_x) / 2.0 * jnp.log(2 * jnp.pi * (sig_x**2))
+    else:
+        node_sq_res_x = jnp.sum(free_x_loss**2, axis=0)  # (n_freedofs_x,)
+        quad_terms_x = - 0.5 * (node_sq_res_x / (sig_x**2))
+        log_terms_x = - 0.5 * n_steps * jnp.log(2.0 * jnp.pi * (sig_x**2))
+        if normalize_ell == 1:
+            n_free_total_x = n_steps * n_freedofs_x
+            free_x_log_likelihood = jnp.sum(quad_terms_x) / n_free_total_x + jnp.sum(log_terms_x) / n_free_total_x
+        else:
+            free_x_log_likelihood = jnp.sum(quad_terms_x + log_terms_x)
+
+    if sig_y.ndim == 0:
+        if normalize_ell == 1:
+            n_free_total_y = n_steps * n_freedofs_y
+            free_y_log_likelihood = - (1.0 / (2 * (sig_y**2))) * (jnp.sum(free_y_loss**2) / n_free_total_y) - 0.5 * jnp.log(2 * jnp.pi * (sig_y**2))
+        else:
+            free_y_log_likelihood = - (1.0 / (2 * (sig_y**2))) * jnp.sum(free_y_loss**2) - (n_steps * n_freedofs_y) / 2.0 * jnp.log(2 * jnp.pi * (sig_y**2))
+    else:
+        node_sq_res_y = jnp.sum(free_y_loss**2, axis=0)  # (n_freedofs_y,)
+        quad_terms_y = - 0.5 * (node_sq_res_y / (sig_y**2))
+        log_terms_y = - 0.5 * n_steps * jnp.log(2.0 * jnp.pi * (sig_y**2))
+        if normalize_ell == 1:
+            n_free_total_y = n_steps * n_freedofs_y
+            free_y_log_likelihood = jnp.sum(quad_terms_y) / n_free_total_y + jnp.sum(log_terms_y) / n_free_total_y
+        else:
+            free_y_log_likelihood = jnp.sum(quad_terms_y + log_terms_y)
 
     # Split global virtual field residuals into X and Y equations:
     Mx = n_vfs // 2
@@ -102,14 +145,16 @@ def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.n
     global_y_loss = global_loss[:, Mx:]
 
     # Global virtual fields log-likelihood (separate X and Y equations)
+    sig_gx = jnp.mean(sig_x) if sig_x.ndim > 0 else sig_x
+    sig_gy = jnp.mean(sig_y) if sig_y.ndim > 0 else sig_y
     if normalize_ell == 1:
         n_global_total_x = n_steps * Mx
         n_global_total_y = n_steps * My
-        global_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * (jnp.sum(global_x_loss**2) / n_global_total_x) - 0.5 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
-        global_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * (jnp.sum(global_y_loss**2) / n_global_total_y) - 0.5 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
+        global_x_log_likelihood = - (1.0 / (2 * (sig_gx**2))) * (jnp.sum(global_x_loss**2) / n_global_total_x) - 0.5 * jnp.log(2 * jnp.pi * (sig_gx**2))
+        global_y_log_likelihood = - (1.0 / (2 * (sig_gy**2))) * (jnp.sum(global_y_loss**2) / n_global_total_y) - 0.5 * jnp.log(2 * jnp.pi * (sig_gy**2))
     else:
-        global_x_log_likelihood = - (1.0 / (2 * (sigma_free_x**2))) * jnp.sum(global_x_loss**2) - (n_steps * Mx) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_x**2))
-        global_y_log_likelihood = - (1.0 / (2 * (sigma_free_y**2))) * jnp.sum(global_y_loss**2) - (n_steps * My) / 2.0 * jnp.log(2 * jnp.pi * (sigma_free_y**2))
+        global_x_log_likelihood = - (1.0 / (2 * (sig_gx**2))) * jnp.sum(global_x_loss**2) - (n_steps * Mx) / 2.0 * jnp.log(2 * jnp.pi * (sig_gx**2))
+        global_y_log_likelihood = - (1.0 / (2 * (sig_gy**2))) * jnp.sum(global_y_loss**2) - (n_steps * My) / 2.0 * jnp.log(2 * jnp.pi * (sig_gy**2))
 
     sum_nodal_loss = jnp.sum(free_x_loss**2) + jnp.sum(free_y_loss**2)
     sum_global_loss = jnp.sum(global_loss**2)

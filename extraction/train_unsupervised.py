@@ -95,6 +95,9 @@ def parse_args():
                         help="Whether to constrain lengthscales to domain bounds (1) or unconstrained softplus (0, allows ARD pruning). If None, loaded from recipe or defaults to 1.")
     parser.add_argument('--reaction_loss_weight', type=str, default=None,
                         help="Scaling coefficient for reaction loss (fix_x, fix_y). Can be a float (e.g. '1.0'), or 'auto' / 'ratio' to scale by #free_nodes / #boundary_nodes. If None, loaded from recipe or defaults to 1.0.")
+    parser.add_argument('--free_noise_mode', type=str, default="constant",
+                        choices=["constant", "nodal", "diagonal"],
+                        help="Noise variance parameterization for free PDE nodes: 'constant' (single scalar for all free nodes) or 'nodal'/'diagonal' (independent per-node variance).")
     return parser.parse_args()
 
 def sigma_fix_to_log_sigma_fix(sigma_fix) :
@@ -105,7 +108,7 @@ def inv_softplus(y):
     y_safe = jnp.maximum(y, 1e-15)
     return jnp.where(y_safe > 20.0, y_safe, jnp.log(jnp.expm1(y_safe)))
 
-def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag"):
+def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag", is_free_x=None, is_free_y=None):
     def freeze_fn(grads):
         replace_kwargs = {}
 
@@ -137,6 +140,12 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
                 "raw_aniso_u_var": raw_aniso_u_var
             })
 
+        # Freeze fixed node noise components if log_sigma_free is a vector (nodal/diagonal mode)
+        if is_free_x is not None and getattr(grads, "log_sigma_free_x", None) is not None and grads.log_sigma_free_x.ndim > 0:
+            replace_kwargs["log_sigma_free_x"] = jnp.where(is_free_x, grads.log_sigma_free_x, 0.0)
+        if is_free_y is not None and getattr(grads, "log_sigma_free_y", None) is not None and grads.log_sigma_free_y.ndim > 0:
+            replace_kwargs["log_sigma_free_y"] = jnp.where(is_free_y, grads.log_sigma_free_y, 0.0)
+
         if replace_kwargs:
             grads = grads._replace(**replace_kwargs)
         
@@ -149,7 +158,7 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
             
         # 3. Optionally freeze ALL inducing point positions (from FPS)
         if is_fixed_z:
-            replace_kwargs = {
+            replace_kwargs_z = {
                 "raw_dev_z": jnp.zeros_like(grads.raw_dev_z),
                 "raw_vol_z": jnp.zeros_like(grads.raw_vol_z)
             }
@@ -158,8 +167,8 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
                 # Only keep aniso inducing points unfrozen if fiber angle is being learned dynamically.
                 is_unknown_fiber = getattr(grads, "raw_aniso_theta_mean", None) is not None
                 if not is_unknown_fiber:
-                    replace_kwargs["raw_aniso_z"] = jnp.zeros_like(grads.raw_aniso_z)
-            grads = grads._replace(**replace_kwargs)
+                    replace_kwargs_z["raw_aniso_z"] = jnp.zeros_like(grads.raw_aniso_z)
+            grads = grads._replace(**replace_kwargs_z)
         return grads
     return freeze_fn
 
@@ -300,10 +309,58 @@ if __name__ == "__main__" :
             reaction_loss_weight = 1.0
         print(f"[CONFIGURATION] Reaction loss weight coefficient: {reaction_loss_weight}")
 
+    # Resolve trainable_kzz_noise and kzz_jitter from CLI or recipe
+    rec_trainable_kzz = rec.get("trainable_kzz_noise", False)
+    if isinstance(rec_trainable_kzz, str):
+        rec_trainable_kzz = rec_trainable_kzz.lower() in ["true", "1", "yes"]
+    trainable_kzz_noise = bool(args.trainable_kzz_noise or rec_trainable_kzz)
+
+    rec_kzz_jitter = rec.get("kzz_jitter", None)
+    if rec_kzz_jitter is not None and args.kzz_jitter == 1e-8:
+        kzz_jitter = float(rec_kzz_jitter)
+    else:
+        kzz_jitter = float(args.kzz_jitter)
+
+    if trainable_kzz_noise:
+        print(f"[CONFIGURATION] Trainable kzz_noise enabled (initial value: {kzz_jitter:.2e})")
+    else:
+        print(f"[CONFIGURATION] Fixed kzz_jitter: {kzz_jitter:.2e}")
+
+    # Resolve free_noise_mode from CLI or recipe
+    rec_free_noise_mode = rec.get("free_noise_mode", "constant")
+    free_noise_mode = args.free_noise_mode if args.free_noise_mode != "constant" else rec_free_noise_mode
+    free_noise_mode = str(free_noise_mode).lower()
+
+    # Identify free nodes for boundary freezing and noise initialization
+    is_fix_x = (node_type[:, 1] == 1)
+    is_fix_y = (node_type[:, 2] == 1)
+    if control_mode == "displacement":
+        is_free_x = ~(is_fix_x | (node_type[:, 3] == 1))
+        is_free_y = ~(is_fix_y | (node_type[:, 4] == 1))
+    else:
+        is_free_x = ~is_fix_x
+        is_free_y = ~is_fix_y
+
+    is_free_x_jnp = jnp.asarray(is_free_x)
+    is_free_y_jnp = jnp.asarray(is_free_y)
+
+    if free_noise_mode in ["nodal", "diagonal"]:
+        n_nodes = node_type.shape[0]
+        log_sigma_free_x_init = jnp.zeros((n_nodes,), dtype=jnp.float64)
+        log_sigma_free_y_init = jnp.zeros((n_nodes,), dtype=jnp.float64)
+        print(f"[CONFIGURATION] Heteroscedastic free residual noise enabled: {free_noise_mode.upper()} ({n_nodes} nodes)")
+    else:
+        log_sigma_free_x_init = jnp.log(jnp.array(1.0, dtype=jnp.float64))
+        log_sigma_free_y_init = jnp.log(jnp.array(1.0, dtype=jnp.float64))
+        print(f"[CONFIGURATION] Constant free residual noise scalar enabled.")
+
     config_dict["control_mode"] = control_mode
     config_dict["stress_mode"] = stress_mode
     config_dict["constraint_lengthscale"] = constraint_lengthscale
     config_dict["reaction_loss_weight"] = reaction_loss_weight
+    config_dict["trainable_kzz_noise"] = trainable_kzz_noise
+    config_dict["kzz_jitter"] = kzz_jitter
+    config_dict["free_noise_mode"] = free_noise_mode
     with open(os.path.join(save_path, "config.json"), "w") as f:
         json.dump(config_dict, f, indent=4)
     with open(os.path.join(save_path, "config.yaml"), "w") as f:
@@ -567,8 +624,8 @@ if __name__ == "__main__" :
                 aniso_kwargs["raw_aniso_theta_mean"] = jnp.array(raw_theta)
 
         kzz_noise_kwargs = {}
-        if args.trainable_kzz_noise:
-            kzz_noise_kwargs["log_kzz_noise"] = jnp.log(jnp.array(args.kzz_jitter, dtype=jnp.float64))
+        if trainable_kzz_noise:
+            kzz_noise_kwargs["log_kzz_noise"] = jnp.log(jnp.array(kzz_jitter, dtype=jnp.float64))
 
         if is_fixed_reaction_force_noise:
             params = GPRawParams(
@@ -589,8 +646,8 @@ if __name__ == "__main__" :
                 raw_vol_u_var=raw_vol_u_var_init,
 
                 # Noise parameters (PDE residual noise)
-                log_sigma_free_x=jnp.log(jnp.array(1.0)),
-                log_sigma_free_y=jnp.log(jnp.array(1.0)),
+                log_sigma_free_x=log_sigma_free_x_init,
+                log_sigma_free_y=log_sigma_free_y_init,
                 log_sigma_fix_x=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 0]),
                 log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1]),
                 log_sigma_global=jnp.log(jnp.array(1.0)),
@@ -616,8 +673,8 @@ if __name__ == "__main__" :
                 raw_vol_u_var=raw_vol_u_var_init,
 
                 # Noise parameters (PDE residual noise)
-                log_sigma_free_x=jnp.log(jnp.array(1.0)),
-                log_sigma_free_y=jnp.log(jnp.array(1.0)),
+                log_sigma_free_x=log_sigma_free_x_init,
+                log_sigma_free_y=log_sigma_free_y_init,
                 log_sigma_fix_x=jax.random.normal(k3, (load_noise_std_steps.shape[0],)),
                 log_sigma_fix_y=jax.random.normal(k4, (load_noise_std_steps.shape[0],)),
                 log_sigma_global=jnp.log(jnp.array(1.0)),
@@ -647,7 +704,7 @@ if __name__ == "__main__" :
         covariance_mode=args.covariance_mode,
         normalize_ell=args.normalize_ell,
         u_var_anchor=args.u_var_anchor,
-        kzz_jitter=args.kzz_jitter,
+        kzz_jitter=kzz_jitter,
         constraint_lengthscale=constraint_lengthscale
     )
 
@@ -684,7 +741,7 @@ if __name__ == "__main__" :
                 covariance_mode=args.covariance_mode,
                 normalize_ell=args.normalize_ell,
                 u_var_anchor=args.u_var_anchor,
-                kzz_jitter=args.kzz_jitter,
+                kzz_jitter=kzz_jitter,
                 constraint_lengthscale=constraint_lengthscale
             )
         else:
@@ -723,9 +780,10 @@ if __name__ == "__main__" :
         min_vol=min_vol,
         max_dev=max_dev,
         max_vol=max_vol,
-        freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode),
+        freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode, is_free_x=is_free_x_jnp, is_free_y=is_free_y_jnp),
         seed=args.seed,
-        vfm_mode=args.vfm_mode
+        vfm_mode=args.vfm_mode,
+        free_noise_mode=free_noise_mode
     )
 
     meta_path = os.path.join(save_path, "metadata.json")
@@ -771,7 +829,7 @@ if __name__ == "__main__" :
         covariance_mode=args.covariance_mode,
         normalize_ell=args.normalize_ell,
         u_var_anchor=args.u_var_anchor,
-        kzz_jitter=args.kzz_jitter,
+        kzz_jitter=kzz_jitter,
         constraint_lengthscale=constraint_lengthscale
     )
     F_train_full_3x3 = load_f3x3_from_dataset(prep_data, material_model=true_mat_model)
@@ -864,15 +922,36 @@ if __name__ == "__main__" :
         "load_noise": float(args.load_noise),
         "fiber_direction": pred_deg,
         "vfm_mode": args.vfm_mode,
-        "sigma_free_x": float(phys_params.sigma_free_x),
-        "sigma_free_y": float(phys_params.sigma_free_y),
+        "free_noise_mode": free_noise_mode,
+        "sigma_free_x": float(phys_params.sigma_free_x) if np.ndim(phys_params.sigma_free_x) == 0 else np.array(phys_params.sigma_free_x).tolist(),
+        "sigma_free_y": float(phys_params.sigma_free_y) if np.ndim(phys_params.sigma_free_y) == 0 else np.array(phys_params.sigma_free_y).tolist(),
         "sigma_fix_x": np.array(phys_params.sigma_fix_x).tolist(),
         "sigma_fix_y": np.array(phys_params.sigma_fix_y).tolist(),
         "sigma_global": float(phys_params.sigma_global) if phys_params.sigma_global is not None else None,
     }
+    if np.ndim(phys_params.sigma_free_x) > 0:
+        metrics["sigma_free_x_mean"] = float(np.mean(phys_params.sigma_free_x))
+        metrics["sigma_free_y_mean"] = float(np.mean(phys_params.sigma_free_y))
     
     with open(os.path.join(save_path, "extraction_metrics.json"), "w") as f:
         json.dump(metrics, f, indent=4)
+
+    # 2D Spatial distribution plot of learned nodal noise
+    if free_noise_mode in ["nodal", "diagonal"] or np.ndim(phys_params.sigma_free_x) > 0:
+        try:
+            print("Generating 2D Spatial Distribution of Learned Nodal Noise...")
+            from plots.training import plot_nodal_noise_spatial_distribution
+            plot_nodal_noise_spatial_distribution(
+                mesh_pos=mesh_pos,
+                node_type=node_type,
+                sigma_free_x=phys_params.sigma_free_x,
+                sigma_free_y=phys_params.sigma_free_y,
+                save_path=save_path,
+                control_mode=control_mode,
+                cells=cells
+            )
+        except Exception as e:
+            print(f"Warning: Failed to generate nodal noise spatial plot: {e}")
 
     print(f"{timestamp}_{training_config_str}")
 

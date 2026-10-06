@@ -54,8 +54,18 @@ def plot_loss_analysis(loss_components_hist, params_hist, steps_history, save_pa
         axs[3].plot(steps_history, loss_components_hist["phy2"], color='#9467bd', lw=1.5, linestyle='--', label=r"Residual (Nodal $\sum \mathbf{R}^2$)")
 
     ax3_twin = axs[3].twinx()
-    ax3_twin.plot(steps_history, params_hist["sigma_free_x"], linestyle='--', color='#1f77b4', label=r"$\sigma_{\mathrm{free}, x}$")
-    ax3_twin.plot(steps_history, params_hist["sigma_free_y"], linestyle='--', color='#ff7f0e', label=r"$\sigma_{\mathrm{free}, y}$")
+    sfx = np.array(params_hist["sigma_free_x"])
+    sfy = np.array(params_hist["sigma_free_y"])
+    if sfx.ndim == 2:
+        ax3_twin.plot(steps_history, np.mean(sfx, axis=1), linestyle='--', color='#1f77b4', label=r"$\sigma_{\mathrm{free}, x}\ (\mathrm{mean})$")
+        ax3_twin.fill_between(steps_history, np.min(sfx, axis=1), np.max(sfx, axis=1), color='#1f77b4', alpha=0.15)
+    else:
+        ax3_twin.plot(steps_history, sfx, linestyle='--', color='#1f77b4', label=r"$\sigma_{\mathrm{free}, x}$")
+    if sfy.ndim == 2:
+        ax3_twin.plot(steps_history, np.mean(sfy, axis=1), linestyle='--', color='#ff7f0e', label=r"$\sigma_{\mathrm{free}, y}\ (\mathrm{mean})$")
+        ax3_twin.fill_between(steps_history, np.min(sfy, axis=1), np.max(sfy, axis=1), color='#ff7f0e', alpha=0.15)
+    else:
+        ax3_twin.plot(steps_history, sfy, linestyle='--', color='#ff7f0e', label=r"$\sigma_{\mathrm{free}, y}$")
     if "sigma_global" in params_hist and len(params_hist["sigma_global"]) > 0 and params_hist["sigma_global"][0] is not None:
         ax3_twin.plot(steps_history, params_hist["sigma_global"], linestyle=':', color='#2ca02c', label=r"$\sigma_{\mathrm{global}}$")
 
@@ -109,8 +119,18 @@ def plot_vfm_loss_analysis(loss_components_hist, params_hist, steps_history, sav
     axs[1].grid(True, alpha=0.25)
 
     # Panel 3: Physics Noise Parameters (sigma_free_x and sigma_free_y)
-    axs[2].plot(steps_history, params_hist["sigma_free_x"], color='#1f77b4', lw=2, label=r"$\sigma_{\mathrm{free}, x}$")
-    axs[2].plot(steps_history, params_hist["sigma_free_y"], color='#ff7f0e', lw=2, label=r"$\sigma_{\mathrm{free}, y}$")
+    sfx = np.array(params_hist["sigma_free_x"])
+    sfy = np.array(params_hist["sigma_free_y"])
+    if sfx.ndim == 2:
+        axs[2].plot(steps_history, np.mean(sfx, axis=1), color='#1f77b4', lw=2, label=r"$\sigma_{\mathrm{free}, x}\ (\mathrm{mean})$")
+        axs[2].fill_between(steps_history, np.min(sfx, axis=1), np.max(sfx, axis=1), color='#1f77b4', alpha=0.2, label=r"$\sigma_{\mathrm{free}, x}\ (\mathrm{range})$")
+    else:
+        axs[2].plot(steps_history, sfx, color='#1f77b4', lw=2, label=r"$\sigma_{\mathrm{free}, x}$")
+    if sfy.ndim == 2:
+        axs[2].plot(steps_history, np.mean(sfy, axis=1), color='#ff7f0e', lw=2, label=r"$\sigma_{\mathrm{free}, y}\ (\mathrm{mean})$")
+        axs[2].fill_between(steps_history, np.min(sfy, axis=1), np.max(sfy, axis=1), color='#ff7f0e', alpha=0.2, label=r"$\sigma_{\mathrm{free}, y}\ (\mathrm{range})$")
+    else:
+        axs[2].plot(steps_history, sfy, color='#ff7f0e', lw=2, label=r"$\sigma_{\mathrm{free}, y}$")
     if "sigma_global" in params_hist and len(params_hist["sigma_global"]) > 0 and params_hist["sigma_global"][0] is not None:
         axs[2].plot(steps_history, params_hist["sigma_global"], color='#2ca02c', lw=1.5, linestyle=':', label=r"$\sigma_{\mathrm{global}}$")
     axs[2].set_title(r"Physics Noise Scales ($\sigma_{\mathrm{free}}$)")
@@ -246,9 +266,19 @@ def plot_parameters_hist(params_hist, steps_history, save_path):
     # Track physics noise parameter separately:
     fig_pn, ax_pn = plt.subplots(figsize=(8, 4))
     if "sigma_free_x" in params_hist and len(params_hist["sigma_free_x"]) > 0 and params_hist["sigma_free_x"][0] is not None:
-        ax_pn.plot(steps_history, np.array(params_hist["sigma_free_x"]), label=r"$\sigma_{\mathrm{free}, x}$")
+        sfx = np.array(params_hist["sigma_free_x"])
+        if sfx.ndim == 2:
+            ax_pn.plot(steps_history, np.mean(sfx, axis=1), label=r"$\sigma_{\mathrm{free}, x}\ (\mathrm{mean})$")
+            ax_pn.fill_between(steps_history, np.min(sfx, axis=1), np.max(sfx, axis=1), alpha=0.2, label=r"$\sigma_{\mathrm{free}, x}\ (\mathrm{range})$")
+        else:
+            ax_pn.plot(steps_history, sfx, label=r"$\sigma_{\mathrm{free}, x}$")
     if "sigma_free_y" in params_hist and len(params_hist["sigma_free_y"]) > 0 and params_hist["sigma_free_y"][0] is not None:
-        ax_pn.plot(steps_history, np.array(params_hist["sigma_free_y"]), label=r"$\sigma_{\mathrm{free}, y}$")
+        sfy = np.array(params_hist["sigma_free_y"])
+        if sfy.ndim == 2:
+            ax_pn.plot(steps_history, np.mean(sfy, axis=1), label=r"$\sigma_{\mathrm{free}, y}\ (\mathrm{mean})$")
+            ax_pn.fill_between(steps_history, np.min(sfy, axis=1), np.max(sfy, axis=1), alpha=0.2, label=r"$\sigma_{\mathrm{free}, y}\ (\mathrm{range})$")
+        else:
+            ax_pn.plot(steps_history, sfy, label=r"$\sigma_{\mathrm{free}, y}$")
     if "sigma_fix_x" in params_hist and len(params_hist["sigma_fix_x"]) > 0 and params_hist["sigma_fix_x"][0] is not None:
         ax_pn.plot(steps_history, np.array(params_hist["sigma_fix_x"]), label=r"$\sigma_{\mathrm{fix}, x}$")
     if "sigma_fix_y" in params_hist and len(params_hist["sigma_fix_y"]) > 0 and params_hist["sigma_fix_y"][0] is not None:
@@ -2338,4 +2368,104 @@ def evaluate_reaction_force_calibration(
         "f_std_y": [float(x) for x in std_fy],
         "val_steps": [int(x) for x in val_steps],
     }
+
+
+def plot_nodal_noise_spatial_distribution(
+    mesh_pos: np.ndarray,
+    node_type: np.ndarray,
+    sigma_free_x: np.ndarray,
+    sigma_free_y: np.ndarray,
+    save_path: str,
+    control_mode: str = "force",
+    cells: Optional[np.ndarray] = None,
+    make_png: bool = True
+):
+    """
+    Plots the 2D spatial distribution of learned nodal PDE residual noise (sigma_free_x and sigma_free_y)
+    over the specimen mesh geometry.
+
+    Highlights free nodes colored by their learned noise scale, with fixed/boundary nodes
+    indicated as distinct markers.
+    """
+    apply_style()
+    mesh_pos_np = np.asarray(mesh_pos)
+    node_type_np = np.asarray(node_type)
+    sig_x_np = np.asarray(sigma_free_x)
+    sig_y_np = np.asarray(sigma_free_y)
+
+    # Determine free and boundary node masks
+    is_fix_x = (node_type_np[:, 1] == 1)
+    is_fix_y = (node_type_np[:, 2] == 1)
+    if control_mode == "displacement":
+        is_free_x = ~(is_fix_x | (node_type_np[:, 3] == 1))
+        is_free_y = ~(is_fix_y | (node_type_np[:, 4] == 1))
+    else:
+        is_free_x = ~is_fix_x
+        is_free_y = ~is_fix_y
+
+    is_boundary_x = ~is_free_x
+    is_boundary_y = ~is_free_y
+
+    # If scalar noise was provided, expand to mesh size for uniform representation
+    if sig_x_np.ndim == 0 or sig_x_np.size == 1:
+        sig_x_np = np.full(mesh_pos_np.shape[0], float(sig_x_np))
+    if sig_y_np.ndim == 0 or sig_y_np.size == 1:
+        sig_y_np = np.full(mesh_pos_np.shape[0], float(sig_y_np))
+
+    # Compute effective isotropic magnitude: sqrt((sigma_x^2 + sigma_y^2)/2)
+    sig_mag_np = np.sqrt(0.5 * (sig_x_np**2 + sig_y_np**2))
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
+    fig.suptitle(r"Learned Heteroscedastic Nodal Noise Distribution ($\boldsymbol{\sigma}_{\mathrm{free}}$)", fontsize=15)
+
+    panels = [
+        (axes[0], sig_x_np, is_free_x, is_boundary_x, r"$\sigma_{\mathrm{free}, x}$ ($X$-direction)"),
+        (axes[1], sig_y_np, is_free_y, is_boundary_y, r"$\sigma_{\mathrm{free}, y}$ ($Y$-direction)"),
+        (axes[2], sig_mag_np, is_free_x | is_free_y, is_boundary_x & is_boundary_y, r"$\bar{\sigma}_{\mathrm{free}} = \sqrt{(\sigma_x^2 + \sigma_y^2)/2}$ (Magnitude)")
+    ]
+
+    for ax, sig_vals, free_mask, bnd_mask, title in panels:
+        # Plot mesh wireframe if triangle cells are available
+        if cells is not None and cells.shape[1] == 3:
+            ax.triplot(mesh_pos_np[:, 0], mesh_pos_np[:, 1], cells, color='gray', lw=0.3, alpha=0.35, zorder=1)
+
+        # Plot boundary / fixed nodes
+        if np.any(bnd_mask):
+            ax.scatter(mesh_pos_np[bnd_mask, 0], mesh_pos_np[bnd_mask, 1],
+                       c='lightgray', s=18, marker='x', alpha=0.6, label='Fixed / Boundary Nodes', zorder=2)
+
+        # Plot free nodes colored by learned noise scale
+        free_vals = sig_vals[free_mask]
+        sc = ax.scatter(
+            mesh_pos_np[free_mask, 0], mesh_pos_np[free_mask, 1],
+            c=free_vals, cmap='viridis', s=35, edgecolors='none', alpha=0.9, zorder=3
+        )
+        cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label(r"Noise Scale $\sigma$", fontsize=10)
+
+        # Add text box with statistics
+        stats_str = (
+            f"Mean: {np.mean(free_vals):.4f}\n"
+            f"Std:  {np.std(free_vals):.4f}\n"
+            f"Min:  {np.min(free_vals):.4f}\n"
+            f"Max:  {np.max(free_vals):.4f}"
+        )
+        ax.text(
+            0.05, 0.95, stats_str, transform=ax.transAxes, verticalalignment='top',
+            fontsize=8.5, bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.85, edgecolor='#cccccc')
+        )
+
+        ax.set_title(title, fontsize=12)
+        ax.set_xlabel(r"$X$", fontsize=10)
+        ax.set_ylabel(r"$Y$", fontsize=10)
+        ax.set_aspect('equal', 'box')
+        ax.grid(True, alpha=0.2)
+        ax.legend(loc='lower left', fontsize=8)
+
+    plt.tight_layout()
+    out_pdf = os.path.join(save_path, "nodal_noise_spatial_distribution.pdf")
+    save_figure(fig, out_pdf, make_png=make_png)
+    plt.close(fig)
+    print(f"✅ Saved nodal noise spatial distribution plot to {out_pdf}")
+
 
