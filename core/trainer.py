@@ -22,7 +22,10 @@ jax.config.update("jax_enable_x64", True)
 
 
 class HyperelasticGPTrainer:
-    def __init__(self, model: SparseHyperelasticityGP, initial_params, loss_fn, opt_state, optimizer, save_path, true_mat_model, I_z, I_all, min_dev, min_vol, max_dev, max_vol, freeze_fn=None, seed=None, vfm_mode: str = "linear_triangle", free_noise_mode: str = "constant"):
+    def __init__(self, model: SparseHyperelasticityGP, initial_params, loss_fn, opt_state, optimizer, save_path, true_mat_model, I_z, I_all, min_dev, min_vol, max_dev, max_vol, freeze_fn=None, seed=None, vfm_mode: str = "linear_triangle", free_noise_mode: str = "constant", stage2: dict = None):
+        """stage2: optional dict(loss_fn, optimizer, start_step, name) for a second training stage with a different
+        objective (e.g. residual -> EIV likelihood). It starts at start_step from the best stage-1 parameters with a
+        fresh optimizer state, and checkpoint selection restarts (the two losses are on different scales)."""
         self.model = model
         self.params = initial_params
         self.opt_state = opt_state
@@ -63,21 +66,10 @@ class HyperelasticGPTrainer:
         self.loss_and_grad = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
         
         # JIT compile fused block optimization loop via jax.lax.scan for GPU efficiency
-        def step_fn(state, subkey):
-            params_curr, opt_state_curr = state
-            (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(params_curr, subkey)
-            if freeze_fn:
-                grads = freeze_fn(grads)
-            updates, opt_state_new = optimizer.update(grads, opt_state_curr)
-            params_new = optax.apply_updates(params_curr, updates)
-            return (params_new, opt_state_new), (loss, aux)
-
-        @jax.jit
-        def train_block(params_in, opt_state_in, keys_in):
-            (params_out, opt_state_out), (losses, aux_out) = jax.lax.scan(step_fn, (params_in, opt_state_in), keys_in)
-            return params_out, opt_state_out, losses, aux_out
-
-        self.train_block = train_block
+        self.train_block = self._make_train_block(loss_fn, optimizer, freeze_fn)
+        self.stage2 = stage2
+        if stage2 is not None:
+            self.stage2_block = self._make_train_block(stage2["loss_fn"], stage2["optimizer"], freeze_fn)
 
         self.log_file_path = os.path.join(save_path, "optimization_log.txt")
         self.loss_components_hist = {
@@ -96,6 +88,37 @@ class HyperelasticGPTrainer:
         self.steps_history = []
         self.best_loss = float('inf')
         self.best_params = initial_params
+
+    @staticmethod
+    def _make_train_block(loss_fn, optimizer, freeze_fn):
+        def step_fn(state, subkey):
+            params_curr, opt_state_curr = state
+            (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(params_curr, subkey)
+            if freeze_fn:
+                grads = freeze_fn(grads)
+            updates, opt_state_new = optimizer.update(grads, opt_state_curr)
+            params_new = optax.apply_updates(params_curr, updates)
+            return (params_new, opt_state_new), (loss, aux)
+
+        @jax.jit
+        def train_block(params_in, opt_state_in, keys_in):
+            (params_out, opt_state_out), (losses, aux_out) = jax.lax.scan(step_fn, (params_in, opt_state_in), keys_in)
+            return params_out, opt_state_out, losses, aux_out
+
+        return train_block
+
+    def _switch_to_stage2(self, step_idx):
+        name = self.stage2.get("name", "stage 2")
+        msg = (f"=== Step {step_idx}: switching objective to {name} (from best stage-1 parameters, "
+               f"stage-1 best loss {self.best_loss:.6f}; fresh optimizer) ===")
+        print("\n" + msg)
+        with open(self.log_file_path, "a") as f:
+            f.write(msg + "\n")
+        self.params = self.best_params
+        self.opt_state = self.stage2["optimizer"].init(self.params)
+        self.train_block = self.stage2_block
+        self.best_loss = float('inf')
+        self.stage2_active = True
 
     def _record_metrics(self, step, loss, aux, params):
         log_like_loss, kl_loss, free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, phy_loss, phys_loss2 = aux[:8]
@@ -227,8 +250,17 @@ class HyperelasticGPTrainer:
         milestone_params = []
         
         step_idx = 0
+        self.stage2_active = False
+        switch_step = self.stage2["start_step"] if self.stage2 is not None else None
+        if switch_step is not None:
+            # make the switch fall on a block boundary
+            n_blocks = -(-switch_step // block_size) + -(-(n_iterations - switch_step) // block_size)
+            pbar = tqdm(range(n_blocks), desc="Training Sparse GP (JIT Blocks)", unit="block")
         for _ in pbar:
-            cur_block_size = min(block_size, n_iterations - step_idx)
+            if switch_step is not None and not self.stage2_active and step_idx >= switch_step:
+                self._switch_to_stage2(step_idx)
+            limit = switch_step if (switch_step is not None and not self.stage2_active) else n_iterations
+            cur_block_size = min(block_size, limit - step_idx)
             keys = jr.split(main_key, cur_block_size + 1)
             main_key = keys[0]
             block_keys = keys[1:]

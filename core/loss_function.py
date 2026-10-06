@@ -94,6 +94,20 @@ def eiv_force_equivalent_sigma(psi_fn: Any, f3x3: jnp.ndarray, cells: jnp.ndarra
     return jnp.sqrt(jnp.mean(jax.lax.map(step_var, f3x3), axis=0))
 
 
+def damped_newton_step(K: jnp.ndarray, r: jnp.ndarray, damping: float = 0.0) -> jnp.ndarray:
+    """
+    eps = K^{-1} r, or with damping > 0 the Tikhonov-damped step eps = (K^T K + mu^2 I)^{-1} K^T r,
+    mu = damping * rms singular value of K (scale-invariant). The undamped step has poles where K is singular,
+    i.e. where the mean energy loses stability, which makes the likelihood an infinite barrier between unstable
+    and stable materials; damping bounds the step there and leaves it unchanged where K is well conditioned.
+    """
+    if damping <= 0:
+        return jnp.linalg.solve(K, r)
+    KtK = K.T @ K
+    mu2 = (damping ** 2) * jnp.trace(KtK) / K.shape[0]
+    return jnp.linalg.solve(KtK + mu2 * jnp.eye(K.shape[0], dtype=K.dtype), K.T @ r)
+
+
 def eiv_log_likelihood(eps_hat: jnp.ndarray, reaction_res: jnp.ndarray, dof_dir: np.ndarray,
                        sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, reaction_loss_weight: float = 1.0,
                        nodal_noise: bool = False, sigma_global: jnp.ndarray = None, prior_dof: float = 4.0):
@@ -172,7 +186,7 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
                           vfm_mode: str = "linear_triangle", V_basis: jnp.ndarray = None,
                           control_mode: str = "force", loads: jnp.ndarray = None,
                           reaction_loss_weight: float = 1.0, likelihood: str = "residual",
-                          eiv: dict = None, noise_prior_dof: float = 4.0) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+                          eiv: dict = None, noise_prior_dof: float = 4.0, eiv_damping: float = 0.0) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
     """
     Computes the variational stochastic VFM loss and KL divergence ELBO objective.
     Strictly preserves functional purity without mutating stateful class instance attributes.
@@ -220,7 +234,7 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
             return jax.vmap(lambda f_step: internal_force(psi_fn, f_step, cells, n_nodes, dNdX, dA))(f3x3)
 
         f_int = jax.vmap(sample_forces)(subkey)                                        # (S, T, 2n)
-        eps_hat = jax.vmap(lambda K_t, r_t: jnp.linalg.solve(K_t, r_t.T).T, in_axes=(0, 1), out_axes=1)(
+        eps_hat = jax.vmap(lambda K_t, r_t: damped_newton_step(K_t, r_t.T, eiv_damping).T, in_axes=(0, 1), out_axes=1)(
             K_ff, f_int[..., dof_free])                                                # (S, T, m)
         R_obs = jnp.stack([f_int[..., eiv["dof_rx"]].sum(-1), f_int[..., eiv["dof_ry"]].sum(-1)], axis=-1)  # (S, T, 2)
         reaction_res = R_obs - jnp.einsum("tim,stm->sti", K_rf, eps_hat) - loads[None, :, :2]

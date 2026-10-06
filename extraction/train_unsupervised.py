@@ -95,10 +95,18 @@ def parse_args():
     parser.add_argument('--free_noise_mode', type=str, default="constant",
                         choices=["constant", "nodal", "diagonal"],
                         help="Noise variance parameterization for free PDE nodes: 'constant' (single scalar for all free nodes) or 'nodal'/'diagonal' (independent per-node variance).")
-    parser.add_argument('--likelihood', type=str, default=None, choices=["auto", "residual", "eiv"],
+    parser.add_argument('--likelihood', type=str, default=None, choices=["auto", "residual", "eiv", "residual_then_eiv"],
                         help="'residual': iid Gaussian nodal force residuals. 'eiv': errors-in-variables likelihood in displacement space "
                              "(Gauss-Newton step eps = K^-1 r; scale-invariant, so no reaction re-weighting is needed). "
                              "'auto' (default) picks 'eiv' for displacement control with linear_triangle VFM. If None, loaded from recipe.")
+    parser.add_argument('--eiv_switch_fraction', type=float, default=None,
+                        help="residual_then_eiv: fraction of n_iterations trained with the residual likelihood before switching "
+                             "to EIV (robust far from the solution; EIV is the calibrated likelihood near it). Recipe key or 0.5.")
+    parser.add_argument('--eiv_learning_rate', type=float, default=None,
+                        help="residual_then_eiv: initial learning rate of the fresh Adam in the EIV stage (cosine-decayed to 10%%). Recipe key or 1e-3.")
+    parser.add_argument('--eiv_damping', type=float, default=None,
+                        help="Tikhonov damping of the EIV Newton step, relative to the rms singular value of the tangent "
+                             "(0 = exact step). Bounds the step where the mean energy is locally unstable. Recipe key or 0.")
     parser.add_argument('--noise_prior_dof', type=float, default=None,
                         help="Degrees of freedom nu of the hierarchical prior sigma_i^2 ~ InvGamma(nu/2, nu/2 * sigma_global^2) on per-node "
                              "noise (nodal/diagonal free_noise_mode); larger = stronger pooling towards sigma_global. Integrated out under "
@@ -346,7 +354,20 @@ if __name__ == "__main__" :
     likelihood = str(args.likelihood or rec.get("likelihood", "auto")).lower()
     if likelihood == "auto":
         likelihood = "eiv" if (control_mode == "displacement" and args.vfm_mode == "linear_triangle") else "residual"
-    if likelihood == "eiv":
+    # 'residual_then_eiv': residual likelihood far from the solution (no singular-tangent barriers), EIV near it
+    two_stage = likelihood == "residual_then_eiv"
+    final_likelihood = "eiv" if likelihood in ("eiv", "residual_then_eiv") else "residual"
+
+    def _rec_float(arg_val, key, default):
+        return float(arg_val) if arg_val is not None else float(rec.get(key, default))
+    eiv_switch_fraction = _rec_float(args.eiv_switch_fraction, "eiv_switch_fraction", 0.5)
+    eiv_learning_rate = _rec_float(args.eiv_learning_rate, "eiv_learning_rate", 1e-3)
+    eiv_damping = _rec_float(args.eiv_damping, "eiv_damping", 0.0)
+    eiv_switch_iteration = int(round(eiv_switch_fraction * n_iterations)) if two_stage else None
+    if two_stage and not (0 < eiv_switch_iteration < n_iterations):
+        raise ValueError(f"eiv_switch_fraction={eiv_switch_fraction} must leave iterations for both stages.")
+
+    if final_likelihood == "eiv":
         if control_mode != "displacement":
             raise ValueError("likelihood='eiv' is implemented for displacement control only.")
         if args.vfm_mode != "linear_triangle":
@@ -355,14 +376,17 @@ if __name__ == "__main__" :
             raise ValueError("likelihood='eiv' requires normalize_ell=0 (normalisation breaks the ELBO).")
         if args.sampling_mode not in ("pathwise", "pws"):
             raise ValueError("likelihood='eiv' requires pathwise sampling (it differentiates each GP path twice).")
-        if reaction_loss_weight != 1.0:
+        if reaction_loss_weight != 1.0 and not two_stage:
             print(f"[CONFIGURATION] Warning: reaction_loss_weight={reaction_loss_weight} tempers the EIV likelihood; "
                   f"the EIV free-DOF term is scale-invariant, so 1.0 is the principled value.")
 
     noise_prior_dof = args.noise_prior_dof if args.noise_prior_dof is not None else float(rec.get("noise_prior_dof", 4.0))
-    if likelihood == "eiv" and free_noise_mode in ["nodal", "diagonal"] and noise_prior_dof <= 0:
+    if final_likelihood == "eiv" and free_noise_mode in ["nodal", "diagonal"] and noise_prior_dof <= 0:
         raise ValueError("likelihood='eiv' with per-node noise needs noise_prior_dof > 0 (each DOF has only a few load steps).")
     print(f"[CONFIGURATION] Likelihood: '{likelihood}' | per-node noise prior dof: {noise_prior_dof}")
+    if two_stage:
+        print(f"[CONFIGURATION] Two-stage: residual (reaction weight {reaction_loss_weight}) for {eiv_switch_iteration} iterations, "
+              f"then EIV (weight 1, damping {eiv_damping}, lr {eiv_learning_rate}) for {n_iterations - eiv_switch_iteration}.")
 
     # Identify free nodes for boundary freezing and noise initialization
     is_fix_x = (node_type[:, 1] == 1)
@@ -404,6 +428,10 @@ if __name__ == "__main__" :
     config_dict["free_noise_mode"] = free_noise_mode
     config_dict["likelihood"] = likelihood
     config_dict["noise_prior_dof"] = noise_prior_dof
+    config_dict["final_likelihood"] = final_likelihood
+    config_dict["eiv_switch_iteration"] = eiv_switch_iteration
+    config_dict["eiv_learning_rate"] = eiv_learning_rate
+    config_dict["eiv_damping"] = eiv_damping
     with open(os.path.join(save_path, "config.json"), "w") as f:
         json.dump(config_dict, f, indent=4)
     with open(os.path.join(save_path, "config.yaml"), "w") as f:
@@ -756,7 +784,7 @@ if __name__ == "__main__" :
 
 
 
-    eiv_indices = build_eiv_indices(node_type, np.asarray(cells)) if likelihood == "eiv" else None
+    eiv_indices = build_eiv_indices(node_type, np.asarray(cells)) if final_likelihood == "eiv" else None
 
     V_basis = None
     if args.vfm_mode in ["global_vf", "mix"]:
@@ -765,7 +793,12 @@ if __name__ == "__main__" :
         V_basis = build_kinematic_virtual_fields(mesh_pos, node_type, order=args.vf_order, control_mode=control_mode)
         print(f"Constructed {V_basis.shape[0]} orthonormal virtual fields.")
 
-    def loss_fn(p, k):
+    def make_loss_fn(loss_likelihood, loss_reaction_weight):
+        def loss_fn(p, k):
+            return _loss(p, k, loss_likelihood, loss_reaction_weight)
+        return loss_fn
+
+    def _loss(p, k, loss_likelihood, loss_reaction_weight):
         k_theta, k_loss = jax.random.split(k)
         if args.model_mode in ["aniso_unk_fiber", "aniso_unk_fiber_neg"]:
             theta_mean = jnp.pi * (jax.nn.sigmoid(p.raw_aniso_theta_mean) - 0.5)
@@ -798,14 +831,21 @@ if __name__ == "__main__" :
             k_loss, number_of_mci_sampling, args.normalize_ell,
             vfm_mode=args.vfm_mode, V_basis=V_basis,
             control_mode=control_mode, loads=loads_train,
-            reaction_loss_weight=reaction_loss_weight,
-            likelihood=likelihood, eiv=eiv_indices, noise_prior_dof=noise_prior_dof
+            reaction_loss_weight=loss_reaction_weight,
+            likelihood=loss_likelihood, eiv=eiv_indices, noise_prior_dof=noise_prior_dof, eiv_damping=eiv_damping
         )
+
+    if two_stage:
+        loss_fn = make_loss_fn("residual", reaction_loss_weight)
+        stage1_iterations = eiv_switch_iteration
+    else:
+        loss_fn = make_loss_fn(likelihood, reaction_loss_weight)
+        stage1_iterations = n_iterations
 
     if args.final_learning_rate is not None and args.final_learning_rate != learning_rate:
         schedule = optax.cosine_decay_schedule(
             init_value=learning_rate,
-            decay_steps=n_iterations,
+            decay_steps=stage1_iterations,
             alpha=args.final_learning_rate / learning_rate
         )
         opt = optax.adam(learning_rate=schedule)
@@ -813,6 +853,16 @@ if __name__ == "__main__" :
         opt = optax.adam(learning_rate=learning_rate)
         
     opt_state = opt.init(params)
+
+    stage2 = None
+    if two_stage:
+        stage2 = dict(
+            loss_fn=make_loss_fn("eiv", 1.0),
+            optimizer=optax.adam(learning_rate=optax.cosine_decay_schedule(
+                init_value=eiv_learning_rate, decay_steps=n_iterations - eiv_switch_iteration, alpha=0.1)),
+            start_step=eiv_switch_iteration,
+            name="EIV likelihood",
+        )
     
     trainer = HyperelasticGPTrainer(
         model=model,
@@ -831,7 +881,8 @@ if __name__ == "__main__" :
         freeze_fn=get_freeze_fn(is_fixed_reaction_force_noise, is_fixed_inducing_points, args.covariance_mode, is_free_x=is_free_x_jnp, is_free_y=is_free_y_jnp),
         seed=args.seed,
         vfm_mode=args.vfm_mode,
-        free_noise_mode=free_noise_mode
+        free_noise_mode=free_noise_mode,
+        stage2=stage2
     )
 
     meta_path = os.path.join(save_path, "metadata.json")
@@ -933,7 +984,7 @@ if __name__ == "__main__" :
 
     # Under 'eiv' the displacement noise was integrated out: store its posterior estimate at the posterior-mean
     # material in best_params (log_sigma_free_*), so saved parameters keep the displacement-noise meaning.
-    if likelihood == "eiv":
+    if final_likelihood == "eiv":
         mean_params = learned_gp.load_params(best_params)
         mean_psi = learned_gp.psi_det
         dof_free = eiv_indices["dof_free"]
@@ -1007,7 +1058,8 @@ if __name__ == "__main__" :
         metrics["sigma_free_x_mean"] = float(np.mean(phys_params.sigma_free_x))
         metrics["sigma_free_y_mean"] = float(np.mean(phys_params.sigma_free_y))
     metrics["likelihood"] = likelihood
-    if likelihood == "eiv":
+    metrics["final_likelihood"] = final_likelihood
+    if final_likelihood == "eiv":
         # Learned noise is a displacement std; downstream validation expects a force-residual std, so also
         # report the nodal force noise it implies through the posterior-mean tangent, Cov(r) = K diag(sigma_u^2) K^T.
         n_nodes_all = node_type.shape[0]
