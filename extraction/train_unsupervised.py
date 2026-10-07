@@ -120,6 +120,13 @@ def parse_args():
                              "w * sum relu(-lambda_min(Q)/s_ref)^2 over states and directions (zero for stable materials). "
                              "0 disables. Recipe key or 0.")
     parser.add_argument('--stability_directions', type=int, default=None, help="Directions n per state for the acoustic tensor. Recipe key or 8.")
+    parser.add_argument('--hyperparameter_init', type=str, default=None, choices=["random", "data"],
+                        help="GP hyperparameter starts: 'random' (raw ~ N(0,1)) or 'data' (lengthscale = feature span, amplitude = "
+                             "factor * data energy density). Inducing values stay random. Recipe key or 'random'.")
+    parser.add_argument('--hyperparameter_amplitude_factor', type=float, default=None,
+                        help="hyperparameter_init=data: initial GP amplitude as a multiple of the data energy density. Recipe key or 10.")
+    parser.add_argument('--hyperparameter_lengthscale_factor', type=float, default=None,
+                        help="hyperparameter_init=data: initial lengthscale as a multiple of the inducing-feature span (< 2 when constrained). Recipe key or 1.5.")
     parser.add_argument('--eiv_learning_rate', type=float, default=None,
                         help="residual_then_eiv: initial learning rate of the fresh Adam in the EIV stage (cosine-decayed to 10%%). Recipe key or 1e-3.")
     parser.add_argument('--eiv_damping', type=float, default=None,
@@ -138,6 +145,30 @@ def inv_softplus(y):
     """Computes initial raw parameters from physical coordinates in invariant space."""
     y_safe = jnp.maximum(y, 1e-15)
     return jnp.where(y_safe > 20.0, y_safe, jnp.log(jnp.expm1(y_safe)))
+
+def external_work_density(prep_data, node_type, control_mode, last_step):
+    """
+    Average strain-energy density implied by the measurements alone: external work done up to `last_step`
+    (trapezoidal rule over all load steps) divided by the specimen area. Displacement control: measured reactions
+    times the mean prescribed displacement of the loaded edges; force control: Neumann nodal forces times
+    the observed displacements. Falls back to 1.0 if the estimate is not positive.
+    """
+    u = np.asarray(prep_data["u_obs"] if "u_obs" in prep_data else prep_data["u"])[: last_step + 1]
+    area = float(np.sum(np.asarray(prep_data["dA"])))
+    if control_mode == "displacement":
+        R = np.asarray(prep_data["reaction_forces"])[: last_step + 1]
+        ux = u[:, np.asarray(node_type)[:, 3] == 1, 0].mean(axis=1) if np.any(np.asarray(node_type)[:, 3] == 1) else np.zeros(len(u))
+        uy = u[:, np.asarray(node_type)[:, 4] == 1, 1].mean(axis=1) if np.any(np.asarray(node_type)[:, 4] == 1) else np.zeros(len(u))
+        dW = 0.5 * (R[1:, 0] + R[:-1, 0]) * np.diff(ux) + 0.5 * (R[1:, 1] + R[:-1, 1]) * np.diff(uy)
+    else:
+        f = np.asarray(prep_data["f_neu"])[: last_step + 1]
+        dW = np.sum(0.5 * (f[1:] + f[:-1]) * np.diff(u, axis=0), axis=(1, 2))
+    e = float(np.sum(dW)) / area
+    if not np.isfinite(e) or e <= 0:
+        print(f"[CONFIGURATION] Warning: external-work energy estimate {e} not positive; using 1.0.")
+        return 1.0
+    return e
+
 
 def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str = "diag", is_free_x=None, is_free_y=None):
     def freeze_fn(grads):
@@ -695,46 +726,84 @@ if __name__ == "__main__" :
     # Setup random key
     key = jax.random.PRNGKey(args.seed)
 
+    hyperparameter_init = str(args.hyperparameter_init or rec.get("hyperparameter_init", "random")).lower()
+    hyperparameter_amplitude_factor = float(args.hyperparameter_amplitude_factor if args.hyperparameter_amplitude_factor is not None
+                                            else rec.get("hyperparameter_amplitude_factor", 10.0))
+    hyperparameter_lengthscale_factor = float(args.hyperparameter_lengthscale_factor if args.hyperparameter_lengthscale_factor is not None
+                                              else rec.get("hyperparameter_lengthscale_factor", 1.5))
+    data_energy_scale = None
+    if hyperparameter_init == "data":
+        data_energy_scale = external_work_density(prep_data, node_type, control_mode, max(train_load_steps_indices))
+        print(f"[CONFIGURATION] Data-informed GP hyperparameters: energy density scale {data_energy_scale:.4g} "
+              f"(external work / area), amplitude factor {hyperparameter_amplitude_factor}, "
+              f"lengthscales = {hyperparameter_lengthscale_factor} x feature span.")
+        config_dict["data_energy_scale"] = data_energy_scale
+    config_dict["hyperparameter_init"] = hyperparameter_init
+    config_dict["hyperparameter_amplitude_factor"] = hyperparameter_amplitude_factor
+    config_dict["hyperparameter_lengthscale_factor"] = hyperparameter_lengthscale_factor
+
+    # GP hyperparameter starts. 'random': raw values ~ N(0, 1). 'data': a broad, weakly informative prior with lengthscale
+    # = b * span of the inducing features and amplitude = a * the energy density implied by the data (external work at the
+    # last training step / area). A too-small or too-wiggly initial volumetric prior lets the deviatoric part absorb the
+    # bulk stiffness (a wrong basin seen in the restart logs). Inducing values stay random.
+    def _feature_range(component):
+        z = {"dev": dev_z, "vol": vol_z, "aniso": aniso_z}[component]
+        return jnp.maximum(jnp.max(z, axis=0) - jnp.min(z, axis=0), 1e-3)
+
+    def init_hyper(kind, component, key, shape):
+        if hyperparameter_init != "data":
+            return jax.random.normal(key, shape)
+        if kind == "sig":
+            return jnp.full(shape, jnp.log(hyperparameter_amplitude_factor * data_energy_scale))
+        constrained = constraint_lengthscale and "full" not in args.covariance_mode
+        target = hyperparameter_lengthscale_factor * jnp.broadcast_to(_feature_range(component), shape)
+        if constrained:   # l = 2 * span * sigmoid(raw) (param_version 3), so the factor must stay below 2
+            frac = jnp.clip(hyperparameter_lengthscale_factor / 2.0, 1e-3, 1 - 1e-3)
+            return jnp.full(shape, jnp.log(frac / (1 - frac)))
+        return inv_softplus(target)
+
     def build_initial_params(init_key):
         """Random GP initialisation (lengthscales, amplitudes, inducing values); restarts call it with other keys."""
-        k1, k2, k3, k4 = jax.random.split(init_key, 4)
+        # One independent key per random quantity (the former four shared keys made e.g. raw_vol_ls == raw_vol_sig)
+        kn = dict(zip(["dev_ls", "dev_sig", "dev_um", "dev_uv", "vol_ls", "vol_sig", "vol_um", "vol_uv",
+                       "an_ls", "an_sig", "an_um", "an_uv", "theta", "fix_x", "fix_y"], jax.random.split(init_key, 15)))
         raw_dev_z_fps = inv_softplus(dev_z - jnp.array([3.0, 3.0]))
         raw_vol_z_fps = inv_softplus(vol_z)
 
-        raw_dev_u_mean_init = jax.random.normal(k2, (n_ip,)).at[0].set(0.0)
-        raw_vol_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
+        raw_dev_u_mean_init = jax.random.normal(kn['dev_um'], (n_ip,)).at[0].set(0.0)
+        raw_vol_u_mean_init = jax.random.normal(kn['vol_um'], (n_ip,)).at[0].set(0.0)
         
         if "full" in args.covariance_mode:
-            raw_dev_u_var_init = (jax.random.normal(k2, (n_ip, n_ip)) * 0.1)
+            raw_dev_u_var_init = (jax.random.normal(kn['dev_uv'], (n_ip, n_ip)) * 0.1)
             raw_dev_u_var_init = raw_dev_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(args.u_var_anchor))
-            raw_vol_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+            raw_vol_u_var_init = (jax.random.normal(kn['vol_uv'], (n_ip, n_ip)) * 0.1)
             raw_vol_u_var_init = raw_vol_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(args.u_var_anchor))
         else:
-            raw_dev_u_var_init = jax.random.normal(k2, (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
-            raw_vol_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
+            raw_dev_u_var_init = jax.random.normal(kn['dev_uv'], (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
+            raw_vol_u_var_init = jax.random.normal(kn['vol_uv'], (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
 
         aniso_kwargs = {}
         if args.model_mode in ["anisotropic", "aniso_unk_fiber", "aniso_unk_fiber_neg"]:
             raw_aniso_z_fps = inv_softplus(aniso_z)
-            raw_aniso_u_mean_init = jax.random.normal(k4, (n_ip,)).at[0].set(0.0)
+            raw_aniso_u_mean_init = jax.random.normal(kn['an_um'], (n_ip,)).at[0].set(0.0)
             if "full" in args.covariance_mode:
-                raw_aniso_u_var_init = (jax.random.normal(k4, (n_ip, n_ip)) * 0.1)
+                raw_aniso_u_var_init = (jax.random.normal(kn['an_uv'], (n_ip, n_ip)) * 0.1)
                 raw_aniso_u_var_init = raw_aniso_u_var_init.at[jnp.diag_indices(n_ip)].set(inv_softplus(args.u_var_anchor))
             else:
-                raw_aniso_u_var_init = jax.random.normal(k4, (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
+                raw_aniso_u_var_init = jax.random.normal(kn['an_uv'], (n_ip,)).at[0].set(inv_softplus(args.u_var_anchor))
             aniso_dim = aniso_flat.shape[-1]
             aniso_kwargs = dict(
-                raw_aniso_ls=jax.random.normal(k1, (aniso_dim,)),
-                raw_aniso_sig=jax.random.normal(k1, ()),
+                raw_aniso_ls=init_hyper('ls', 'aniso', kn['an_ls'], (aniso_dim,)),
+                raw_aniso_sig=init_hyper('sig', 'aniso', kn['an_sig'], ()),
                 raw_aniso_z=raw_aniso_z_fps,
                 raw_aniso_u_mean=raw_aniso_u_mean_init,
                 raw_aniso_u_var=raw_aniso_u_var_init
             )
             if args.model_mode in ["aniso_unk_fiber", "aniso_unk_fiber_neg"]:
                 if args.model_mode == "aniso_unk_fiber_neg":
-                    deg = jax.random.uniform(k1, minval=-89.9, maxval=-0.1)
+                    deg = jax.random.uniform(kn['theta'], minval=-89.9, maxval=-0.1)
                 else:
-                    deg = jax.random.uniform(k1, minval=-89.9, maxval=89.9)
+                    deg = jax.random.uniform(kn['theta'], minval=-89.9, maxval=89.9)
                 print(f"Initializing fiber angle mean at {float(deg):.2f} degrees...")
                 val = (deg / 180.0) + 0.5
                 raw_theta = jnp.log(val / (1.0 - val))
@@ -747,16 +816,16 @@ if __name__ == "__main__" :
         if is_fixed_reaction_force_noise:
             params = GPRawParams(
                 # Lengthscales and signal variances (Normal(0, 1))
-                raw_dev_ls=jax.random.normal(k1, (2,)),
-                raw_dev_sig=jax.random.normal(k1, ()),
+                raw_dev_ls=init_hyper('ls', 'dev', kn['dev_ls'], (2,)),
+                raw_dev_sig=init_hyper('sig', 'dev', kn['dev_sig'], ()),
                 
                 # Inducing point means and variances
                 raw_dev_z=raw_dev_z_fps,
                 raw_dev_u_mean=raw_dev_u_mean_init,
                 raw_dev_u_var=raw_dev_u_var_init,
 
-                raw_vol_ls=jax.random.normal(k3, (1,)),
-                raw_vol_sig=jax.random.normal(k3, ()),
+                raw_vol_ls=init_hyper('ls', 'vol', kn['vol_ls'], (1,)),
+                raw_vol_sig=init_hyper('sig', 'vol', kn['vol_sig'], ()),
 
                 raw_vol_z=raw_vol_z_fps,        
                 raw_vol_u_mean=raw_vol_u_mean_init,
@@ -775,16 +844,16 @@ if __name__ == "__main__" :
         else :
             params = GPRawParams(
                 # Lengthscales and signal variances (Normal(0, 1))
-                raw_dev_ls=jax.random.normal(k1, (2,)),
-                raw_dev_sig=jax.random.normal(k1, ()),
+                raw_dev_ls=init_hyper('ls', 'dev', kn['dev_ls'], (2,)),
+                raw_dev_sig=init_hyper('sig', 'dev', kn['dev_sig'], ()),
                 
                 # Inducing point means and variances
                 raw_dev_z=raw_dev_z_fps,
                 raw_dev_u_mean=raw_dev_u_mean_init,
                 raw_dev_u_var=raw_dev_u_var_init,
 
-                raw_vol_ls=jax.random.normal(k3, (1,)),
-                raw_vol_sig=jax.random.normal(k3, ()),
+                raw_vol_ls=init_hyper('ls', 'vol', kn['vol_ls'], (1,)),
+                raw_vol_sig=init_hyper('sig', 'vol', kn['vol_sig'], ()),
 
                 raw_vol_z=raw_vol_z_fps,        
                 raw_vol_u_mean=raw_vol_u_mean_init,
@@ -793,8 +862,8 @@ if __name__ == "__main__" :
                 # Noise parameters (PDE residual noise)
                 log_sigma_free_x=log_sigma_free_x_init,
                 log_sigma_free_y=log_sigma_free_y_init,
-                log_sigma_fix_x=jax.random.normal(k3, (load_noise_std_steps.shape[0],)),
-                log_sigma_fix_y=jax.random.normal(k4, (load_noise_std_steps.shape[0],)),
+                log_sigma_fix_x=jax.random.normal(kn['fix_x'], (load_noise_std_steps.shape[0],)),
+                log_sigma_fix_y=jax.random.normal(kn['fix_y'], (load_noise_std_steps.shape[0],)),
                 log_sigma_global=jnp.array(log_sigma0, dtype=jnp.float64),
                 param_version=jnp.array(3.0),
                 **aniso_kwargs,
