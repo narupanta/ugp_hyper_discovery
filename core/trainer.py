@@ -21,6 +21,48 @@ from core.features import AnisotropicFeatureExtractor
 jax.config.update("jax_enable_x64", True)
 
 
+class WindowPlateau:
+    """
+    Convergence monitor on window means of the per-iteration (Monte Carlo) loss: a window is flat when it improves on
+    the previous one by less than rel_tol * |loss|; `converged` after `patience` consecutive flat windows.
+    """
+    def __init__(self, window, rel_tol, patience, label, log_path):
+        self.window, self.rel_tol, self.patience, self.label, self.log_path = int(window), rel_tol, int(patience), label, log_path
+        self.buffer, self.means, self.flat_windows, self.flat_since, self.last_improvement = [], [], 0, None, None
+        self.start_step = None
+
+    @property
+    def converged(self):
+        return self.flat_windows >= self.patience
+
+    def add(self, losses, step):
+        if self.start_step is None:
+            self.start_step = step - len(losses)
+        self.buffer.append(np.asarray(losses))
+        if (step - self.start_step) % self.window != 0:
+            return
+        self.means.append(float(np.mean(np.concatenate(self.buffer))))
+        self.buffer = []
+        if len(self.means) < 2:
+            return
+        improvement = self.means[-2] - self.means[-1]
+        tol = self.rel_tol * abs(self.means[-1])
+        flat = improvement < tol
+        self.flat_windows = self.flat_windows + 1 if flat else 0
+        if flat and self.flat_windows == 1:
+            self.flat_since = step - self.window
+        if not flat:
+            self.flat_since = None
+        self.last_improvement = improvement
+        with open(self.log_path, "a") as f:
+            f.write(f"[{self.label}] step {step}: window mean {self.means[-1]:.4f}, improvement {improvement:.4f} "
+                    f"vs tol {tol:.4f} -> {'flat' if flat else 'improving'} ({self.flat_windows}/{self.patience})\n")
+
+    def report(self):
+        return {"converged": None if len(self.means) < 2 else bool(self.converged), "flat_since_step": self.flat_since,
+                "last_window_improvement": self.last_improvement, "n_windows": len(self.means)}
+
+
 class HyperelasticGPTrainer:
     def __init__(self, model: SparseHyperelasticityGP, initial_params, loss_fn, opt_state, optimizer, save_path, true_mat_model, I_z, I_all, min_dev, min_vol, max_dev, max_vol, freeze_fn=None, seed=None, vfm_mode: str = "linear_triangle", free_noise_mode: str = "constant", stage2: dict = None, restarts: dict = None):
         """
@@ -132,6 +174,7 @@ class HyperelasticGPTrainer:
         self.best_loss = float('inf')
         self.stage2_active = True
         self.switch_step = step_idx
+        self.switch_reason = reason
 
     def _run_restarts(self, main_key, block_size):
         """Short stage-1 trainings from several initialisations; keep the lowest-loss one."""
@@ -162,12 +205,13 @@ class HyperelasticGPTrainer:
     def _record_metrics(self, step, loss, aux, params):
         log_like_loss, kl_loss, free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, phy_loss, phys_loss2 = aux[:8]
         noise_prior = aux[8] if len(aux) > 8 else 0.0
+        stab = f" | stab_penalty={float(aux[9]):.6f} | frac_unstable={float(aux[10]):.4f}" if len(aux) > 10 else ""
         
         log_message = (
             f"step {step:04d} | loss={loss:.6f} | "
             f"log_like={log_like_loss:.6f} | kl={kl_loss:.6f} | free_x={free_x_log_likelihood:.6f} | "
             f"free_y={free_y_log_likelihood:.6f} | fix_x={fix_x_log_likelihood:.6f} | "
-            f"fix_y={fix_y_log_likelihood:.6f} | noise_prior={float(noise_prior):.6f} | "
+            f"fix_y={fix_y_log_likelihood:.6f} | noise_prior={float(noise_prior):.6f}{stab} | "
             f"phy={phy_loss:.6f} | phy2 ={phys_loss2:.6f}\n"
         )
         cur_params = self.model.load_params(params)
@@ -291,8 +335,12 @@ class HyperelasticGPTrainer:
 
         st2 = self.stage2
         mode = st2.get("mode", "fraction") if st2 is not None else None
-        self.stage2_active, self.switch_step = False, None
-        window_losses, window_means, flat_windows = [], [], 0
+        self.stage2_active, self.switch_step, self.switch_reason = False, None, None
+        mon_cfg = dict(window=(st2 or {}).get("window", 5000), rel_tol=(st2 or {}).get("rel_tol", 1e-3),
+                       patience=(st2 or {}).get("patience", 2), log_path=self.log_file_path)
+        stage1_monitor = WindowPlateau(label="plateau", **mon_cfg) if mode == "plateau" else None
+        # report-only convergence check of the final objective (stage 2 if any, else the whole run)
+        self.final_monitor = WindowPlateau(label="converge-final", **mon_cfg)
 
         step_idx = 0
         while step_idx < n_iterations:
@@ -301,7 +349,7 @@ class HyperelasticGPTrainer:
                     self._switch_to_stage2(step_idx, n_iterations - step_idx, "scheduled")
                 elif mode == "plateau" and step_idx >= st2["max_step"]:
                     self._switch_to_stage2(step_idx, n_iterations - step_idx, "stage-1 iteration cap reached")
-                elif mode == "plateau" and step_idx >= st2["min_step"] and flat_windows >= st2["patience"]:
+                elif mode == "plateau" and step_idx >= st2["min_step"] and stage1_monitor.converged:
                     self._switch_to_stage2(step_idx, n_iterations - step_idx, "stage-1 ELBO plateau")
             if st2 is not None and not self.stage2_active:
                 limit = st2["start_step"] if mode == "fraction" else st2["max_step"]
@@ -334,20 +382,11 @@ class HyperelasticGPTrainer:
                 with open(os.path.join(self.save_path, "best_params.npy"), "wb") as f:
                     jnp.save(f, self.best_params._asdict())
 
-            # Stage-1 plateau monitor on window means of the (noisy) per-iteration loss
-            if mode == "plateau" and not self.stage2_active:
-                window_losses.append(np.asarray(losses))
-                if step_idx % st2["window"] == 0:
-                    window_means.append(float(np.mean(np.concatenate(window_losses))))
-                    window_losses = []
-                    if len(window_means) >= 2:
-                        improvement = window_means[-2] - window_means[-1]
-                        flat = improvement < st2["rel_tol"] * abs(window_means[-1])
-                        flat_windows = flat_windows + 1 if flat else 0
-                        with open(self.log_file_path, "a") as f:
-                            f.write(f"[plateau] step {step_idx}: window mean {window_means[-1]:.4f}, improvement "
-                                    f"{improvement:.4f} vs tol {st2['rel_tol'] * abs(window_means[-1]):.4f} -> "
-                                    f"{'flat' if flat else 'improving'} ({flat_windows}/{st2['patience']})\n")
+            # Window-mean monitors of the (noisy) per-iteration loss: stage-1 switch, and final-stage report
+            if stage1_monitor is not None and not self.stage2_active:
+                stage1_monitor.add(losses, step_idx)
+            if st2 is None or self.stage2_active:
+                self.final_monitor.add(losses, step_idx)
 
             # Record metrics and update progress bar (matching legacy step % 50 == 0 behavior)
             postfix = self._record_metrics(step_idx, loss, aux_step, self.params)

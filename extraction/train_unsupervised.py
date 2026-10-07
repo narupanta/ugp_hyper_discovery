@@ -23,7 +23,8 @@ from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 from core.datasetclass import DatasetFactory
 from core.dataset_store import dataset_exists
 from core.loss_function import (total_stochastic_loss, build_eiv_indices, eiv_force_equivalent_sigma,
-                                eiv_linearisation, internal_force, eiv_noise_estimate, damped_newton_step)
+                                eiv_linearisation, internal_force, eiv_noise_estimate, damped_newton_step,
+                                ellipticity_penalty)
 from core.fem_engine import make_plane_stress_piola
 from core.plotter import (
     plot_inducing_points, plot_training_r2,
@@ -114,6 +115,11 @@ def parse_args():
                         help="Number of random GP initialisations trained briefly with the stage-1 objective; training continues "
                              "from the lowest-loss one. Recipe key or 1 (no restarts).")
     parser.add_argument('--restart_iterations', type=int, default=None, help="Iterations per restart (extra to n_iterations). Recipe key or 5000.")
+    parser.add_argument('--stability_prior_weight', type=float, default=None,
+                        help="Weight w of the strong-ellipticity prior on the posterior-mean energy at the training states: "
+                             "w * sum relu(-lambda_min(Q)/s_ref)^2 over states and directions (zero for stable materials). "
+                             "0 disables. Recipe key or 0.")
+    parser.add_argument('--stability_directions', type=int, default=None, help="Directions n per state for the acoustic tensor. Recipe key or 8.")
     parser.add_argument('--eiv_learning_rate', type=float, default=None,
                         help="residual_then_eiv: initial learning rate of the fresh Adam in the EIV stage (cosine-decayed to 10%%). Recipe key or 1e-3.")
     parser.add_argument('--eiv_damping', type=float, default=None,
@@ -382,6 +388,10 @@ if __name__ == "__main__" :
     eiv_switch_min_iteration = int(round(_rec_float(args.eiv_switch_min_fraction, "eiv_switch_min_fraction", 0.2) * n_iterations))
     eiv_switch_max_iteration = int(round(_rec_float(args.eiv_switch_max_fraction, "eiv_switch_max_fraction", 0.7) * n_iterations))
     n_restarts = int(_rec_float(args.n_restarts, "n_restarts", 1))
+    stability_prior_weight = _rec_float(args.stability_prior_weight, "stability_prior_weight", 0.0)
+    stability_directions = int(_rec_float(args.stability_directions, "stability_directions", 8))
+    if stability_prior_weight > 0:
+        print(f"[CONFIGURATION] Strong-ellipticity prior: weight {stability_prior_weight}, {stability_directions} directions per state.")
     restart_iterations = int(_rec_float(args.restart_iterations, "restart_iterations", 5000))
     if two_stage and eiv_switch_mode == "plateau":
         eiv_switch_iteration = None
@@ -468,6 +478,8 @@ if __name__ == "__main__" :
     config_dict["plateau_rel_tol"] = plateau_rel_tol
     config_dict["plateau_patience"] = plateau_patience
     config_dict["n_restarts"] = n_restarts
+    config_dict["stability_prior_weight"] = stability_prior_weight
+    config_dict["stability_directions"] = stability_directions
     config_dict["restart_iterations"] = restart_iterations
     config_dict["eiv_learning_rate"] = eiv_learning_rate
     config_dict["eiv_damping"] = eiv_damping
@@ -876,7 +888,8 @@ if __name__ == "__main__" :
             vfm_mode=args.vfm_mode, V_basis=V_basis,
             control_mode=control_mode, loads=loads_train,
             reaction_loss_weight=loss_reaction_weight,
-            likelihood=loss_likelihood, eiv=eiv_indices, noise_prior_dof=noise_prior_dof, eiv_damping=eiv_damping
+            likelihood=loss_likelihood, eiv=eiv_indices, noise_prior_dof=noise_prior_dof, eiv_damping=eiv_damping,
+            stability_weight=stability_prior_weight, stability_dirs=stability_directions
         )
 
     if two_stage:
@@ -1112,6 +1125,13 @@ if __name__ == "__main__" :
         metrics["sigma_free_y_mean"] = float(np.mean(phys_params.sigma_free_y))
     metrics["likelihood"] = likelihood
     metrics["final_likelihood"] = final_likelihood
+    metrics["switch_step"] = trainer.switch_step
+    metrics["switch_reason"] = trainer.switch_reason
+    metrics["final_stage_convergence"] = trainer.final_monitor.report()
+    # Material stability of the learned mean energy at the training states (reported for every run)
+    stab_pen, stab_frac = ellipticity_penalty(learned_gp.psi_det, f3x3, stability_directions)
+    metrics["stability_penalty"] = float(stab_pen)
+    metrics["fraction_unstable"] = float(stab_frac)
     if final_likelihood == "eiv":
         # Learned noise is a displacement std; downstream validation expects a force-residual std, so also
         # report the nodal force noise it implies through the posterior-mean tangent, Cov(r) = K diag(sigma_u^2) K^T.

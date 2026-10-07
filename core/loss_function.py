@@ -94,6 +94,30 @@ def eiv_force_equivalent_sigma(psi_fn: Any, f3x3: jnp.ndarray, cells: jnp.ndarra
     return jnp.sqrt(jnp.mean(jax.lax.map(step_var, f3x3), axis=0))
 
 
+def ellipticity_penalty(psi_fn: Any, f3x3: jnp.ndarray, n_dirs: int = 8):
+    """
+    Strong-ellipticity (material stability) prior on an energy psi at the given deformation states.
+    For each state and direction n the in-plane acoustic tensor Q_ik(n) = A_ijkl n_j n_l (A = dP/dF, out-of-plane
+    F entries held fixed) must be positive definite. Its smallest eigenvalue is normalised by the mean stiffness
+    (so the prior does not depend on the stress scale) and only negative values are penalised:
+        penalty = sum_{states, n} relu(-lambda_min(Q) / s_ref)^2,   zero for any stable material.
+    f3x3: (..., 3, 3). Returns (penalty, fraction of (state, direction) pairs that violate ellipticity).
+    """
+    def tangent(f3):
+        return jax.jacfwd(jax.grad(lambda f2: psi_fn(f3.at[:2, :2].set(f2))))(f3[:2, :2])   # (2,2,2,2)
+
+    A = jax.vmap(tangent)(f3x3.reshape(-1, 3, 3))
+    theta = jnp.arange(n_dirs) * jnp.pi / n_dirs
+    n = jnp.stack([jnp.cos(theta), jnp.sin(theta)], axis=-1)                          # (D, 2)
+    Q = jnp.einsum("eijkl,dj,dl->edik", A, n, n)
+    a, c = Q[..., 0, 0], Q[..., 1, 1]
+    b = 0.5 * (Q[..., 0, 1] + Q[..., 1, 0])
+    lam_min = 0.5 * (a + c) - jnp.sqrt(0.25 * (a - c) ** 2 + b ** 2 + 1e-30)
+    s_ref = jax.lax.stop_gradient(jnp.abs(jnp.mean(0.5 * (a + c))) + 1e-12)
+    r = lam_min / s_ref
+    return jnp.sum(jax.nn.relu(-r) ** 2), jnp.mean(r < 0)
+
+
 def damped_newton_step(K: jnp.ndarray, r: jnp.ndarray, damping: float = 0.0) -> jnp.ndarray:
     """
     eps = K^{-1} r, or with damping > 0 the Tikhonov-damped step eps = (K^T K + mu^2 I)^{-1} K^T r,
@@ -186,7 +210,8 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
                           vfm_mode: str = "linear_triangle", V_basis: jnp.ndarray = None,
                           control_mode: str = "force", loads: jnp.ndarray = None,
                           reaction_loss_weight: float = 1.0, likelihood: str = "residual",
-                          eiv: dict = None, noise_prior_dof: float = 4.0, eiv_damping: float = 0.0) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
+                          eiv: dict = None, noise_prior_dof: float = 4.0, eiv_damping: float = 0.0,
+                          stability_weight: float = 0.0, stability_dirs: int = 8) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, ...]]:
     """
     Computes the variational stochastic VFM loss and KL divergence ELBO objective.
     Strictly preserves functional purity without mutating stateful class instance attributes.
@@ -194,7 +219,9 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
     Supports control_mode: 'force' or 'displacement'.
     likelihood: 'residual' (iid Gaussian nodal force residuals) or 'eiv' (errors-in-variables,
     displacement-space likelihood; displacement control only, requires `eiv` from build_eiv_indices).
-    Returns aux = (ell, kl, free_x, free_y, fix_x, fix_y, sum_free_loss, sum_fix_loss, noise_log_prior).
+    stability_weight > 0 adds the strong-ellipticity prior on the posterior-mean energy (ellipticity_penalty).
+    Returns aux = (ell, kl, free_x, free_y, fix_x, fix_y, sum_free_loss, sum_fix_loss, noise_log_prior,
+                   stability_penalty, fraction_unstable).
     """
     params = model.load_params(p)
     gpweight = model.precompute_weights_from_loaded(params)
@@ -213,6 +240,10 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
         is_free_x, is_free_y = ~is_fix_x, ~is_fix_y
     nodal_noise = params.sigma_free_x is not None and jnp.ndim(params.sigma_free_x) > 0
     log_prior = noise_log_prior(params, is_free_x, is_free_y, noise_prior_dof) if likelihood != "eiv" else jnp.zeros(())
+    if stability_weight > 0:
+        stab_pen, frac_unstable = ellipticity_penalty(lambda f: model.psi_det(f, params=params, weights=gpweight), f3x3, stability_dirs)
+    else:
+        stab_pen, frac_unstable = jnp.zeros(()), jnp.zeros(())
 
     if likelihood == "eiv":
         dof_free = eiv["dof_free"]
@@ -243,8 +274,8 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
             e, r, dof_dir, sigma_fix_x, sigma_fix_y, reaction_loss_weight,
             nodal_noise=nodal_noise, sigma_global=params.sigma_global, prior_dof=noise_prior_dof))(eps_hat, reaction_res)
         kl_div = model.kl_divergence(params=params, weights=gpweight)
-        total_loss = -jnp.mean(ell_) + kl_div - log_prior
-        return total_loss, (jnp.mean(ell_), kl_div) + tuple(jnp.mean(t) for t in terms) + (log_prior,)
+        total_loss = -jnp.mean(ell_) + kl_div - log_prior + stability_weight * stab_pen
+        return total_loss, (jnp.mean(ell_), kl_div) + tuple(jnp.mean(t) for t in terms) + (log_prior, stab_pen, frac_unstable)
 
     piola2x2 = lambda f, k: model.piola(f, k, params=params, weights=gpweight)[:2, :2]
     piola_cells = jax.vmap(piola2x2, in_axes=(0, None))
@@ -260,10 +291,10 @@ def total_stochastic_loss(p: Any, model: SparseHyperelasticityGP, f3x3: jnp.ndar
     
     kl_div = model.kl_divergence(params=params, weights=gpweight)
 
-    total_loss = -jnp.mean(ell_) + kl_div - log_prior
+    total_loss = -jnp.mean(ell_) + kl_div - log_prior + stability_weight * stab_pen
     return total_loss, (jnp.mean(ell_), kl_div, jnp.mean(free_x_log_likelihood), jnp.mean(free_y_log_likelihood),
                         jnp.mean(fix_x_log_likelihood), jnp.mean(fix_y_log_likelihood), jnp.mean(sum_free_loss), jnp.mean(sum_fix_loss),
-                        log_prior)
+                        log_prior, stab_pen, frac_unstable)
 
 
 def ell(p: Any, sigma_fix_x: jnp.ndarray, sigma_fix_y: jnp.ndarray, cells: jnp.ndarray, n_nodes: int, 
