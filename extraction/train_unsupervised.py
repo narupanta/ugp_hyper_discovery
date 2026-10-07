@@ -175,7 +175,7 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
         replace_kwargs = {}
 
         # Anchor index 0 (reference stress-free state)
-        if covariance_mode == "full":
+        if "full" in covariance_mode:
             raw_dev_u_var = grads.raw_dev_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
             raw_vol_u_var = grads.raw_vol_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
         else:
@@ -192,7 +192,7 @@ def get_freeze_fn(is_fixed_noise: bool, is_fixed_z: bool, covariance_mode: str =
         })
 
         if getattr(grads, "raw_aniso_z", None) is not None:
-            if covariance_mode == "full":
+            if "full" in covariance_mode:
                 raw_aniso_u_var = grads.raw_aniso_u_var.at[0, :].set(0.0).at[:, 0].set(0.0)
             else:
                 raw_aniso_u_var = grads.raw_aniso_u_var.at[0].set(0.0)
@@ -741,6 +741,11 @@ if __name__ == "__main__" :
     config_dict["hyperparameter_init"] = hyperparameter_init
     config_dict["hyperparameter_amplitude_factor"] = hyperparameter_amplitude_factor
     config_dict["hyperparameter_lengthscale_factor"] = hyperparameter_lengthscale_factor
+    # config.json/.yaml were written before these were resolved; write them again
+    with open(os.path.join(save_path, "config.json"), "w") as f:
+        json.dump(config_dict, f, indent=4)
+    with open(os.path.join(save_path, "config.yaml"), "w") as f:
+        yaml.dump(config_dict, f, default_flow_style=False)
 
     # GP hyperparameter starts. 'random': raw values ~ N(0, 1). 'data': a broad, weakly informative prior with lengthscale
     # = b * span of the inducing features and amplitude = a * the energy density implied by the data (external work at the
