@@ -310,7 +310,8 @@ class HyperelasticGPTrainer:
             normalize_ell=m.normalize_ell,
             u_var_anchor=m.u_var_anchor,
             kzz_jitter=m.kzz_jitter,
-            constraint_lengthscale=m.constraint_lengthscale
+            constraint_lengthscale=m.constraint_lengthscale,
+            lin_prior_scale=getattr(m, "lin_prior_scale", 10.0)
         )
 
     def train(self, n_iterations, main_key, log_info_str, block_size: int = 50):

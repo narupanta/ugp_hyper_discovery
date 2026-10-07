@@ -120,6 +120,11 @@ def parse_args():
                              "w * sum relu(-lambda_min(Q)/s_ref)^2 over states and directions (zero for stable materials). "
                              "0 disables. Recipe key or 0.")
     parser.add_argument('--stability_directions', type=int, default=None, help="Directions n per state for the acoustic tensor. Recipe key or 8.")
+    parser.add_argument('--prior_mean', type=str, default=None, choices=["none", "linear_elastic"],
+                        help="'linear_elastic': explicit basis psi += mu (I1_bar-3)/2 + kappa (J-1)^2/2 with a Gaussian posterior over "
+                             "(mu, kappa) (full 2x2 covariance) and a broad zero-mean prior; the GPs model the deviations. Recipe key or 'none'.")
+    parser.add_argument('--linear_elastic_prior_scale', type=float, default=None,
+                        help="Prior std of (mu, kappa). Recipe key or 100 x data energy density.")
     parser.add_argument('--hyperparameter_init', type=str, default=None, choices=["random", "data"],
                         help="GP hyperparameter starts: 'random' (raw ~ N(0,1)) or 'data' (lengthscale = feature span, amplitude = "
                              "factor * data energy density). Inducing values stay random. Recipe key or 'random'.")
@@ -731,9 +736,18 @@ if __name__ == "__main__" :
                                             else rec.get("hyperparameter_amplitude_factor", 10.0))
     hyperparameter_lengthscale_factor = float(args.hyperparameter_lengthscale_factor if args.hyperparameter_lengthscale_factor is not None
                                               else rec.get("hyperparameter_lengthscale_factor", 1.5))
+    prior_mean = str(args.prior_mean or rec.get("prior_mean", "none")).lower()
     data_energy_scale = None
-    if hyperparameter_init == "data":
+    if hyperparameter_init == "data" or prior_mean == "linear_elastic":
         data_energy_scale = external_work_density(prep_data, node_type, control_mode, max(train_load_steps_indices))
+        config_dict["data_energy_scale"] = data_energy_scale
+    lin_prior_scale = float(args.linear_elastic_prior_scale if args.linear_elastic_prior_scale is not None
+                            else rec.get("linear_elastic_prior_scale", 100.0 * (data_energy_scale or 0.1)))
+    config_dict["prior_mean"] = prior_mean
+    config_dict["linear_elastic_prior_scale"] = lin_prior_scale if prior_mean == "linear_elastic" else None
+    if prior_mean == "linear_elastic":
+        print(f"[CONFIGURATION] Linear-elastic prior mean: psi += mu (I1_bar-3)/2 + kappa (J-1)^2/2, (mu, kappa) ~ N(0, {lin_prior_scale:.3g}^2 I) a priori.")
+    if hyperparameter_init == "data":
         print(f"[CONFIGURATION] Data-informed GP hyperparameters: energy density scale {data_energy_scale:.4g} "
               f"(external work / area), amplitude factor {hyperparameter_amplitude_factor}, "
               f"lengthscales = {hyperparameter_lengthscale_factor} x feature span.")
@@ -814,6 +828,11 @@ if __name__ == "__main__" :
                 raw_theta = jnp.log(val / (1.0 - val))
                 aniso_kwargs["raw_aniso_theta_mean"] = jnp.array(raw_theta)
 
+        lin_kwargs = {}
+        if prior_mean == "linear_elastic":   # start at zero moduli with a 10%-of-prior posterior std, uncorrelated
+            lin_kwargs = dict(lin_mean=jnp.zeros(2), lin_chol_raw=jnp.array([inv_softplus(0.1 * lin_prior_scale), 0.0,
+                                                                            inv_softplus(0.1 * lin_prior_scale)]))
+
         kzz_noise_kwargs = {}
         if trainable_kzz_noise:
             kzz_noise_kwargs["log_kzz_noise"] = jnp.log(jnp.array(kzz_jitter, dtype=jnp.float64))
@@ -843,6 +862,7 @@ if __name__ == "__main__" :
                 log_sigma_fix_y=sigma_fix_to_log_sigma_fix(load_noise_std_steps[:, 1]),
                 log_sigma_global=jnp.array(log_sigma0, dtype=jnp.float64),
                 param_version=jnp.array(3.0),
+                **lin_kwargs,
                 **aniso_kwargs,
                 **kzz_noise_kwargs
             )
@@ -871,6 +891,7 @@ if __name__ == "__main__" :
                 log_sigma_fix_y=jax.random.normal(kn['fix_y'], (load_noise_std_steps.shape[0],)),
                 log_sigma_global=jnp.array(log_sigma0, dtype=jnp.float64),
                 param_version=jnp.array(3.0),
+                **lin_kwargs,
                 **aniso_kwargs,
                 **kzz_noise_kwargs
             )
@@ -908,7 +929,8 @@ if __name__ == "__main__" :
         normalize_ell=args.normalize_ell,
         u_var_anchor=args.u_var_anchor,
         kzz_jitter=kzz_jitter,
-        constraint_lengthscale=constraint_lengthscale
+        constraint_lengthscale=constraint_lengthscale,
+        lin_prior_scale=lin_prior_scale
     )
 
 
@@ -952,7 +974,8 @@ if __name__ == "__main__" :
                 normalize_ell=args.normalize_ell,
                 u_var_anchor=args.u_var_anchor,
                 kzz_jitter=kzz_jitter,
-                constraint_lengthscale=constraint_lengthscale
+                constraint_lengthscale=constraint_lengthscale,
+                lin_prior_scale=lin_prior_scale
             )
         else:
             local_model = model
@@ -1069,7 +1092,8 @@ if __name__ == "__main__" :
         normalize_ell=args.normalize_ell,
         u_var_anchor=args.u_var_anchor,
         kzz_jitter=kzz_jitter,
-        constraint_lengthscale=constraint_lengthscale
+        constraint_lengthscale=constraint_lengthscale,
+        lin_prior_scale=lin_prior_scale
     )
     F_train_full_3x3 = load_f3x3_from_dataset(prep_data, material_model=true_mat_model)
     
@@ -1202,6 +1226,11 @@ if __name__ == "__main__" :
     metrics["switch_step"] = trainer.switch_step
     metrics["switch_reason"] = trainer.switch_reason
     metrics["final_stage_convergence"] = trainer.final_monitor.report()
+    if getattr(phys_params, "lin_mean", None) is not None:
+        lc = np.asarray(phys_params.lin_cov); sd = np.sqrt(np.diag(lc))
+        metrics["linear_elastic_mean"] = {"mu": float(phys_params.lin_mean[0]), "kappa": float(phys_params.lin_mean[1]),
+                                          "mu_std": float(sd[0]), "kappa_std": float(sd[1]),
+                                          "corr_mu_kappa": float(lc[0, 1] / (sd[0] * sd[1]))}
     # Material stability of the learned mean energy at the training states (reported for every run)
     stab_pen, stab_frac = ellipticity_penalty(learned_gp.psi_det, f3x3, stability_directions)
     metrics["stability_penalty"] = float(stab_pen)

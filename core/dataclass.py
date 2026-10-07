@@ -40,6 +40,10 @@ class GPRawParams(NamedTuple):
     # absolute Kzz jitter. 2 = lengthscale bound 1x the feature range, jitter relative to sig^2.
     # 3 = as 2 with the lengthscale bound 2x the feature range.
     param_version: jnp.ndarray = None
+    # Optional linear-elastic explicit basis (prior mean): psi += b_mu * (I1_bar - 3)/2 + b_kappa * (J - 1)^2/2 with
+    # q(b) = N(lin_mean, L L^T), L from lin_chol_raw = [raw L11, L21, raw L22] (softplus on the diagonal).
+    lin_mean: jnp.ndarray = None
+    lin_chol_raw: jnp.ndarray = None
 
 class GPParams(NamedTuple) :
     dev_ls: jnp.ndarray = None
@@ -68,6 +72,8 @@ class GPParams(NamedTuple) :
     aniso_theta_var: jnp.ndarray = None
     aniso_z: jnp.ndarray = None
     kzz_noise: jnp.ndarray = None
+    lin_mean: jnp.ndarray = None      # posterior mean of (mu, kappa) of the linear-elastic basis
+    lin_cov: jnp.ndarray = None       # posterior covariance (2, 2)
 
 class GPWeights(NamedTuple) :
     dev_Kzz: jnp.ndarray
