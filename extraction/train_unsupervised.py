@@ -23,7 +23,7 @@ from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 from core.datasetclass import DatasetFactory
 from core.dataset_store import dataset_exists
 from core.loss_function import (total_stochastic_loss, build_eiv_indices, eiv_force_equivalent_sigma,
-                                eiv_linearisation, internal_force, eiv_noise_estimate)
+                                eiv_linearisation, internal_force, eiv_noise_estimate, damped_newton_step)
 from core.fem_engine import make_plane_stress_piola
 from core.plotter import (
     plot_inducing_points, plot_training_r2,
@@ -102,6 +102,18 @@ def parse_args():
     parser.add_argument('--eiv_switch_fraction', type=float, default=None,
                         help="residual_then_eiv: fraction of n_iterations trained with the residual likelihood before switching "
                              "to EIV (robust far from the solution; EIV is the calibrated likelihood near it). Recipe key or 0.5.")
+    parser.add_argument('--eiv_switch_mode', type=str, default=None, choices=["fraction", "plateau"],
+                        help="residual_then_eiv: switch at a fixed fraction, or when the stage-1 ELBO plateaus "
+                             "(window-mean improvement < plateau_rel_tol*|loss| for plateau_patience windows). Recipe key or 'fraction'.")
+    parser.add_argument('--eiv_switch_min_fraction', type=float, default=None, help="plateau mode: earliest switch (fraction of n_iterations). Recipe key or 0.2.")
+    parser.add_argument('--eiv_switch_max_fraction', type=float, default=None, help="plateau mode: latest switch (fraction of n_iterations). Recipe key or 0.7.")
+    parser.add_argument('--plateau_window', type=int, default=None, help="plateau mode: window length in iterations. Recipe key or 5000.")
+    parser.add_argument('--plateau_rel_tol', type=float, default=None, help="plateau mode: relative improvement threshold per window. Recipe key or 1e-3.")
+    parser.add_argument('--plateau_patience', type=int, default=None, help="plateau mode: consecutive flat windows needed. Recipe key or 2.")
+    parser.add_argument('--n_restarts', type=int, default=None,
+                        help="Number of random GP initialisations trained briefly with the stage-1 objective; training continues "
+                             "from the lowest-loss one. Recipe key or 1 (no restarts).")
+    parser.add_argument('--restart_iterations', type=int, default=None, help="Iterations per restart (extra to n_iterations). Recipe key or 5000.")
     parser.add_argument('--eiv_learning_rate', type=float, default=None,
                         help="residual_then_eiv: initial learning rate of the fresh Adam in the EIV stage (cosine-decayed to 10%%). Recipe key or 1e-3.")
     parser.add_argument('--eiv_damping', type=float, default=None,
@@ -363,9 +375,22 @@ if __name__ == "__main__" :
     eiv_switch_fraction = _rec_float(args.eiv_switch_fraction, "eiv_switch_fraction", 0.5)
     eiv_learning_rate = _rec_float(args.eiv_learning_rate, "eiv_learning_rate", 1e-3)
     eiv_damping = _rec_float(args.eiv_damping, "eiv_damping", 0.0)
-    eiv_switch_iteration = int(round(eiv_switch_fraction * n_iterations)) if two_stage else None
-    if two_stage and not (0 < eiv_switch_iteration < n_iterations):
-        raise ValueError(f"eiv_switch_fraction={eiv_switch_fraction} must leave iterations for both stages.")
+    eiv_switch_mode = str(args.eiv_switch_mode or rec.get("eiv_switch_mode", "fraction")).lower()
+    plateau_window = int(_rec_float(args.plateau_window, "plateau_window", 5000))
+    plateau_rel_tol = _rec_float(args.plateau_rel_tol, "plateau_rel_tol", 1e-3)
+    plateau_patience = int(_rec_float(args.plateau_patience, "plateau_patience", 2))
+    eiv_switch_min_iteration = int(round(_rec_float(args.eiv_switch_min_fraction, "eiv_switch_min_fraction", 0.2) * n_iterations))
+    eiv_switch_max_iteration = int(round(_rec_float(args.eiv_switch_max_fraction, "eiv_switch_max_fraction", 0.7) * n_iterations))
+    n_restarts = int(_rec_float(args.n_restarts, "n_restarts", 1))
+    restart_iterations = int(_rec_float(args.restart_iterations, "restart_iterations", 5000))
+    if two_stage and eiv_switch_mode == "plateau":
+        eiv_switch_iteration = None
+        if not (0 < eiv_switch_min_iteration <= eiv_switch_max_iteration < n_iterations):
+            raise ValueError("plateau switch needs 0 < eiv_switch_min_fraction <= eiv_switch_max_fraction < 1.")
+    else:
+        eiv_switch_iteration = int(round(eiv_switch_fraction * n_iterations)) if two_stage else None
+        if two_stage and not (0 < eiv_switch_iteration < n_iterations):
+            raise ValueError(f"eiv_switch_fraction={eiv_switch_fraction} must leave iterations for both stages.")
 
     if final_likelihood == "eiv":
         if control_mode != "displacement":
@@ -384,9 +409,15 @@ if __name__ == "__main__" :
     if final_likelihood == "eiv" and free_noise_mode in ["nodal", "diagonal"] and noise_prior_dof <= 0:
         raise ValueError("likelihood='eiv' with per-node noise needs noise_prior_dof > 0 (each DOF has only a few load steps).")
     print(f"[CONFIGURATION] Likelihood: '{likelihood}' | per-node noise prior dof: {noise_prior_dof}")
-    if two_stage:
+    if two_stage and eiv_switch_mode == "plateau":
+        print(f"[CONFIGURATION] Two-stage: residual (reaction weight {reaction_loss_weight}) until its ELBO plateaus "
+              f"(window {plateau_window}, rel tol {plateau_rel_tol}, patience {plateau_patience}; between iterations "
+              f"{eiv_switch_min_iteration} and {eiv_switch_max_iteration}), then EIV (damping {eiv_damping}, lr {eiv_learning_rate}).")
+    elif two_stage:
         print(f"[CONFIGURATION] Two-stage: residual (reaction weight {reaction_loss_weight}) for {eiv_switch_iteration} iterations, "
               f"then EIV (weight 1, damping {eiv_damping}, lr {eiv_learning_rate}) for {n_iterations - eiv_switch_iteration}.")
+    if n_restarts > 1:
+        print(f"[CONFIGURATION] {n_restarts} random initialisations x {restart_iterations} iterations; continuing from the best.")
 
     # Identify free nodes for boundary freezing and noise initialization
     is_fix_x = (node_type[:, 1] == 1)
@@ -430,6 +461,14 @@ if __name__ == "__main__" :
     config_dict["noise_prior_dof"] = noise_prior_dof
     config_dict["final_likelihood"] = final_likelihood
     config_dict["eiv_switch_iteration"] = eiv_switch_iteration
+    config_dict["eiv_switch_mode"] = eiv_switch_mode
+    config_dict["eiv_switch_min_iteration"] = eiv_switch_min_iteration
+    config_dict["eiv_switch_max_iteration"] = eiv_switch_max_iteration
+    config_dict["plateau_window"] = plateau_window
+    config_dict["plateau_rel_tol"] = plateau_rel_tol
+    config_dict["plateau_patience"] = plateau_patience
+    config_dict["n_restarts"] = n_restarts
+    config_dict["restart_iterations"] = restart_iterations
     config_dict["eiv_learning_rate"] = eiv_learning_rate
     config_dict["eiv_damping"] = eiv_damping
     with open(os.path.join(save_path, "config.json"), "w") as f:
@@ -643,15 +682,10 @@ if __name__ == "__main__" :
 
     # Setup random key
     key = jax.random.PRNGKey(args.seed)
-    k1, k2, k3, k4 = jax.random.split(key, 4)
-    
-    if args.resume_from:
-        resume_dir = os.path.join(base_save_path, args.resume_from)
-        best_params_dict = np.load(os.path.join(resume_dir, "best_params.npy"), allow_pickle=True).item()
-        valid_keys = set(GPRawParams._fields)
-        filtered_params = {k: v for k, v in best_params_dict.items() if k in valid_keys}
-        params = GPRawParams(**filtered_params)
-    else:
+
+    def build_initial_params(init_key):
+        """Random GP initialisation (lengthscales, amplitudes, inducing values); restarts call it with other keys."""
+        k1, k2, k3, k4 = jax.random.split(init_key, 4)
         raw_dev_z_fps = inv_softplus(dev_z - jnp.array([3.0, 3.0]))
         raw_vol_z_fps = inv_softplus(vol_z)
 
@@ -754,6 +788,16 @@ if __name__ == "__main__" :
                 **aniso_kwargs,
                 **kzz_noise_kwargs
             )
+        return params
+
+    if args.resume_from:
+        resume_dir = os.path.join(base_save_path, args.resume_from)
+        best_params_dict = np.load(os.path.join(resume_dir, "best_params.npy"), allow_pickle=True).item()
+        valid_keys = set(GPRawParams._fields)
+        filtered_params = {k: v for k, v in best_params_dict.items() if k in valid_keys}
+        params = GPRawParams(**filtered_params)
+    else:
+        params = build_initial_params(key)
     
     min_dev = jnp.min(dev_z, axis=0)
     min_vol = jnp.min(vol_z, axis=0)
@@ -837,7 +881,7 @@ if __name__ == "__main__" :
 
     if two_stage:
         loss_fn = make_loss_fn("residual", reaction_loss_weight)
-        stage1_iterations = eiv_switch_iteration
+        stage1_iterations = eiv_switch_max_iteration if eiv_switch_mode == "plateau" else eiv_switch_iteration
     else:
         loss_fn = make_loss_fn(likelihood, reaction_loss_weight)
         stage1_iterations = n_iterations
@@ -858,11 +902,19 @@ if __name__ == "__main__" :
     if two_stage:
         stage2 = dict(
             loss_fn=make_loss_fn("eiv", 1.0),
-            optimizer=optax.adam(learning_rate=optax.cosine_decay_schedule(
-                init_value=eiv_learning_rate, decay_steps=n_iterations - eiv_switch_iteration, alpha=0.1)),
-            start_step=eiv_switch_iteration,
+            make_optimizer=lambda n_steps: optax.adam(learning_rate=optax.cosine_decay_schedule(
+                init_value=eiv_learning_rate, decay_steps=max(1, n_steps), alpha=0.1)),
+            mode=eiv_switch_mode, start_step=eiv_switch_iteration,
+            min_step=eiv_switch_min_iteration, max_step=eiv_switch_max_iteration,
+            window=plateau_window, rel_tol=plateau_rel_tol, patience=plateau_patience,
             name="EIV likelihood",
         )
+
+    restarts = None
+    if n_restarts > 1 and not args.resume_from:
+        # restart 0 is the default initialisation; the others use keys folded from the seed
+        restarts = dict(candidates=[params] + [build_initial_params(jax.random.fold_in(key, r)) for r in range(1, n_restarts)],
+                        iterations=restart_iterations)
     
     trainer = HyperelasticGPTrainer(
         model=model,
@@ -882,7 +934,8 @@ if __name__ == "__main__" :
         seed=args.seed,
         vfm_mode=args.vfm_mode,
         free_noise_mode=free_noise_mode,
-        stage2=stage2
+        stage2=stage2,
+        restarts=restarts
     )
 
     meta_path = os.path.join(save_path, "metadata.json")
@@ -990,7 +1043,7 @@ if __name__ == "__main__" :
         dof_free = eiv_indices["dof_free"]
         K_ff_m, _ = jax.lax.map(lambda f_step: eiv_linearisation(mean_psi, f_step, cells, cells.max() + 1, dNdX, dA, eiv_indices), f3x3)
         r_m = jax.lax.map(lambda f_step: internal_force(mean_psi, f_step, cells, cells.max() + 1, dNdX, dA)[dof_free], f3x3)
-        eps_m = jax.vmap(jnp.linalg.solve)(K_ff_m, r_m)
+        eps_m = jax.vmap(lambda K, r: damped_newton_step(K, r, eiv_damping))(K_ff_m, r_m)  # same step as in training
         nodal = free_noise_mode in ["nodal", "diagonal"]
         sig_dof = np.asarray(eiv_noise_estimate(eps_m, dof_free % 2, nodal_noise=nodal,
                                                 sigma_global=mean_params.sigma_global, prior_dof=noise_prior_dof))

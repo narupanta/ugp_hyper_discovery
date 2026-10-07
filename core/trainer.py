@@ -22,10 +22,19 @@ jax.config.update("jax_enable_x64", True)
 
 
 class HyperelasticGPTrainer:
-    def __init__(self, model: SparseHyperelasticityGP, initial_params, loss_fn, opt_state, optimizer, save_path, true_mat_model, I_z, I_all, min_dev, min_vol, max_dev, max_vol, freeze_fn=None, seed=None, vfm_mode: str = "linear_triangle", free_noise_mode: str = "constant", stage2: dict = None):
-        """stage2: optional dict(loss_fn, optimizer, start_step, name) for a second training stage with a different
-        objective (e.g. residual -> EIV likelihood). It starts at start_step from the best stage-1 parameters with a
-        fresh optimizer state, and checkpoint selection restarts (the two losses are on different scales)."""
+    def __init__(self, model: SparseHyperelasticityGP, initial_params, loss_fn, opt_state, optimizer, save_path, true_mat_model, I_z, I_all, min_dev, min_vol, max_dev, max_vol, freeze_fn=None, seed=None, vfm_mode: str = "linear_triangle", free_noise_mode: str = "constant", stage2: dict = None, restarts: dict = None):
+        """
+        stage2: optional second training stage with a different objective (e.g. residual -> EIV likelihood), dict with
+            loss_fn, make_optimizer(n_steps) -> optax optimizer, name, and the switch rule:
+            mode="fraction": switch at start_step;
+            mode="plateau":  switch once the window-mean stage-1 loss improves by less than rel_tol*|loss| for
+                             `patience` consecutive windows of `window` iterations, between min_step and max_step.
+            Stage 2 starts from the best stage-1 parameters with a fresh optimizer; checkpoint selection restarts
+            (the two losses are on different scales).
+        restarts: optional dict(candidates=[raw params], iterations=int): before the main loop each candidate
+            initialisation is trained for `iterations` with the stage-1 objective; training continues from the one
+            with the lowest mean loss over its last fifth (local optima of the ELBO).
+        """
         self.model = model
         self.params = initial_params
         self.opt_state = opt_state
@@ -67,9 +76,9 @@ class HyperelasticGPTrainer:
         
         # JIT compile fused block optimization loop via jax.lax.scan for GPU efficiency
         self.train_block = self._make_train_block(loss_fn, optimizer, freeze_fn)
+        self.optimizer = optimizer
         self.stage2 = stage2
-        if stage2 is not None:
-            self.stage2_block = self._make_train_block(stage2["loss_fn"], stage2["optimizer"], freeze_fn)
+        self.restarts = restarts
 
         self.log_file_path = os.path.join(save_path, "optimization_log.txt")
         self.loss_components_hist = {
@@ -107,18 +116,48 @@ class HyperelasticGPTrainer:
 
         return train_block
 
-    def _switch_to_stage2(self, step_idx):
-        name = self.stage2.get("name", "stage 2")
-        msg = (f"=== Step {step_idx}: switching objective to {name} (from best stage-1 parameters, "
-               f"stage-1 best loss {self.best_loss:.6f}; fresh optimizer) ===")
+    def _log(self, msg):
         print("\n" + msg)
         with open(self.log_file_path, "a") as f:
             f.write(msg + "\n")
+
+    def _switch_to_stage2(self, step_idx, remaining, reason):
+        name = self.stage2.get("name", "stage 2")
+        self._log(f"=== Step {step_idx}: switching objective to {name} ({reason}; from best stage-1 parameters, "
+                  f"stage-1 best loss {self.best_loss:.6f}; fresh optimizer for {remaining} iterations) ===")
+        optimizer2 = self.stage2["make_optimizer"](remaining)
         self.params = self.best_params
-        self.opt_state = self.stage2["optimizer"].init(self.params)
-        self.train_block = self.stage2_block
+        self.opt_state = optimizer2.init(self.params)
+        self.train_block = self._make_train_block(self.stage2["loss_fn"], optimizer2, self.freeze_fn)
         self.best_loss = float('inf')
         self.stage2_active = True
+        self.switch_step = step_idx
+
+    def _run_restarts(self, main_key, block_size):
+        """Short stage-1 trainings from several initialisations; keep the lowest-loss one."""
+        cands, n_it = self.restarts["candidates"], int(self.restarts["iterations"])
+        results = []
+        for r, p in enumerate(cands):
+            params, opt_state, tail = p, self.optimizer.init(p), []
+            done = 0
+            while done < n_it:
+                b = min(block_size, n_it - done)
+                keys = jr.split(main_key, b + 1)
+                main_key = keys[0]
+                params, opt_state, losses, _ = self.train_block(params, opt_state, keys[1:])
+                done += b
+                if done > 0.8 * n_it:
+                    tail.append(np.asarray(losses))
+            score = float(np.mean(np.concatenate(tail))) if tail else float("inf")
+            if not np.isfinite(score):
+                score = float("inf")
+            results.append((score, r, params, opt_state))
+            self._log(f"restart {r}: mean stage-1 loss over its last {int(0.2 * n_it)} of {n_it} iterations = {score:.6f}")
+        score, r, params, opt_state = min(results, key=lambda x: x[0])
+        self._log(f"=== continuing from restart {r} (loss {score:.6f}) ===")
+        self.params, self.opt_state = params, opt_state
+        self.best_params, self.best_loss = params, float("inf")
+        return main_key
 
     def _record_metrics(self, step, loss, aux, params):
         log_like_loss, kl_loss, free_x_log_likelihood, free_y_log_likelihood, fix_x_log_likelihood, fix_y_log_likelihood, phy_loss, phys_loss2 = aux[:8]
@@ -244,39 +283,50 @@ class HyperelasticGPTrainer:
 
         # Determine step blocks for jax.lax.scan execution
         block_size = min(max(1, block_size), max(1, n_iterations))
-        n_blocks = (n_iterations + block_size - 1) // block_size
+        if self.restarts is not None and len(self.restarts["candidates"]) > 1:
+            main_key = self._run_restarts(main_key, block_size)
 
-        pbar = tqdm(range(n_blocks), desc="Training Sparse GP (JIT Blocks)", unit="block")
+        pbar = tqdm(total=n_iterations, desc="Training Sparse GP (JIT Blocks)", unit="it")
         milestone_params = []
-        
+
+        st2 = self.stage2
+        mode = st2.get("mode", "fraction") if st2 is not None else None
+        self.stage2_active, self.switch_step = False, None
+        window_losses, window_means, flat_windows = [], [], 0
+
         step_idx = 0
-        self.stage2_active = False
-        switch_step = self.stage2["start_step"] if self.stage2 is not None else None
-        if switch_step is not None:
-            # make the switch fall on a block boundary
-            n_blocks = -(-switch_step // block_size) + -(-(n_iterations - switch_step) // block_size)
-            pbar = tqdm(range(n_blocks), desc="Training Sparse GP (JIT Blocks)", unit="block")
-        for _ in pbar:
-            if switch_step is not None and not self.stage2_active and step_idx >= switch_step:
-                self._switch_to_stage2(step_idx)
-            limit = switch_step if (switch_step is not None and not self.stage2_active) else n_iterations
+        while step_idx < n_iterations:
+            if st2 is not None and not self.stage2_active:
+                if mode == "fraction" and step_idx >= st2["start_step"]:
+                    self._switch_to_stage2(step_idx, n_iterations - step_idx, "scheduled")
+                elif mode == "plateau" and step_idx >= st2["max_step"]:
+                    self._switch_to_stage2(step_idx, n_iterations - step_idx, "stage-1 iteration cap reached")
+                elif mode == "plateau" and step_idx >= st2["min_step"] and flat_windows >= st2["patience"]:
+                    self._switch_to_stage2(step_idx, n_iterations - step_idx, "stage-1 ELBO plateau")
+            if st2 is not None and not self.stage2_active:
+                limit = st2["start_step"] if mode == "fraction" else st2["max_step"]
+                if mode == "plateau":   # end blocks on window boundaries so plateau checks are exact
+                    limit = min(limit, (step_idx // st2["window"] + 1) * st2["window"])
+            else:
+                limit = n_iterations
             cur_block_size = min(block_size, limit - step_idx)
             keys = jr.split(main_key, cur_block_size + 1)
             main_key = keys[0]
             block_keys = keys[1:]
-            
+
             # Execute entire block inside JAX XLA compiled graph without host-device sync
             self.params, self.opt_state, losses, aux_out = self.train_block(self.params, self.opt_state, block_keys)
-            
+
             step_idx += cur_block_size
-            
+            pbar.update(cur_block_size)
+
             # Extract final metrics from the block
             loss = float(losses[-1])
             aux_step = tuple(a[-1] for a in aux_out)
             # Select checkpoints on the block-averaged loss: a single MC estimate of the negative ELBO is
             # noisy, and taking its minimum systematically favours lucky Monte Carlo draws.
             block_loss = float(jnp.mean(losses))
-            
+
             # Decoupled parameter disk I/O: save only when best loss is broken at block boundary
             if block_loss < self.best_loss:
                 self.best_loss = block_loss
@@ -284,13 +334,29 @@ class HyperelasticGPTrainer:
                 with open(os.path.join(self.save_path, "best_params.npy"), "wb") as f:
                     jnp.save(f, self.best_params._asdict())
 
+            # Stage-1 plateau monitor on window means of the (noisy) per-iteration loss
+            if mode == "plateau" and not self.stage2_active:
+                window_losses.append(np.asarray(losses))
+                if step_idx % st2["window"] == 0:
+                    window_means.append(float(np.mean(np.concatenate(window_losses))))
+                    window_losses = []
+                    if len(window_means) >= 2:
+                        improvement = window_means[-2] - window_means[-1]
+                        flat = improvement < st2["rel_tol"] * abs(window_means[-1])
+                        flat_windows = flat_windows + 1 if flat else 0
+                        with open(self.log_file_path, "a") as f:
+                            f.write(f"[plateau] step {step_idx}: window mean {window_means[-1]:.4f}, improvement "
+                                    f"{improvement:.4f} vs tol {st2['rel_tol'] * abs(window_means[-1]):.4f} -> "
+                                    f"{'flat' if flat else 'improving'} ({flat_windows}/{st2['patience']})\n")
+
             # Record metrics and update progress bar (matching legacy step % 50 == 0 behavior)
             postfix = self._record_metrics(step_idx, loss, aux_step, self.params)
             pbar.set_postfix(postfix)
-                    
+
             # Collect milestone parameter snapshots for post-training evolution plotting (avoids blocking JIT loop)
             if step_idx % max(1, (n_iterations // 5)) == 0 and step_idx != 0 and step_idx != n_iterations:
                 milestone_params.append((step_idx, self.best_params))
+        pbar.close()
 
         # Record and print peak memory usage upon completion of the optimization loop
         self._log_memory_report()
