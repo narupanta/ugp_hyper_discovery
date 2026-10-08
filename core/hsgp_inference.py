@@ -323,7 +323,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                f"kappa {float(lin[1]):.4g}, sigma_u {sigma_u_known:.3g}")
     stages = [list(range(k)) for k in range(2, T + 1)] if (continuation and T > 2) else [list(range(T))]
     labels = list(map(int, step_labels)) if step_labels is not None else list(range(T))
-    it, aborted = -1, False
+    it, aborted, stage_status = -1, False, []
     for si, active in enumerate(stages):
         N_x, N_y = n_free_x * len(active), n_free_y * len(active)
         optimise_hyper = make_optimiser()
@@ -391,13 +391,20 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 theta_mean, converged = new_mean, True
                 break
 
+        stage_status.append(dict(stage=si, load_steps=[labels[t] for t in active], converged=converged,
+                                 iterations=n_full, aborted=aborted))
+        if not converged and not aborted:
+            log_fn(f"[HSGP] WARNING: continuation stage {si} (load steps {[labels[t] for t in active]}) stopped at the "
+                   f"iteration cap max_outer={max_outer} without converging; later stages start from this point and "
+                   f"the result can depend on it. Increase max_outer.")
         if aborted:
             break
 
     h = unpack(eta)
     hyper = {k: np.asarray(v) for k, v in h.items() if k not in ("su_x", "su_y")}
     info = dict(prior_mean=prior_mean, envelope=model.envelope, likelihood=likelihood, sigma_u_known=sigma_u_known,
-                reaction_weight=reaction_weight, warp=warp, continuation=continuation, continuation_stages=[[labels[t] for t in a] for a in stages], converged=converged, outer_iterations=len(history), log_evidence=history[-1]["log_evidence"],
+                reaction_weight=reaction_weight, warp=warp, continuation=continuation, continuation_stages=[[labels[t] for t in a] for a in stages],
+                stage_status=stage_status, all_stages_converged=bool(stage_status) and all(x["converged"] for x in stage_status), converged=converged, outer_iterations=len(history), log_evidence=history[-1]["log_evidence"],
                 box_factor=box_factor, num_basis_dev=num_basis_dev, num_basis_vol=num_basis_vol,
                 dev_ls_bounds=[np.asarray(lsd_lo).tolist(), np.asarray(lsd_hi).tolist()],
                 vol_ls_bounds=[np.asarray(lsv_lo).tolist(), np.asarray(lsv_hi).tolist()],

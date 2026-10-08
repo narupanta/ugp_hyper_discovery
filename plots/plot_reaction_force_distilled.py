@@ -595,37 +595,46 @@ def compute_gp_reaction_forces(data_file: str, gp_dir: str = None, step: int = 1
                 with open(dev_dist_src, "r") as f:
                     candidates.append(Path(f.read().strip()))
         for c in candidates:
-            if c.exists() and (c / "best_params.npy").exists():
+            if c.exists() and ((c / "best_params.npy").exists() or (c / "hsgp_posterior.npz").exists()):
                 gp_dir = str(c)
                 break
 
-    if gp_dir is None or not os.path.exists(os.path.join(gp_dir, "best_params.npy")):
+    if gp_dir is None or not (os.path.exists(os.path.join(gp_dir, "best_params.npy")) or os.path.exists(os.path.join(gp_dir, "hsgp_posterior.npz"))):
         print(f"[WARN] GP model directory not found for {data_file}. Skipping GP comparison.")
         return None
 
     try:
-        best_params_dict = np.load(os.path.join(gp_dir, "best_params.npy"), allow_pickle=True).item()
-        valid_fields = set(GPRawParams._fields)
-        gp_params = GPRawParams(**{k: v for k, v in best_params_dict.items() if k in valid_fields})
-        I_z = jnp.load(os.path.join(gp_dir, "I_z.npy"))
+        from core.teacher import load_hsgp_teacher
+        gp = load_hsgp_teacher(gp_dir)   # HSGP extraction or None (SVGP: rebuilt below)
+        if gp is not None:
+            I_z = None
+            dev_z, vol_z, aniso_z = gp.dev_z, gp.vol_z, None
+            min_dev, max_dev = dev_z.min(0), dev_z.max(0)
+            min_vol, max_vol = vol_z.min(0), vol_z.max(0)
+            min_aniso = max_aniso = None
+        else:
+            best_params_dict = np.load(os.path.join(gp_dir, "best_params.npy"), allow_pickle=True).item()
+            valid_fields = set(GPRawParams._fields)
+            gp_params = GPRawParams(**{k: v for k, v in best_params_dict.items() if k in valid_fields})
+            I_z = jnp.load(os.path.join(gp_dir, "I_z.npy"))
 
-        dev_z = I_z[:, :2]
-        vol_z = I_z[:, 2:3]
-        min_dev = jnp.min(dev_z, axis=0)
-        min_vol = jnp.min(vol_z, axis=0)
-        max_dev = jnp.max(dev_z, axis=0)
-        max_vol = jnp.max(vol_z, axis=0)
+            dev_z = I_z[:, :2]
+            vol_z = I_z[:, 2:3]
+            min_dev = jnp.min(dev_z, axis=0)
+            min_vol = jnp.min(vol_z, axis=0)
+            max_dev = jnp.max(dev_z, axis=0)
+            max_vol = jnp.max(vol_z, axis=0)
 
-        metadata_path = os.path.join(gp_dir, "metadata.json")
-        cov_mode = "diag"
-        if os.path.exists(metadata_path):
-            with open(metadata_path, "r") as f:
-                cov_mode = json.load(f).get("covariance_mode", "diag")
+            metadata_path = os.path.join(gp_dir, "metadata.json")
+            cov_mode = "diag"
+            if os.path.exists(metadata_path):
+                with open(metadata_path, "r") as f:
+                    cov_mode = json.load(f).get("covariance_mode", "diag")
 
-        gp = SparseHyperelasticityGP(
-            gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
-            beta=1.0, covariance_mode=cov_mode
-        )
+            gp = SparseHyperelasticityGP(
+                gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
+                beta=1.0, covariance_mode=cov_mode
+            )
 
         data = np.load(data_file, allow_pickle=True)
         coords = jnp.array(data["node_coords"])

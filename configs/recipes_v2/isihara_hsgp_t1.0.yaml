@@ -14,6 +14,8 @@ target_load_true_top: 1.0
 asym_factor: 0.5
 n_loadsteps: 20
 geometry_train: block
+geometry_val: holes              # FEM forward validation geometry
+target_load_holes: 1.0           # validation load kept inside the training range
 mesh_size: 0.08
 control_mode: displacement
 stress_mode: plane_strain
@@ -32,9 +34,27 @@ hsgp_continuation: 1              # load-step continuation {1,7} -> {1,7,13} -> 
 hsgp_num_basis_dev: 24            # eigenfunctions per deviatoric dimension (24 x 24)
 hsgp_num_basis_vol: 32
 hsgp_box_factor: 8.0              # basis box half-width / data half-range
-hsgp_max_outer: 30                # Gauss-Newton iterations per continuation stage
+hsgp_max_outer: 60                # Gauss-Newton iteration cap per continuation stage (a stage stopped at the cap is logged)
 hsgp_amplitude_prior_scale: 1.0   # log-normal hyperprior widths (log units)
 hsgp_lengthscale_prior_scale: 1.0
 
-# 4. Seeds
+# 4. Distillation (teacher = HSGP posterior exported at the training states only: sample_mode dataset_f)
+distilled_material_model: gmr
+distillation_n_iterations: 10000
+dev_vol_distillation_n_iterations: 10000
+distill_target: sef_split
+sample_mode: dataset_f
+num_points: 512
+num_func_samples: 512
+max_gamma: 1.0
+do_sensitivity: 1
+sobol_threshold: 0.0001
+sobol_samples_factor: 4096
+
+# 5. FEM forward validation
+run_validation: 1
+val_number_samples: 1024
+val_workers: 4
+
+# 6. Seeds
 seeds: [6, 7, 8, 9, 10]

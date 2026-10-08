@@ -526,7 +526,7 @@ for SEED in $SEEDS_LIST; do
         mkdir -p "$DISTILL_DIR"
         
         # Verify extracted model exists
-        if [ ! -f "$EXTRACT_DIR/best_params.npy" ]; then
+        if [ ! -f "$EXTRACT_DIR/best_params.npy" ] && [ ! -f "$EXTRACT_DIR/hsgp_posterior.npz" ]; then   # SVGP or HSGP extraction
             echo "❌ Error: Cannot run distillation; extracted model not found at $EXTRACT_DIR"
             exit 1
         fi

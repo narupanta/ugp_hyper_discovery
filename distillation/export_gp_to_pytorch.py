@@ -268,30 +268,39 @@ def main():
     parser.add_argument("--dataset_path", type=str, default="", help="Explicit path to precomputed dataset npz file.")
     args = parser.parse_args()
 
-    best_params_dict = np.load(os.path.join(args.saved_model_dir, "best_params.npy"), allow_pickle=True).item()
-    valid_keys = set(GPRawParams._fields)
-    filtered_params = {k: v for k, v in best_params_dict.items() if k in valid_keys}
-    gp_params = GPRawParams(**filtered_params)
-    I_z = jnp.load(os.path.join(args.saved_model_dir, "I_z.npy"))
-    
-    dev_z = I_z[:, :2]
-    if I_z.shape[1] > 3:
-        vol_z = I_z[:, 2:3]
-        aniso_z = I_z[:, 3:]
-    elif I_z.shape[1] == 3:
-        vol_z = I_z[:, 2:3]
-        aniso_z = None
+    from core.teacher import load_hsgp_teacher
+    hsgp_teacher = load_hsgp_teacher(args.saved_model_dir)   # HSGP extraction (extraction/train_hsgp.py) or None
+    if hsgp_teacher is not None:
+        if not args.sample_mode.startswith("dataset"):
+            # HSGP teachers are exported at the training states only (no standard-mode extrapolation, no inducing points)
+            raise ValueError(f"sample_mode '{args.sample_mode}' is not supported for an HSGP teacher; use dataset_f (training states).")
+        gp_params = I_z = dev_z = vol_z = aniso_z = None
+        min_dev = max_dev = min_vol = max_vol = min_aniso = max_aniso = None
     else:
-        vol_z = I_z[:, 2:]
-        aniso_z = None
+        best_params_dict = np.load(os.path.join(args.saved_model_dir, "best_params.npy"), allow_pickle=True).item()
+        valid_keys = set(GPRawParams._fields)
+        filtered_params = {k: v for k, v in best_params_dict.items() if k in valid_keys}
+        gp_params = GPRawParams(**filtered_params)
+        I_z = jnp.load(os.path.join(args.saved_model_dir, "I_z.npy"))
+    
+        dev_z = I_z[:, :2]
+        if I_z.shape[1] > 3:
+            vol_z = I_z[:, 2:3]
+            aniso_z = I_z[:, 3:]
+        elif I_z.shape[1] == 3:
+            vol_z = I_z[:, 2:3]
+            aniso_z = None
+        else:
+            vol_z = I_z[:, 2:]
+            aniso_z = None
 
-    min_dev = jnp.min(dev_z, axis=0)
-    min_vol = jnp.min(vol_z, axis=0)
-    max_dev = jnp.max(dev_z, axis=0)
-    max_vol = jnp.max(vol_z, axis=0)
+        min_dev = jnp.min(dev_z, axis=0)
+        min_vol = jnp.min(vol_z, axis=0)
+        max_dev = jnp.max(dev_z, axis=0)
+        max_vol = jnp.max(vol_z, axis=0)
 
-    min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
-    max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
+        min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
+        max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
 
     from core.material_models import get_material_from_dir
     try:
@@ -311,7 +320,7 @@ def main():
             meta_dict = json.load(f)
             cov_mode = meta_dict.get("covariance_mode", "diag")
     else:
-        cov_mode = "full" if gp_params.raw_dev_u_var.ndim == 2 else "diag"
+        cov_mode = "full" if (gp_params is not None and gp_params.raw_dev_u_var.ndim == 2) else "diag"
 
     pos_var_mean = meta_dict.get("pos_var_mean", 1)
     augmented_var_dist = meta_dict.get("augmented_var_dist", 1)
@@ -342,7 +351,7 @@ def main():
         
     constraint_lengthscale = meta_dict.get("constraint_lengthscale", 1)
 
-    gp_model = SparseHyperelasticityGP(
+    gp_model = hsgp_teacher if hsgp_teacher is not None else SparseHyperelasticityGP(
         gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
         beta=1.0, feature_extractor=feature_extractor,
         aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,

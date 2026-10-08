@@ -4,6 +4,10 @@
 # Usage:
 #   scripts/run_hsgp_pipeline.sh <recipe.yaml | recipe name (configs/recipes_v2 first) | experiment dir> [--seeds "6 7 8"] [--hsgp_warp 0 ...]
 #   Any --hsgp_* option is passed on to extraction/train_hsgp.py and overrides the recipe (see its docstring).
+#   --downstream: afterwards run distillation, FEM forward validation and validation plots with scripts/run_pipeline.sh
+#                 on the same experiment directory (it accepts HSGP extractions; data generation only adds the missing
+#                 validation geometry, the clean training data is reused).
+#   --downstream-only: skip the extraction and run only those stages (for an existing HSGP experiment directory).
 #
 # Layout (same as run_pipeline.sh): results/<timestamp>_hsgp_<model>_<dnoise>_<lnoise>_<top>_<asym>_<geometry>/<seed>/extracted
 # Each seed runs the fit and the plots as two processes so that peak memory stays low.
@@ -17,8 +21,12 @@ INPUT_TARGET=""
 SEEDS_CLI=""
 HSGP_ARGS=()
 SKIP_PLOTS=false
+DOWNSTREAM=false
+DOWNSTREAM_ONLY=false
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --downstream) DOWNSTREAM=true; shift ;;
+        --downstream-only) DOWNSTREAM=true; DOWNSTREAM_ONLY=true; shift ;;
         --seeds|--seed) SEEDS_CLI="$2"; shift 2 ;;
         --skip-plots) SKIP_PLOTS=true; shift ;;
         --hsgp_*) HSGP_ARGS+=("$1" "$2"); shift 2 ;;
@@ -39,6 +47,7 @@ if [ -d "$INPUT_TARGET" ] || [ -d "results/$INPUT_TARGET" ]; then
     echo "Using existing experiment directory: $EXPERIMENT_DIR"
 else
     if [ -f "$INPUT_TARGET" ]; then RECIPE_FILE="$INPUT_TARGET"
+    elif [ -f "${INPUT_TARGET}.yaml" ]; then RECIPE_FILE="${INPUT_TARGET}.yaml"
     elif [ -f "configs/recipes_v2/${INPUT_TARGET}.yaml" ]; then RECIPE_FILE="configs/recipes_v2/${INPUT_TARGET}.yaml"
     elif [ -f "configs/recipes/${INPUT_TARGET}.yaml" ]; then RECIPE_FILE="configs/recipes/${INPUT_TARGET}.yaml"
     else echo "Recipe or experiment '$INPUT_TARGET' not found"; exit 1; fi
@@ -82,6 +91,7 @@ echo "Overrides:       ${HSGP_ARGS[*]:-none (recipe hsgp_* keys / defaults)}"
 echo "========================================================================"
 
 for SEED in $SEEDS_LIST; do
+    [ "$DOWNSTREAM_ONLY" = true ] && break
     echo ""
     echo "### SEED = $SEED"
     SEED_DIR="$EXPERIMENT_DIR/$SEED"
@@ -111,3 +121,9 @@ for SEED in $SEEDS_LIST; do
     echo "Seed $SEED done -> $EXTRACT_DIR"
 done
 echo "All seeds finished: $EXPERIMENT_DIR"
+
+if [ "$DOWNSTREAM" = true ]; then
+    echo ""
+    echo "### Downstream: distillation, FEM forward validation, validation plots (scripts/run_pipeline.sh)"
+    bash scripts/run_pipeline.sh "$EXPERIMENT_DIR" --seeds "$SEEDS_LIST" --do-gen --do-distill --do-fem --do-val
+fi

@@ -22,4 +22,4 @@ if [ ! -f "$SCRIPT_PATH" ] && [ -f "./run_hsgp_pipeline.sh" ]; then
 fi
 
 echo "Launching HSGP pipeline via Singularity: $SCRIPT_PATH $*"
-singularity exec --nv -B /home/npantapalin/work/projects/ugp_hyper_discovery:/home/mmdiscovery/shared --pwd /home/mmdiscovery/shared /home/npantapalin/work/container/ugp_hyper_discovery.sif "$SCRIPT_PATH" "$@"
+singularity exec --nv -B /home/npantapalin/work/projects/ugp_hyper_discovery:/home/mmdiscovery/shared --pwd /home/mmdiscovery/shared /home/npantapalin/work/container/ugp_hyper_discovery.sif bash "$SCRIPT_PATH" "$@"

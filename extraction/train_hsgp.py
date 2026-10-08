@@ -16,7 +16,7 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_num_basis_dev: 24          # eigenfunctions per deviatoric dimension
     hsgp_num_basis_vol: 32
     hsgp_box_factor: 8.0
-    hsgp_max_outer: 30              # GP-stage iterations per continuation stage
+    hsgp_max_outer: 60              # GP-stage iteration cap per continuation stage
     hsgp_amplitude_prior_scale: 1.0 # log-normal hyperprior widths (log units)
     hsgp_lengthscale_prior_scale: 1.0
     hsgp_reaction_weight: 1.0       # residual_learned only
@@ -46,7 +46,7 @@ from core.utils import load_f3x3_from_dataset
 from plots.theme import apply_style, save_figure
 
 HSGP_DEFAULTS = dict(hsgp_likelihood="eiv", hsgp_prior_mean="none", hsgp_envelope=1, hsgp_warp=1, hsgp_continuation=1,
-                     hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_box_factor=8.0, hsgp_max_outer=30,
+                     hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_box_factor=8.0, hsgp_max_outer=60,
                      hsgp_amplitude_prior_scale=1.0, hsgp_lengthscale_prior_scale=1.0, hsgp_reaction_weight=1.0)
 
 
@@ -198,6 +198,7 @@ def main():
     metrics = dict(seed=args.seed, extraction_method="hsgp", extraction_time=fit_time, train_steps=train_steps,
                    val_steps=val_steps, log_evidence=model.info["log_evidence"], converged=model.info["converged"],
                    outer_iterations=model.info["outer_iterations"],
+                   all_stages_converged=model.info.get("all_stages_converged"), stage_status=model.info.get("stage_status"),
                    sigma_u_x=model.noise["sigma_u_x"], sigma_u_y=model.noise["sigma_u_y"],
                    linear_elastic_mean=model.linear_elastic_summary(), small_strain_moduli=model.small_strain_moduli(),
                    fraction_unstable=float(frac), reaction_forces=reac,

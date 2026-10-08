@@ -177,71 +177,80 @@ def main():
     print(f"Evaluating Validation Load Steps: {val_steps} (Total points per step: {F_all_steps_2x2.shape[1]})")
 
     # 3. Load GP Model
-    best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
-    valid_gp_fields = set(GPRawParams._fields)
-    filtered_params = {k: v for k, v in best_params_dict.items() if k in valid_gp_fields}
-    gp_params = GPRawParams(**filtered_params)
-    I_z = jnp.load(os.path.join(saved_model_dir, "I_z.npy"))
-
-    dev_z = I_z[:, :2]
-    if I_z.shape[1] > 3:
-        vol_z = I_z[:, 2:3]
-        aniso_z = I_z[:, 3:]
-    elif I_z.shape[1] == 3:
-        vol_z = I_z[:, 2:3]
-        aniso_z = None
+    from core.teacher import load_hsgp_teacher
+    learned_gp = load_hsgp_teacher(saved_model_dir)   # HSGP extraction or None (SVGP: rebuilt below)
+    if learned_gp is not None:
+        I_z = None
+        dev_z, vol_z, aniso_z = learned_gp.dev_z, learned_gp.vol_z, None
+        min_dev, max_dev = dev_z.min(0), dev_z.max(0)
+        min_vol, max_vol = vol_z.min(0), vol_z.max(0)
+        min_aniso = max_aniso = None
     else:
-        vol_z = I_z[:, 2:]
-        aniso_z = None
+        best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
+        valid_gp_fields = set(GPRawParams._fields)
+        filtered_params = {k: v for k, v in best_params_dict.items() if k in valid_gp_fields}
+        gp_params = GPRawParams(**filtered_params)
+        I_z = jnp.load(os.path.join(saved_model_dir, "I_z.npy"))
 
-    min_dev = jnp.min(dev_z, axis=0)
-    min_vol = jnp.min(vol_z, axis=0)
-    max_dev = jnp.max(dev_z, axis=0)
-    max_vol = jnp.max(vol_z, axis=0)
-    min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
-    max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
-
-    metadata_path = os.path.join(saved_model_dir, "metadata.json")
-    cov_mode = "diag"
-    if os.path.exists(metadata_path):
-        with open(metadata_path, "r") as f:
-            cov_mode = json.load(f).get("covariance_mode", "diag")
-
-    feature_extractor = None
-    if aniso_z is not None:
-        a0_val = getattr(true_model, "a0", None)
-        if a0_val is None:
-            a0_val = getattr(true_model, "a1", None)
-        a1_val = getattr(true_model, "a1", None) if getattr(true_model, "a0", None) is not None else getattr(true_model, "a2", None)
-        if a0_val is not None and a1_val is not None:
-            feature_extractor = AnisotropicFeatureExtractor(np.array(a0_val), a1=np.array(a1_val))
-        elif a0_val is not None:
-            feature_extractor = AnisotropicFeatureExtractor(np.array(a0_val))
-        elif getattr(gp_params, "raw_aniso_theta_mean", None) is not None:
-            raw_th = gp_params.raw_aniso_theta_mean
-            theta = float(np.pi * (1.0 / (1.0 + np.exp(-raw_th)) - 0.5))
-            a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
-            feature_extractor = AnisotropicFeatureExtractor(a0)
-        elif os.path.exists(metadata_path):
-            with open(metadata_path, "r") as f:
-                meta_dict = json.load(f)
-                if "a0" in meta_dict:
-                    a0 = np.array(meta_dict["a0"])
-                    a1 = np.array(meta_dict["a1"]) if "a1" in meta_dict else None
-                    feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
-                else:
-                    a0 = np.array([np.cos(np.pi/4), np.sin(np.pi/4), 0.0])
-                    feature_extractor = AnisotropicFeatureExtractor(a0)
+        dev_z = I_z[:, :2]
+        if I_z.shape[1] > 3:
+            vol_z = I_z[:, 2:3]
+            aniso_z = I_z[:, 3:]
+        elif I_z.shape[1] == 3:
+            vol_z = I_z[:, 2:3]
+            aniso_z = None
         else:
-            a0 = np.array([np.cos(np.pi/4), np.sin(np.pi/4), 0.0])
-            feature_extractor = AnisotropicFeatureExtractor(a0)
+            vol_z = I_z[:, 2:]
+            aniso_z = None
 
-    learned_gp = SparseHyperelasticityGP(
-        gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
-        beta=1.0, feature_extractor=feature_extractor,
-        aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,
-        covariance_mode=cov_mode
-    )
+        min_dev = jnp.min(dev_z, axis=0)
+        min_vol = jnp.min(vol_z, axis=0)
+        max_dev = jnp.max(dev_z, axis=0)
+        max_vol = jnp.max(vol_z, axis=0)
+        min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
+        max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
+
+        metadata_path = os.path.join(saved_model_dir, "metadata.json")
+        cov_mode = "diag"
+        if os.path.exists(metadata_path):
+            with open(metadata_path, "r") as f:
+                cov_mode = json.load(f).get("covariance_mode", "diag")
+
+        feature_extractor = None
+        if aniso_z is not None:
+            a0_val = getattr(true_model, "a0", None)
+            if a0_val is None:
+                a0_val = getattr(true_model, "a1", None)
+            a1_val = getattr(true_model, "a1", None) if getattr(true_model, "a0", None) is not None else getattr(true_model, "a2", None)
+            if a0_val is not None and a1_val is not None:
+                feature_extractor = AnisotropicFeatureExtractor(np.array(a0_val), a1=np.array(a1_val))
+            elif a0_val is not None:
+                feature_extractor = AnisotropicFeatureExtractor(np.array(a0_val))
+            elif getattr(gp_params, "raw_aniso_theta_mean", None) is not None:
+                raw_th = gp_params.raw_aniso_theta_mean
+                theta = float(np.pi * (1.0 / (1.0 + np.exp(-raw_th)) - 0.5))
+                a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
+                feature_extractor = AnisotropicFeatureExtractor(a0)
+            elif os.path.exists(metadata_path):
+                with open(metadata_path, "r") as f:
+                    meta_dict = json.load(f)
+                    if "a0" in meta_dict:
+                        a0 = np.array(meta_dict["a0"])
+                        a1 = np.array(meta_dict["a1"]) if "a1" in meta_dict else None
+                        feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
+                    else:
+                        a0 = np.array([np.cos(np.pi/4), np.sin(np.pi/4), 0.0])
+                        feature_extractor = AnisotropicFeatureExtractor(a0)
+            else:
+                a0 = np.array([np.cos(np.pi/4), np.sin(np.pi/4), 0.0])
+                feature_extractor = AnisotropicFeatureExtractor(a0)
+
+        learned_gp = SparseHyperelasticityGP(
+            gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
+            beta=1.0, feature_extractor=feature_extractor,
+            aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,
+            covariance_mode=cov_mode
+        )
 
     # 4. Load distilled parameter samples
     has_aniso = os.path.exists(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
