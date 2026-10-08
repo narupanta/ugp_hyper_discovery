@@ -132,6 +132,13 @@ def parse_args():
                         help="hyperparameter_init=data: initial GP amplitude as a multiple of the data energy density. Recipe key or 10.")
     parser.add_argument('--hyperparameter_lengthscale_factor', type=float, default=None,
                         help="hyperparameter_init=data: initial lengthscale as a multiple of the inducing-feature span (< 2 when constrained). Recipe key or 1.5.")
+    parser.add_argument('--amplitude_prior_scale', type=float, default=None,
+                        help="Log-normal hyperprior on the GP amplitudes: log sig ~ N(log(amplitude_factor * data energy density), tau^2), "
+                             "tau = this value (MAP-II instead of ML-II). Stops a GP from collapsing to sig -> 0, an absorbing state under "
+                             "whitening (dL/dv ~ sig, dL/dsig ~ v). 0 disables. Recipe key or 0.")
+    parser.add_argument('--freeze_amplitudes_stage1', type=str, default=None,
+                        help="residual_then_eiv: hold the GP amplitudes at their initial values during the residual stage "
+                             "(true/false). Recipe key or false.")
     parser.add_argument('--eiv_learning_rate', type=float, default=None,
                         help="residual_then_eiv: initial learning rate of the fresh Adam in the EIV stage (cosine-decayed to 10%%). Recipe key or 1e-3.")
     parser.add_argument('--eiv_damping', type=float, default=None,
@@ -737,8 +744,15 @@ if __name__ == "__main__" :
     hyperparameter_lengthscale_factor = float(args.hyperparameter_lengthscale_factor if args.hyperparameter_lengthscale_factor is not None
                                               else rec.get("hyperparameter_lengthscale_factor", 1.5))
     prior_mean = str(args.prior_mean or rec.get("prior_mean", "none")).lower()
+    amplitude_prior_scale = float(args.amplitude_prior_scale if args.amplitude_prior_scale is not None
+                                  else rec.get("amplitude_prior_scale", 0.0))
+    freeze_amplitudes_stage1 = args.freeze_amplitudes_stage1 if args.freeze_amplitudes_stage1 is not None \
+        else rec.get("freeze_amplitudes_stage1", False)
+    if isinstance(freeze_amplitudes_stage1, str):
+        freeze_amplitudes_stage1 = freeze_amplitudes_stage1.lower() in ["true", "1", "yes"]
+    freeze_amplitudes_stage1 = bool(freeze_amplitudes_stage1)
     data_energy_scale = None
-    if hyperparameter_init == "data" or prior_mean == "linear_elastic":
+    if hyperparameter_init == "data" or prior_mean == "linear_elastic" or amplitude_prior_scale > 0:
         data_energy_scale = external_work_density(prep_data, node_type, control_mode, max(train_load_steps_indices))
         config_dict["data_energy_scale"] = data_energy_scale
     lin_prior_scale = float(args.linear_elastic_prior_scale if args.linear_elastic_prior_scale is not None
@@ -755,6 +769,14 @@ if __name__ == "__main__" :
     config_dict["hyperparameter_init"] = hyperparameter_init
     config_dict["hyperparameter_amplitude_factor"] = hyperparameter_amplitude_factor
     config_dict["hyperparameter_lengthscale_factor"] = hyperparameter_lengthscale_factor
+    amplitude_prior_centre = float(jnp.log(hyperparameter_amplitude_factor * data_energy_scale)) if amplitude_prior_scale > 0 else None
+    if amplitude_prior_scale > 0:
+        print(f"[CONFIGURATION] GP amplitude hyperprior: log sig ~ N(log {float(jnp.exp(amplitude_prior_centre)):.4g}, {amplitude_prior_scale}^2).")
+    if freeze_amplitudes_stage1:
+        print("[CONFIGURATION] GP amplitudes frozen during the residual stage.")
+    config_dict["amplitude_prior_scale"] = amplitude_prior_scale
+    config_dict["amplitude_prior_centre"] = amplitude_prior_centre
+    config_dict["freeze_amplitudes_stage1"] = freeze_amplitudes_stage1
     # config.json/.yaml were written before these were resolved; write them again
     with open(os.path.join(save_path, "config.json"), "w") as f:
         json.dump(config_dict, f, indent=4)
@@ -945,9 +967,25 @@ if __name__ == "__main__" :
         V_basis = build_kinematic_virtual_fields(mesh_pos, node_type, order=args.vf_order, control_mode=control_mode)
         print(f"Constructed {V_basis.shape[0]} orthonormal virtual fields.")
 
-    def make_loss_fn(loss_likelihood, loss_reaction_weight):
+    sig_fields = [f for f in ("raw_dev_sig", "raw_vol_sig", "raw_aniso_sig") if f in GPRawParams._fields]
+
+    def amplitude_penalty(p):
+        """-log of the log-normal amplitude hyperprior (up to a constant), summed over the GP components present."""
+        pen = jnp.zeros(())
+        for f in sig_fields:
+            raw = getattr(p, f)
+            if raw is not None:
+                pen = pen + 0.5 * jnp.sum(((raw - amplitude_prior_centre) / amplitude_prior_scale) ** 2)
+        return pen
+
+    def make_loss_fn(loss_likelihood, loss_reaction_weight, freeze_sig=False):
         def loss_fn(p, k):
-            return _loss(p, k, loss_likelihood, loss_reaction_weight)
+            if freeze_sig:
+                p = p._replace(**{f: jax.lax.stop_gradient(getattr(p, f)) for f in sig_fields if getattr(p, f) is not None})
+            loss, aux = _loss(p, k, loss_likelihood, loss_reaction_weight)
+            if amplitude_prior_scale > 0:
+                loss = loss + amplitude_penalty(p)
+            return loss, aux
         return loss_fn
 
     def _loss(p, k, loss_likelihood, loss_reaction_weight):
@@ -990,7 +1028,7 @@ if __name__ == "__main__" :
         )
 
     if two_stage:
-        loss_fn = make_loss_fn("residual", reaction_loss_weight)
+        loss_fn = make_loss_fn("residual", reaction_loss_weight, freeze_sig=freeze_amplitudes_stage1)
         stage1_iterations = eiv_switch_max_iteration if eiv_switch_mode == "plateau" else eiv_switch_iteration
     else:
         loss_fn = make_loss_fn(likelihood, reaction_loss_weight)
