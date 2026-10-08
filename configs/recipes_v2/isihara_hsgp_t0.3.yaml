@@ -1,0 +1,40 @@
+# ==============================================================================
+# Recipe v2 (HSGP extraction): Isihara, plane strain, displacement control, target displacement 0.3
+# Run: sbatch scripts/run_hsgp_slurm.sh configs/recipes_v2/isihara_hsgp_t0.3.yaml
+# ==============================================================================
+
+# 1. Synthetic data (clean FEM dataset solved once per configuration; noise added per seed at load time)
+material_model_name: isihara
+material_params:
+  dev_params: [0.5, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  vol_params: [1.0, 0.5, 0.0]
+disp_noise: 0.0005
+load_noise: 0.05
+target_load_true_top: 0.3
+asym_factor: 0.5
+n_loadsteps: 20
+geometry_train: block
+mesh_size: 0.08
+control_mode: displacement
+stress_mode: plane_strain
+
+# 2. Load steps
+train_load_steps_indices: [1, 7, 13, 17, 19]
+val_load_steps_indices: [2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 14, 15, 16, 18]
+test_load_steps_indices: [18, 19]
+
+# 3. HSGP extraction (extraction/train_hsgp.py)
+hsgp_likelihood: eiv              # eiv | residual | residual_learned
+hsgp_prior_mean: none             # none (zero-mean GP) | linear_elastic (mu h_mu + kappa h_kappa basis)
+hsgp_envelope: 1                  # amplitude envelope from the linear-elastic stage (energies over orders of magnitude)
+hsgp_warp: 1                      # GP inputs log(I_bar - 2), log J (dense core + long tail of strain states)
+hsgp_continuation: 1              # load-step continuation {1,7} -> {1,7,13} -> ... (large deformations)
+hsgp_num_basis_dev: 24            # eigenfunctions per deviatoric dimension (24 x 24)
+hsgp_num_basis_vol: 32
+hsgp_box_factor: 8.0              # basis box half-width / data half-range
+hsgp_max_outer: 30                # Gauss-Newton iterations per continuation stage
+hsgp_amplitude_prior_scale: 1.0   # log-normal hyperprior widths (log units)
+hsgp_lengthscale_prior_scale: 1.0
+
+# 4. Seeds
+seeds: [6, 7, 8, 9, 10]
