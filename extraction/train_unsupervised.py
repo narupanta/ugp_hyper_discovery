@@ -136,6 +136,10 @@ def parse_args():
                         help="Log-normal hyperprior on the GP amplitudes: log sig ~ N(log(amplitude_factor * data energy density), tau^2), "
                              "tau = this value (MAP-II instead of ML-II). Stops a GP from collapsing to sig -> 0, an absorbing state under "
                              "whitening (dL/dv ~ sig, dL/dsig ~ v). 0 disables. Recipe key or 0.")
+    parser.add_argument('--lengthscale_prior_scale', type=float, default=None,
+                        help="Log-normal hyperprior on the GP lengthscales: log l ~ N(log(lengthscale_factor * inducing-feature span), tau^2), "
+                             "tau = this value. Stops l -> infinity, which flattens a GP over the data range just like sig -> 0 "
+                             "(curvature freedom ~ sig * (span / l)^2). 0 disables. Recipe key or 0.")
     parser.add_argument('--freeze_amplitudes_stage1', type=str, default=None,
                         help="residual_then_eiv: hold the GP amplitudes at their initial values during the residual stage "
                              "(true/false). Recipe key or false.")
@@ -746,6 +750,8 @@ if __name__ == "__main__" :
     prior_mean = str(args.prior_mean or rec.get("prior_mean", "none")).lower()
     amplitude_prior_scale = float(args.amplitude_prior_scale if args.amplitude_prior_scale is not None
                                   else rec.get("amplitude_prior_scale", 0.0))
+    lengthscale_prior_scale = float(args.lengthscale_prior_scale if args.lengthscale_prior_scale is not None
+                                    else rec.get("lengthscale_prior_scale", 0.0))
     freeze_amplitudes_stage1 = args.freeze_amplitudes_stage1 if args.freeze_amplitudes_stage1 is not None \
         else rec.get("freeze_amplitudes_stage1", False)
     if isinstance(freeze_amplitudes_stage1, str):
@@ -777,6 +783,9 @@ if __name__ == "__main__" :
     config_dict["amplitude_prior_scale"] = amplitude_prior_scale
     config_dict["amplitude_prior_centre"] = amplitude_prior_centre
     config_dict["freeze_amplitudes_stage1"] = freeze_amplitudes_stage1
+    config_dict["lengthscale_prior_scale"] = lengthscale_prior_scale
+    if lengthscale_prior_scale > 0:
+        print(f"[CONFIGURATION] GP lengthscale hyperprior: log l ~ N(log({hyperparameter_lengthscale_factor} x feature span), {lengthscale_prior_scale}^2).")
     # config.json/.yaml were written before these were resolved; write them again
     with open(os.path.join(save_path, "config.json"), "w") as f:
         json.dump(config_dict, f, indent=4)
@@ -978,6 +987,19 @@ if __name__ == "__main__" :
                 pen = pen + 0.5 * jnp.sum(((raw - amplitude_prior_centre) / amplitude_prior_scale) ** 2)
         return pen
 
+    ls_prior_centres = {c: jnp.log(hyperparameter_lengthscale_factor * _feature_range(c))
+                        for c in ("dev", "vol", "aniso") if {"dev": dev_z, "vol": vol_z, "aniso": aniso_z}[c] is not None}
+
+    def lengthscale_penalty(p):
+        """-log of the log-normal lengthscale hyperprior (up to a constant), on the transformed lengthscales."""
+        gp_p = model.load_params(p)
+        pen = jnp.zeros(())
+        for c, centre in ls_prior_centres.items():
+            ls = getattr(gp_p, f"{c}_ls", None)
+            if ls is not None:
+                pen = pen + 0.5 * jnp.sum(((jnp.log(ls) - centre) / lengthscale_prior_scale) ** 2)
+        return pen
+
     def make_loss_fn(loss_likelihood, loss_reaction_weight, freeze_sig=False):
         def loss_fn(p, k):
             if freeze_sig:
@@ -985,6 +1007,8 @@ if __name__ == "__main__" :
             loss, aux = _loss(p, k, loss_likelihood, loss_reaction_weight)
             if amplitude_prior_scale > 0:
                 loss = loss + amplitude_penalty(p)
+            if lengthscale_prior_scale > 0:
+                loss = loss + lengthscale_penalty(p)
             return loss, aux
         return loss_fn
 
