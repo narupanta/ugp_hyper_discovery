@@ -23,6 +23,10 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_sigma_cap: 10.0            # GP amplitudes capped at this multiple of their prior centre
     hsgp_stability_search: 1        # Gauss-Newton updates must keep the mean tangent positive definite
     hsgp_hyper_restarts: 1          # multi-start hyperparameter optimisation (prior centre, lengthscales x0.5, x2)
+    hsgp_continuation_stages:       # optional explicit ladder of cumulative load-step sets (recipe only), e.g.
+      - [1, 2, 3]                   #   default: [first two training steps], then one more step per stage
+      - [1, 2, 3, 5]
+      - [1, 2, 3, 5, 7]
 """
 import argparse
 import json
@@ -176,7 +180,7 @@ def main():
             sigma_u_known=disp_noise, reaction_weight=opt["hsgp_reaction_weight"], warp=bool(opt["hsgp_warp"]),
             continuation=bool(opt["hsgp_continuation"]), max_outer=opt["hsgp_max_outer"], step_labels=train_steps,
             sigma_cap=opt["hsgp_sigma_cap"], stability_search=bool(opt["hsgp_stability_search"]),
-            hyper_restarts=bool(opt["hsgp_hyper_restarts"]))
+            hyper_restarts=bool(opt["hsgp_hyper_restarts"]), continuation_stages=rec.get("hsgp_continuation_stages"))
         fit_time = time.time() - t0
         model.save(post_path)
         feats = jax.vmap(model.feature_extractor.extract)(F_all[jnp.array(train_steps)].reshape(-1, 3, 3))
@@ -184,7 +188,7 @@ def main():
         np.save(os.path.join(save_path, "I_obs_all.npy"), I_obs)
         cfg_out = dict(rec, extraction_method="hsgp", dataset_path=args.dataset_path, seed=args.seed, batch_dir=save_path,
                        train_load_steps_indices=train_steps, val_load_steps_indices=val_steps, test_load_steps_indices=test_steps,
-                       data_energy_scale=energy_scale, linear_elastic_prior_scale=lin_prior_scale, hsgp_options=opt,
+                       data_energy_scale=energy_scale, hsgp_continuation_stages=rec.get("hsgp_continuation_stages"), linear_elastic_prior_scale=lin_prior_scale, hsgp_options=opt,
                        hsgp=dict(model.info, hyper={k: np.asarray(v).tolist() for k, v in model.hyper.items()}))
         json.dump(cfg_out, open(os.path.join(save_path, "config.json"), "w"), indent=4, default=float)
         json.dump(hist, open(os.path.join(save_path, "hsgp_history.json"), "w"), indent=2)

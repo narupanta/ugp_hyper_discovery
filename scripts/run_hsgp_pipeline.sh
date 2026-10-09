@@ -8,6 +8,9 @@
 #                 on the same experiment directory (it accepts HSGP extractions; data generation only adds the missing
 #                 validation geometry, the clean training data is reused).
 #   --downstream-only: skip the extraction and run only those stages (for an existing HSGP experiment directory).
+#   --do-ext / --do-distill / --do-fem / --do-val: as in run_pipeline.sh, run only the given stages (--do-ext is the
+#                 HSGP extraction; the others go to run_pipeline.sh). Without any --do-* flag: extraction only, plus the
+#                 downstream stages if --downstream is given.
 #
 # Layout (same as run_pipeline.sh): results/<timestamp>_hsgp_<model>_<dnoise>_<lnoise>_<top>_<asym>_<geometry>/<seed>/extracted
 # Each seed runs the fit and the plots as two processes so that peak memory stays low.
@@ -23,9 +26,14 @@ HSGP_ARGS=()
 SKIP_PLOTS=false
 DOWNSTREAM=false
 DOWNSTREAM_ONLY=false
+HAS_DO=false
+DO_EXT=false
+DO_FLAGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --downstream) DOWNSTREAM=true; shift ;;
+        --do-ext) DO_EXT=true; HAS_DO=true; shift ;;
+        --do-distill|--do-fem|--do-val) DO_FLAGS+=("$1"); HAS_DO=true; shift ;;
         --downstream-only) DOWNSTREAM=true; DOWNSTREAM_ONLY=true; shift ;;
         --seeds|--seed) SEEDS_CLI="$2"; shift 2 ;;
         --skip-plots) SKIP_PLOTS=true; shift ;;
@@ -34,6 +42,10 @@ while [[ $# -gt 0 ]]; do
         *) if [ -z "$INPUT_TARGET" ]; then INPUT_TARGET="$1"; fi; shift ;;
     esac
 done
+if [ "$HAS_DO" = true ]; then
+    [ "$DO_EXT" = true ] && DOWNSTREAM_ONLY=false || DOWNSTREAM_ONLY=true
+    [ ${#DO_FLAGS[@]} -gt 0 ] && DOWNSTREAM=true || DOWNSTREAM=false
+fi
 if [ -z "$INPUT_TARGET" ]; then
     echo "Usage: $0 <recipe.yaml | recipe name | experiment dir> [--seeds '6 7 8'] [--hsgp_<option> <value> ...]"
     exit 1
@@ -125,5 +137,7 @@ echo "All seeds finished: $EXPERIMENT_DIR"
 if [ "$DOWNSTREAM" = true ]; then
     echo ""
     echo "### Downstream: distillation, FEM forward validation, validation plots (scripts/run_pipeline.sh)"
-    bash scripts/run_pipeline.sh "$EXPERIMENT_DIR" --seeds "$SEEDS_LIST" --do-gen --do-distill --do-fem --do-val
+    STAGES=("${DO_FLAGS[@]}")
+    [ ${#STAGES[@]} -eq 0 ] && STAGES=(--do-distill --do-fem --do-val)
+    bash scripts/run_pipeline.sh "$EXPERIMENT_DIR" --seeds "$SEEDS_LIST" --do-gen "${STAGES[@]}"
 fi

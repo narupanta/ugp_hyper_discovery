@@ -87,7 +87,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              prior_mean: str = "linear_elastic", envelope: bool = False,
              likelihood: str = "eiv", sigma_u_known: Optional[float] = None, reaction_weight: float = 1.0, warp: bool = False, max_outer: int = 30, lin_max: int = 15, lin_tol: float = 1e-4,
              tol: float = 1e-5, sigma_cap: float = 10.0, max_hyper_step: float = 2.0, continuation: bool = False,
-             stability_search: bool = True, hyper_restarts: bool = True,
+             stability_search: bool = True, hyper_restarts: bool = True, continuation_stages=None,
              step_labels=None,
              hyper_steps: int = 60, verbose: bool = True, log_fn=print):
     """
@@ -114,10 +114,14 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     as cumulative sets [0, 1], [0, 1, 2], ..., [0..T-1], each stage warm-started from the previous posterior, so every
     Gauss-Newton problem starts close to its solution; the linear-elastic stage runs on the first set only.
     step_labels: the dataset load-step numbers of f3x3_steps, used only in logs and in the history/info records.
-    stability_search: accept a Gauss-Newton update only if the posterior-mean tangent K_ff stays positive definite at
-    every active load step (Cholesky); otherwise halve the step (down to 1/64), and if no admissible step exists keep
-    the last stable mean and end the stage. Without it an unstable mean can make the EIV correction K^-1 f vanish and
+    stability_search: stability margin = min over active load steps of lambda_min(K_ff) / mean diag(K_ff) of the
+    posterior-mean energy. A Gauss-Newton update is accepted only if it keeps a stable mean stable (margin > 0), or, for a
+    mean that is not yet stable (e.g. at a newly added continuation step), does not make it less stable; otherwise the
+    step is halved (down to 1/64), and if no admissible step exists the stage ends at the current mean. Without it an unstable mean can make the EIV correction K^-1 f vanish and
     drive the evidence to a spurious optimum (sigma_u -> 0, most states unstable).
+    continuation_stages: explicit ladder as a list of cumulative sets of load-step labels (step_labels), e.g.
+    [[1, 2, 3], [1, 2, 3, 5], [1, 2, 3, 5, 7], ...]; each set must contain the previous one and the last must be all
+    training steps. Default (continuation=True): [labels[:2], labels[:3], ..., labels].
     hyper_restarts: in the GP stage, optimise the hyperparameters from the current point and from three restarts (prior
     centre, lengthscales x 0.5 and x 2) and keep the highest evidence: the evidence is multimodal in the lengthscales,
     and a single start lets tiny numerical differences (CPU vs GPU) pick different optima.
@@ -253,17 +257,21 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
 
     B_steps, step_stats = compile_basis()
 
-    def _kff_pd(theta, f_t):
-        """True if the free-DOF tangent of the energy theta is positive definite at this load step."""
+    def _kff_margin(theta, f_t):
+        """Stability margin of the energy theta at one load step: smallest eigenvalue of the free-DOF tangent divided by
+        its mean diagonal (> 0: positive definite)."""
         _, K = assemble_internal_force_and_tangent(lambda f: model.basis(f) @ theta, f_t, cells_j, n_nodes, dNdX, dA, eiv)
-        Kff = K[free][:, free]
-        return jnp.all(jnp.isfinite(jnp.linalg.cholesky(0.5 * (Kff + Kff.T))))
+        Kff = 0.5 * (K[free][:, free] + K[free][:, free].T)
+        return jnp.linalg.eigvalsh(Kff)[0] / jnp.maximum(jnp.mean(jnp.abs(jnp.diag(Kff))), 1e-300)
 
     def make_stability_check():
-        pd = jax.jit(lambda th, f: _kff_pd(th, f))     # fresh object: re-traced after the envelope changes the basis
-        return lambda theta: all(bool(pd(theta, f3x3_steps[t])) for t in active)
+        margin_fn = jax.jit(lambda th, f: _kff_margin(th, f))   # fresh object: re-traced after the envelope changes the basis
+        def margin(theta):
+            vals = [float(margin_fn(theta, f3x3_steps[t])) for t in active]
+            return min(vals) if all(np.isfinite(vals)) else -np.inf
+        return margin
 
-    is_stable = make_stability_check()
+    stability_margin = make_stability_check()
 
     def linearise(theta_mean):
         """Sufficient statistics of the Gauss-Newton-linearised EIV model at theta_mean (summed over load steps); for the
@@ -352,8 +360,22 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         theta_noise = theta0.at[0].set(lin[0]).at[1].set(lin[1])
         log_fn(f"[HSGP] residual likelihood: force noise from the reaction-only linear-elastic fit mu {float(lin[0]):.4g}, "
                f"kappa {float(lin[1]):.4g}, sigma_u {sigma_u_known:.3g}")
-    stages = [list(range(k)) for k in range(2, T + 1)] if (continuation and T > 2) else [list(range(T))]
     labels = list(map(int, step_labels)) if step_labels is not None else list(range(T))
+    if continuation_stages:
+        pos = {lab: i for i, lab in enumerate(labels)}
+        stages = []
+        for st in continuation_stages:
+            missing = [x for x in st if int(x) not in pos]
+            if missing:
+                raise ValueError(f"continuation stage {st} uses load steps {missing} that are not training steps {labels}")
+            idx = sorted(pos[int(x)] for x in st)
+            if stages and not set(stages[-1]) <= set(idx):
+                raise ValueError(f"continuation stages must be cumulative: {st} does not contain the previous stage")
+            stages.append(idx)
+        if sorted(stages[-1]) != list(range(T)):
+            stages.append(list(range(T)))     # always finish on all training steps
+    else:
+        stages = [list(range(k)) for k in range(2, T + 1)] if (continuation and T > 2) else [list(range(T))]
     it, aborted, stage_status = -1, False, []
     for si, active in enumerate(stages):
         N_x, N_y = n_free_x * len(active), n_free_y * len(active)
@@ -412,17 +434,22 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                        f"mu {rec['mu']:.3f} kappa {rec['kappa']:.3f} | sigma_u {rec['sigma_u_x']:.2e},{rec['sigma_u_y']:.2e} | "
                        f"sig dev/vol {rec['dev_sig']:.3g}/{rec['vol_sig']:.3g} | l dev {np.round(rec['dev_ls'], 3)} vol {np.round(rec['vol_ls'], 3)} "
                        f"({rec['time']:.0f}s)")
+            # stability line search: only blocks moves from a stable mean into instability. A mean that is already
+            # unstable at the active steps (e.g. the previous stage's fit at a newly added, larger load step) must be
+            # allowed to move: every small step from it is unstable too, and blocking it would freeze the stage.
             if stability_search and not lin_only:
+                m0 = stability_margin(theta_mean)
+                admissible = (lambda m: m > 0.0) if m0 > 0.0 else (lambda m: m >= m0)   # stable: stay stable; else: no worse
                 step = relax
-                while step >= 1.0 / 64 and not is_stable(theta_mean + step * (new_mean - theta_mean)):
+                while step >= 1.0 / 64 and not admissible(stability_margin(theta_mean + step * (new_mean - theta_mean))):
                     step *= 0.5
                 if step < 1.0 / 64:
-                    log_fn(f"[HSGP] it {it}: no update keeps the posterior-mean tangent positive definite; "
-                           f"keeping the last stable mean and ending continuation stage {si}.")
+                    log_fn(f"[HSGP] it {it}: no update keeps the mean tangent {'positive definite' if m0 > 0 else 'from losing stability'} "
+                           f"(margin {m0:.3g}); keeping the current mean and ending continuation stage {si}.")
                     unstable_stop = True
                     break
                 if step < relax:
-                    log_fn(f"[HSGP] it {it}: step reduced {relax:.3g} -> {step:.3g} to keep the mean tangent positive definite")
+                    log_fn(f"[HSGP] it {it}: step reduced {relax:.3g} -> {step:.3g} by the stability line search (margin {m0:.3g})")
                 relax = step
             theta_mean = theta_mean + relax * (new_mean - theta_mean)
             if stage_lin:
@@ -435,12 +462,12 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                         mu_e, kappa_e = float(theta_mean[0]), float(theta_mean[1])
                         model.envelope = dict(mu=mu_e, kappa=kappa_e, scale=float(energy_scale))
                         B_steps, step_stats = compile_basis()
-                        is_stable = make_stability_check()
+                        stability_margin = make_stability_check()
                         log_fn(f"[HSGP] envelope set: mu {mu_e:.4g}, kappa {kappa_e:.4g}, scale {energy_scale:.4g}")
                 continue
             n_full += 1
             if change < tol:
-                if not stability_search or is_stable(new_mean):
+                if not stability_search or stability_margin(new_mean) >= min(stability_margin(theta_mean), 0.0):
                     theta_mean = new_mean
                 converged = True
                 break
