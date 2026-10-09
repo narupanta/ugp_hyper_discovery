@@ -388,6 +388,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             it += 1
             lin_only = stage_lin
             stats = linearise(theta_mean)
+            eta_prev_iter = eta              # hyperparameters before this iteration's update (stability fallback)
             clip_step = lambda e: jax.tree_util.tree_map(
                 lambda a, b: a + jnp.clip(b - a, -max_hyper_step, max_hyper_step), eta, e)   # max_hyper_step per iteration
             starts = [eta] + ([] if (lin_only or not hyper_restarts) else
@@ -443,6 +444,18 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 step = relax
                 while step >= 1.0 / 64 and not admissible(stability_margin(theta_mean + step * (new_mean - theta_mean))):
                     step *= 0.5
+                if step < 1.0 / 64:
+                    # fallback: the hyperparameter update made the posterior too flexible (typical at a newly added, larger
+                    # load step); recondition with the previous hyperparameters, which stays closer to the current mean
+                    fb_mean, fb_factor = posterior(eta_prev_iter, stats, lin_only)
+                    step = relax
+                    while step >= 1.0 / 64 and not admissible(stability_margin(theta_mean + step * (fb_mean - theta_mean))):
+                        step *= 0.5
+                    if step >= 1.0 / 64:
+                        log_fn(f"[HSGP] it {it}: hyperparameter update rejected by the stability line search (margin {m0:.3g}); "
+                               f"step {step:.3g} with the previous hyperparameters")
+                        eta, factor, new_mean = eta_prev_iter, fb_factor, fb_mean
+                        change = force_change(new_mean, theta_mean)
                 if step < 1.0 / 64:
                     log_fn(f"[HSGP] it {it}: no update keeps the mean tangent {'positive definite' if m0 > 0 else 'from losing stability'} "
                            f"(margin {m0:.3g}); keeping the current mean and ending continuation stage {si}.")
