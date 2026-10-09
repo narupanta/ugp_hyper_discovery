@@ -86,7 +86,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              lengthscale_factor: float = 1.5, lengthscale_prior_scale: float = 1.0,
              prior_mean: str = "linear_elastic", envelope: bool = False,
              likelihood: str = "eiv", sigma_u_known: Optional[float] = None, reaction_weight: float = 1.0, warp: bool = False, max_outer: int = 30, lin_max: int = 15, lin_tol: float = 1e-4,
-             tol: float = 1e-5, sigma_cap: float = 100.0, max_hyper_step: float = 2.0, continuation: bool = False,
+             tol: float = 1e-5, sigma_cap: float = 10.0, max_hyper_step: float = 2.0, continuation: bool = False,
+             stability_search: bool = True, hyper_restarts: bool = True,
              step_labels=None,
              hyper_steps: int = 60, verbose: bool = True, log_fn=print):
     """
@@ -113,6 +114,13 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     as cumulative sets [0, 1], [0, 1, 2], ..., [0..T-1], each stage warm-started from the previous posterior, so every
     Gauss-Newton problem starts close to its solution; the linear-elastic stage runs on the first set only.
     step_labels: the dataset load-step numbers of f3x3_steps, used only in logs and in the history/info records.
+    stability_search: accept a Gauss-Newton update only if the posterior-mean tangent K_ff stays positive definite at
+    every active load step (Cholesky); otherwise halve the step (down to 1/64), and if no admissible step exists keep
+    the last stable mean and end the stage. Without it an unstable mean can make the EIV correction K^-1 f vanish and
+    drive the evidence to a spurious optimum (sigma_u -> 0, most states unstable).
+    hyper_restarts: in the GP stage, optimise the hyperparameters from the current point and from three restarts (prior
+    centre, lengthscales x 0.5 and x 2) and keep the highest evidence: the evidence is multimodal in the lengthscales,
+    and a single start lets tiny numerical differences (CPU vs GPU) pick different optima.
     Returns (HSGPHyperelasticity with the posterior, history list of dicts).
     """
     t0 = time.time()
@@ -168,6 +176,17 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     eta = dict(log_sig_dev=jnp.asarray(sig_centre), log_sig_vol=jnp.asarray(sig_centre),
                raw_ls_dev=to_raw(jnp.log(centre_d), *bounds["dev"]), raw_ls_vol=to_raw(jnp.log(centre_v), *bounds["vol"]),
                log_su=jnp.log(jnp.array([1e-3, 1e-3])))
+
+    eta_init = dict(eta)
+
+    def with_lengthscales(eta_, factor):
+        """eta with all lengthscales multiplied by factor (kept inside their bounds)."""
+        out = dict(eta_)
+        for key, comp in (("raw_ls_dev", "dev"), ("raw_ls_vol", "vol")):
+            lo, hi = bounds[comp]
+            log_l = lo + (hi - lo) * jax.nn.sigmoid(eta_[key]) + np.log(factor)
+            out[key] = to_raw(jnp.clip(log_l, lo + 1e-3 * (hi - lo), hi - 1e-3 * (hi - lo)), lo, hi)
+        return out
 
     def log_hyperprior(h):
         lp = 0.0
@@ -233,6 +252,18 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         return [fn(f3x3_steps[t]) for t in range(T)], jax.jit(lambda *a: stats_fn(*a))
 
     B_steps, step_stats = compile_basis()
+
+    def _kff_pd(theta, f_t):
+        """True if the free-DOF tangent of the energy theta is positive definite at this load step."""
+        _, K = assemble_internal_force_and_tangent(lambda f: model.basis(f) @ theta, f_t, cells_j, n_nodes, dNdX, dA, eiv)
+        Kff = K[free][:, free]
+        return jnp.all(jnp.isfinite(jnp.linalg.cholesky(0.5 * (Kff + Kff.T))))
+
+    def make_stability_check():
+        pd = jax.jit(lambda th, f: _kff_pd(th, f))     # fresh object: re-traced after the envelope changes the basis
+        return lambda theta: all(bool(pd(theta, f3x3_steps[t])) for t in active)
+
+    is_stable = make_stability_check()
 
     def linearise(theta_mean):
         """Sufficient statistics of the Gauss-Newton-linearised EIV model at theta_mean (summed over load steps); for the
@@ -329,15 +360,23 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         optimise_hyper = make_optimiser()
         if len(stages) > 1:
             log_fn(f"[HSGP] continuation stage {si}: load steps {[labels[t] for t in active]}")
-        stage_lin, n_lin, n_full, converged = si == 0, 0, 0, False
+        stage_lin, n_lin, n_full, converged, unstable_stop = si == 0, 0, 0, False, False
         relax, prev_change = 1.0, np.inf
         while n_full < max_outer:
             it += 1
             lin_only = stage_lin
             stats = linearise(theta_mean)
-            eta_new = optimise_hyper(eta, stats, lin_only)
-            # limit each hyperparameter to max_hyper_step (log units) per outer iteration
-            eta_new = jax.tree_util.tree_map(lambda a, b: a + jnp.clip(b - a, -max_hyper_step, max_hyper_step), eta, eta_new)
+            clip_step = lambda e: jax.tree_util.tree_map(
+                lambda a, b: a + jnp.clip(b - a, -max_hyper_step, max_hyper_step), eta, e)   # max_hyper_step per iteration
+            starts = [eta] + ([] if (lin_only or not hyper_restarts) else
+                              [clip_step(eta_init), with_lengthscales(eta, 0.5), with_lengthscales(eta, 2.0)])
+            best = None
+            for e0 in starts:
+                cand = clip_step(optimise_hyper(e0, stats, lin_only))
+                val = float(neg_log_post(cand, stats, lin_only)[0])
+                if np.isfinite(val) and (best is None or val < best[0]):
+                    best = (val, cand)
+            eta_new = best[1] if best is not None else eta
             new_mean, new_factor = posterior(eta_new, stats, lin_only)
             _, log_z = neg_log_post(eta_new, stats, lin_only)
             if not (np.isfinite(float(log_z)) and bool(jnp.all(jnp.isfinite(new_mean)))):
@@ -373,6 +412,18 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                        f"mu {rec['mu']:.3f} kappa {rec['kappa']:.3f} | sigma_u {rec['sigma_u_x']:.2e},{rec['sigma_u_y']:.2e} | "
                        f"sig dev/vol {rec['dev_sig']:.3g}/{rec['vol_sig']:.3g} | l dev {np.round(rec['dev_ls'], 3)} vol {np.round(rec['vol_ls'], 3)} "
                        f"({rec['time']:.0f}s)")
+            if stability_search and not lin_only:
+                step = relax
+                while step >= 1.0 / 64 and not is_stable(theta_mean + step * (new_mean - theta_mean)):
+                    step *= 0.5
+                if step < 1.0 / 64:
+                    log_fn(f"[HSGP] it {it}: no update keeps the posterior-mean tangent positive definite; "
+                           f"keeping the last stable mean and ending continuation stage {si}.")
+                    unstable_stop = True
+                    break
+                if step < relax:
+                    log_fn(f"[HSGP] it {it}: step reduced {relax:.3g} -> {step:.3g} to keep the mean tangent positive definite")
+                relax = step
             theta_mean = theta_mean + relax * (new_mean - theta_mean)
             if stage_lin:
                 n_lin += 1
@@ -384,16 +435,19 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                         mu_e, kappa_e = float(theta_mean[0]), float(theta_mean[1])
                         model.envelope = dict(mu=mu_e, kappa=kappa_e, scale=float(energy_scale))
                         B_steps, step_stats = compile_basis()
+                        is_stable = make_stability_check()
                         log_fn(f"[HSGP] envelope set: mu {mu_e:.4g}, kappa {kappa_e:.4g}, scale {energy_scale:.4g}")
                 continue
             n_full += 1
             if change < tol:
-                theta_mean, converged = new_mean, True
+                if not stability_search or is_stable(new_mean):
+                    theta_mean = new_mean
+                converged = True
                 break
 
         stage_status.append(dict(stage=si, load_steps=[labels[t] for t in active], converged=converged,
-                                 iterations=n_full, aborted=aborted))
-        if not converged and not aborted:
+                                 iterations=n_full, aborted=aborted, stopped_for_stability=unstable_stop))
+        if not converged and not aborted and not unstable_stop:
             log_fn(f"[HSGP] WARNING: continuation stage {si} (load steps {[labels[t] for t in active]}) stopped at the "
                    f"iteration cap max_outer={max_outer} without converging; later stages start from this point and "
                    f"the result can depend on it. Increase max_outer.")
@@ -404,7 +458,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     hyper = {k: np.asarray(v) for k, v in h.items() if k not in ("su_x", "su_y")}
     info = dict(prior_mean=prior_mean, envelope=model.envelope, likelihood=likelihood, sigma_u_known=sigma_u_known,
                 reaction_weight=reaction_weight, warp=warp, continuation=continuation, continuation_stages=[[labels[t] for t in a] for a in stages],
-                stage_status=stage_status, all_stages_converged=bool(stage_status) and all(x["converged"] for x in stage_status), converged=converged, outer_iterations=len(history), log_evidence=history[-1]["log_evidence"],
+                stage_status=stage_status, sigma_cap=sigma_cap, stability_search=stability_search, hyper_restarts=hyper_restarts, all_stages_converged=bool(stage_status) and all(x["converged"] for x in stage_status), converged=converged, outer_iterations=len(history), log_evidence=history[-1]["log_evidence"],
                 box_factor=box_factor, num_basis_dev=num_basis_dev, num_basis_vol=num_basis_vol,
                 dev_ls_bounds=[np.asarray(lsd_lo).tolist(), np.asarray(lsd_hi).tolist()],
                 vol_ls_bounds=[np.asarray(lsv_lo).tolist(), np.asarray(lsv_hi).tolist()],

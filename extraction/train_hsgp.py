@@ -20,6 +20,9 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_amplitude_prior_scale: 1.0 # log-normal hyperprior widths (log units)
     hsgp_lengthscale_prior_scale: 1.0
     hsgp_reaction_weight: 1.0       # residual_learned only
+    hsgp_sigma_cap: 10.0            # GP amplitudes capped at this multiple of their prior centre
+    hsgp_stability_search: 1        # Gauss-Newton updates must keep the mean tangent positive definite
+    hsgp_hyper_restarts: 1          # multi-start hyperparameter optimisation (prior centre, lengthscales x0.5, x2)
 """
 import argparse
 import json
@@ -47,7 +50,8 @@ from plots.theme import apply_style, save_figure
 
 HSGP_DEFAULTS = dict(hsgp_likelihood="eiv", hsgp_prior_mean="none", hsgp_envelope=1, hsgp_warp=1, hsgp_continuation=1,
                      hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_box_factor=8.0, hsgp_max_outer=60,
-                     hsgp_amplitude_prior_scale=1.0, hsgp_lengthscale_prior_scale=1.0, hsgp_reaction_weight=1.0)
+                     hsgp_amplitude_prior_scale=1.0, hsgp_lengthscale_prior_scale=1.0, hsgp_reaction_weight=1.0,
+                     hsgp_sigma_cap=10.0, hsgp_stability_search=1, hsgp_hyper_restarts=1)
 
 
 def parse_args():
@@ -170,7 +174,9 @@ def main():
             amplitude_prior_scale=opt["hsgp_amplitude_prior_scale"], lengthscale_prior_scale=opt["hsgp_lengthscale_prior_scale"],
             prior_mean=opt["hsgp_prior_mean"], envelope=bool(opt["hsgp_envelope"]), likelihood=opt["hsgp_likelihood"],
             sigma_u_known=disp_noise, reaction_weight=opt["hsgp_reaction_weight"], warp=bool(opt["hsgp_warp"]),
-            continuation=bool(opt["hsgp_continuation"]), max_outer=opt["hsgp_max_outer"], step_labels=train_steps)
+            continuation=bool(opt["hsgp_continuation"]), max_outer=opt["hsgp_max_outer"], step_labels=train_steps,
+            sigma_cap=opt["hsgp_sigma_cap"], stability_search=bool(opt["hsgp_stability_search"]),
+            hyper_restarts=bool(opt["hsgp_hyper_restarts"]))
         fit_time = time.time() - t0
         model.save(post_path)
         feats = jax.vmap(model.feature_extractor.extract)(F_all[jnp.array(train_steps)].reshape(-1, 3, 3))
