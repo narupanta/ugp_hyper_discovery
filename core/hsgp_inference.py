@@ -55,6 +55,62 @@ def basis_force_matrix(model: HSGPHyperelasticity, f3x3_cells, cells, n_nodes: i
     return jnp.zeros((n_nodes, 2, model.num_params)).at[cells].add(f_cell).reshape(2 * n_nodes, -1)
 
 
+def eiv_step_linearisation(model: HSGPHyperelasticity, theta, f_t, cells, n_nodes: int, dNdX, dA, eiv, damping: float = 0.0):
+    """
+    EIV state correction of one load step and its exact Gauss-Newton Jacobians at theta (free and reaction DOFs).
+    damping = 0: eps = K^-1 f (Newton step), J = K^-1 (B - D), D_k = K_k eps.
+    damping = delta > 0: eps = (K^2 + mu^2 I)^-1 K f, mu^2 = delta^2 ||K||_F^2 / m (degree 2 in theta, so eps stays
+    degree 0 and J theta = 0 exactly). Identical to the Newton step where |lambda(K)| >> mu; components of f along
+    eigenvalues near zero or negative (indefinite tangent of a poor mean far from the data) are damped instead of
+    exploding or flipping sign. Its Jacobian, with A = K^2 + mu^2 I and r = f - K eps = mu^2 A^-1 f:
+        d eps / d theta_k = A^-1 [K B_k - K D_k + K_k r - eps d(mu^2)/d theta_k],
+    K_k r and K_k eps are JVPs of the basis-force matrix, d(mu^2)/d theta from one reverse pass of ||K(theta)||_F^2.
+    Reactions R = R(u) - K_RF eps give J_R = B_R - K_RF J - D_R in both cases.
+    Returns eps (m,), J (m, P), J_R (2, P).
+    """
+    free, rx, ry = eiv["dof_free"], eiv["dof_rx"], eiv["dof_ry"]
+    force_fn = lambda f: basis_force_matrix(model, f, cells, n_nodes, dNdX, dA)
+
+    def tangent(th):
+        f_int, K = assemble_internal_force_and_tangent(lambda f: model.basis(f) @ th, f_t, cells, n_nodes, dNdX, dA, eiv)
+        return f_int, K
+
+    def grad_field(v):                                     # free-DOF vector -> deformation-gradient perturbation
+        v_nodes = jnp.zeros(2 * n_nodes).at[free].set(v).reshape(n_nodes, 2)
+        return jnp.zeros_like(f_t).at[:, :2, :2].set(jnp.einsum("cai,caj->cij", v_nodes[cells], dNdX))
+
+    f_int, K = tangent(theta)
+    Kff = K[free][:, free]
+    Krf = jnp.stack([K[rx][:, free].sum(0), K[ry][:, free].sum(0)])
+    f = f_int[free]
+
+    def newton():
+        eps = jnp.linalg.solve(Kff, f)
+        B, D = jax.jvp(force_fn, (f_t,), (grad_field(eps),))                            # D = dK/dtheta . eps
+        return eps, B, D, jnp.linalg.solve(Kff, B[free] - D[free])
+
+    def damped():
+        m = Kff.shape[0]
+        lam, V = jnp.linalg.eigh(0.5 * (Kff + Kff.T))
+        mu2 = damping ** 2 * jnp.sum(Kff ** 2) / m
+        a_inv = 1.0 / (lam ** 2 + mu2)
+        eps = V @ (lam * a_inv * (V.T @ f))
+        r = f - Kff @ eps
+        B, D = jax.jvp(force_fn, (f_t,), (grad_field(eps),))
+        _, E = jax.jvp(force_fn, (f_t,), (grad_field(r),))                              # E = dK/dtheta . r
+        dmu2 = damping ** 2 / m * jax.grad(lambda th: jnp.sum(tangent(th)[1][free][:, free] ** 2))(theta)
+        rhs = Kff @ (B[free] - D[free]) + E[free] - eps[:, None] * dmu2[None, :]
+        return eps, B, D, V @ (a_inv[:, None] * (V.T @ rhs))
+
+    if isinstance(damping, (int, float)):
+        eps, B, D, J = newton() if damping <= 0.0 else damped()
+    else:                                                  # traced damping (annealed inside one compiled function)
+        eps, B, D, J = jax.lax.cond(damping > 0.0, damped, newton)
+    D_R = jnp.stack([D[rx].sum(0), D[ry].sum(0)])
+    B_R = jnp.stack([B[rx].sum(0), B[ry].sum(0)])
+    return eps, J, B_R - Krf @ J - D_R
+
+
 class _Constraints:
     """Reference-constraint rows on the GP weights, through the model's (possibly warped) bases at the raw reference.
     Built before the envelope is set; the envelope is 1 with zero slope at the reference, so the rows do not change."""
@@ -88,7 +144,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              likelihood: str = "eiv", sigma_u_known: Optional[float] = None, reaction_weight: float = 1.0, warp: bool = False, max_outer: int = 30, lin_max: int = 15, lin_tol: float = 1e-4,
              tol: float = 1e-5, sigma_cap: float = 10.0, max_hyper_step: float = 2.0, continuation: bool = False,
              stability_search: bool = True, hyper_restarts: bool = True, continuation_stages=None,
-             step_labels=None,
+             step_labels=None, eiv_damping: float = 0.0, eiv_damping_decay: float = 0.1,
              hyper_steps: int = 60, verbose: bool = True, log_fn=print):
     """
     f3x3_steps: (T, C, 3, 3) observed deformation gradients of the training steps; R_obs, sigma_R: (T, 2).
@@ -125,6 +181,12 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     hyper_restarts: in the GP stage, optimise the hyperparameters from the current point and from three restarts (prior
     centre, lengthscales x 0.5 and x 2) and keep the highest evidence: the evidence is multimodal in the lengthscales,
     and a single start lets tiny numerical differences (CPU vs GPU) pick different optima.
+    eiv_damping: relative damping delta of the EIV correction (eiv_step_linearisation), eps = (K^2 + mu^2)^-1 K f with
+    mu^2 = delta^2 ||K||_F^2 / m; 0 = plain Newton step K^-1 f. Keeps the correction bounded when the linearisation
+    point is far from the data (indefinite tangent), e.g. a full-range first stage. A fixed delta would bias the converged
+    posterior (the noise correction lives in the softest tangent modes, lambda_min / rms(lambda) ~ 2e-4 at large
+    stretches), so it is annealed: delta_0 = eiv_damping at the first GP iteration of each continuation stage, multiplied
+    by eiv_damping_decay per iteration and set to 0 below 1e-8; a stage can only converge undamped.
     Returns (HSGPHyperelasticity with the posterior, history list of dicts).
     """
     t0 = time.time()
@@ -208,25 +270,14 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     n_free_x, n_free_y = int(np.sum(dirs == 0)), int(np.sum(dirs == 1))
     N_x, N_y = n_free_x * T, n_free_y * T
 
-    def _step_stats(theta, f_t, R_t, w):
-        psi = lambda f: model.basis(f) @ theta
-        f_int, K = assemble_internal_force_and_tangent(psi, f_t, cells_j, n_nodes, dNdX, dA, eiv)
-        Kff = K[free][:, free]
-        Krf = jnp.stack([K[rx][:, free].sum(0), K[ry][:, free].sum(0)])
-        eps = jnp.linalg.solve(Kff, f_int[free])                                         # EIV correction at theta_bar
-        eps_nodes = jnp.zeros(2 * n_nodes).at[free].set(eps).reshape(n_nodes, 2)
-        dF = jnp.zeros_like(f_t).at[:, :2, :2].set(jnp.einsum("cai,caj->cij", eps_nodes[cells_j], dNdX))
-        B, D = jax.jvp(force_fn, (f_t,), (dF,))                                          # D = dK/dtheta . eps
-        D_R = jnp.stack([D[rx].sum(0), D[ry].sum(0)])
-        B_R_t = jnp.stack([B[rx].sum(0), B[ry].sum(0)])
-        J = jnp.linalg.solve(Kff, B[free] - D[free])                                     # (m, P)
-        JR = B_R_t - Krf @ J - D_R                                                        # (2, P)
+    def _step_stats(theta, f_t, R_t, w, damping):
+        eps, J, JR = eiv_step_linearisation(model, theta, f_t, cells_j, n_nodes, dNdX, dA, eiv, damping)
         y = -eps                                                                          # eps_bar + J theta ~ 0
         Jx, Jy, yx, yy = J[dirs == 0], J[dirs == 1], y[dirs == 0], y[dirs == 1]
         return dict(Gx=Jx.T @ Jx, Gy=Jy.T @ Jy, cx=Jx.T @ yx, cy=Jy.T @ yy, sx=yx @ yx, sy=yy @ yy,
                     GR=JR.T @ (w[:, None] * JR), bR=JR.T @ (w * R_t))
 
-    def _step_stats_res(theta_noise, f_t, R_t, w):
+    def _step_stats_res(theta_noise, f_t, R_t, w, damping):
         """Residual likelihood: free forces B_f theta ~ N(0, diag sigma_f^2), reactions B_R theta ~ N(R_obs, sigma_R^2)."""
         psi = lambda f: model.basis(f) @ theta_noise
         _, K = assemble_internal_force_and_tangent(psi, f_t, cells_j, n_nodes, dNdX, dA, eiv)
@@ -238,7 +289,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         return dict(Gx=Bf.T @ (w_f[:, None] * Bf), Gy=jnp.zeros((P, P)), cx=zero, cy=zero, sx=0.0, sy=0.0,
                     GR=B_R_t.T @ (w[:, None] * B_R_t), bR=B_R_t.T @ (w * R_t), logdetW_f=jnp.sum(jnp.log(w_f)))
 
-    def _step_stats_res_learned(theta_noise, f_t, R_t, w):
+    def _step_stats_res_learned(theta_noise, f_t, R_t, w, damping):
         """Residual likelihood with learned per-direction force noise: unweighted free Gram matrices per direction."""
         B = force_fn(f_t)
         Bx, By = B[free][dirs == 0], B[free][dirs == 1]
@@ -273,11 +324,13 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
 
     stability_margin = make_stability_check()
 
-    def linearise(theta_mean):
-        """Sufficient statistics of the Gauss-Newton-linearised EIV model at theta_mean (summed over load steps); for the
-        residual likelihood, of the exact linear model with the force noise from the tangent at theta_noise."""
+    def linearise(theta_mean, damping=0.0):
+        """Sufficient statistics of the Gauss-Newton-linearised EIV model at theta_mean (summed over load steps), with
+        EIV damping delta = damping; for the residual likelihood, of the exact linear model with the force noise from the
+        tangent at theta_noise."""
         th = theta_noise if residual else theta_mean
-        out = [step_stats(th, f3x3_steps[t], R_obs[t], 1.0 / sigma_R[t] ** 2) for t in active]
+        d = jnp.asarray(damping, dtype=jnp.float64)
+        out = [step_stats(th, f3x3_steps[t], R_obs[t], 1.0 / sigma_R[t] ** 2, d) for t in active]
         stats = {k: sum(o[k] for o in out) for k in out[0]}
         w_all = (reaction_weight if learned_noise else 1.0) / sigma_R[np.asarray(active)] ** 2
         stats.update(yWy_R=jnp.sum(w_all * R_obs[np.asarray(active)] ** 2), logdetW_R=jnp.sum(jnp.log(w_all)))
@@ -387,7 +440,11 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         while n_full < max_outer:
             it += 1
             lin_only = stage_lin
-            stats = linearise(theta_mean)
+            # annealed EIV damping: delta_0 at the first GP iteration of each stage, x eiv_damping_decay per iteration,
+            # exactly 0 below 1e-8 (a stage converges only undamped, so the final posterior is the exact EIV one)
+            damping = 0.0 if lin_only else eiv_damping * eiv_damping_decay ** n_full
+            damping = damping if damping >= 1e-8 else 0.0
+            stats = linearise(theta_mean, damping)
             eta_prev_iter = eta              # hyperparameters before this iteration's update (stability fallback)
             clip_step = lambda e: jax.tree_util.tree_map(
                 lambda a, b: a + jnp.clip(b - a, -max_hyper_step, max_hyper_step), eta, e)   # max_hyper_step per iteration
@@ -424,7 +481,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             relax = 1.0 if lin_only else (max(relax * 0.5, 0.125) if change > prev_change else min(relax * 1.5, 1.0))
             prev_change = np.inf if lin_only else change
             h = unpack(eta)
-            rec = dict(iteration=it, continuation_stage=si, load_steps=[labels[t] for t in active], stage="linear" if lin_only else "full", log_evidence=float(log_z), force_change=change,
+            rec = dict(iteration=it, continuation_stage=si, load_steps=[labels[t] for t in active], stage="linear" if lin_only else "full", log_evidence=float(log_z), force_change=change, eiv_damping=damping,
                        relaxation=relax, mu=float(new_mean[0]), kappa=float(new_mean[1]),
                        sigma_u_x=float(h["su_x"]), sigma_u_y=float(h["su_y"]),
                        dev_sig=float(h["dev_sig"]), vol_sig=float(h["vol_sig"]),
@@ -434,7 +491,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 log_fn(f"[HSGP] s{si} it {it:2d} ({rec['stage']:6s}) logZ {rec['log_evidence']:12.2f} | dF/F {change:.2e} (relax {relax:.2f}) | "
                        f"mu {rec['mu']:.3f} kappa {rec['kappa']:.3f} | sigma_u {rec['sigma_u_x']:.2e},{rec['sigma_u_y']:.2e} | "
                        f"sig dev/vol {rec['dev_sig']:.3g}/{rec['vol_sig']:.3g} | l dev {np.round(rec['dev_ls'], 3)} vol {np.round(rec['vol_ls'], 3)} "
-                       f"({rec['time']:.0f}s)")
+                       f"{f'| damping {damping:.0e} ' if damping > 0 else ''}({rec['time']:.0f}s)")
             # stability line search: only blocks moves from a stable mean into instability. A mean that is already
             # unstable at the active steps (e.g. the previous stage's fit at a newly added, larger load step) must be
             # allowed to move: every small step from it is unstable too, and blocking it would freeze the stage.
@@ -479,7 +536,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                         log_fn(f"[HSGP] envelope set: mu {mu_e:.4g}, kappa {kappa_e:.4g}, scale {energy_scale:.4g}")
                 continue
             n_full += 1
-            if change < tol:
+            if change < tol and damping == 0.0:
                 if not stability_search or stability_margin(new_mean) >= min(stability_margin(theta_mean), 0.0):
                     theta_mean = new_mean
                 converged = True
@@ -496,7 +553,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
 
     h = unpack(eta)
     hyper = {k: np.asarray(v) for k, v in h.items() if k not in ("su_x", "su_y")}
-    info = dict(prior_mean=prior_mean, envelope=model.envelope, likelihood=likelihood, sigma_u_known=sigma_u_known,
+    info = dict(prior_mean=prior_mean, eiv_damping=float(eiv_damping), eiv_damping_decay=float(eiv_damping_decay), envelope=model.envelope, likelihood=likelihood, sigma_u_known=sigma_u_known,
                 reaction_weight=reaction_weight, warp=warp, continuation=continuation, continuation_stages=[[labels[t] for t in a] for a in stages],
                 stage_status=stage_status, sigma_cap=sigma_cap, stability_search=stability_search, hyper_restarts=hyper_restarts, all_stages_converged=bool(stage_status) and all(x["converged"] for x in stage_status), converged=converged, outer_iterations=len(history), log_evidence=history[-1]["log_evidence"],
                 box_factor=box_factor, num_basis_dev=num_basis_dev, num_basis_vol=num_basis_vol,
@@ -510,13 +567,16 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     return model, history
 
 
-def eiv_reaction_prediction(model: HSGPHyperelasticity, f3x3_steps, cells, node_type, dNdX, dA, correction: bool = True):
+def eiv_reaction_prediction(model: HSGPHyperelasticity, f3x3_steps, cells, node_type, dNdX, dA, correction: bool = True,
+                            damping: Optional[float] = None):
     """
     Reaction forces predicted by the posterior at observed states, with the EIV correction of the displacement noise:
     R_t(theta) ~= J_R,t theta (exact along the posterior mean, see module docstring), linearised at the posterior mean.
     correction=False: plain reactions at the observed state, R = B_R theta (residual-likelihood model).
+    damping: EIV damping (eiv_step_linearisation); default 0, as the fit converges undamped.
     Returns mean (T, 2) and epistemic covariance (T, 2, 2); add the load-cell variance for the predictive distribution.
     """
+    damping = 0.0 if damping is None else float(damping)
     f3x3_steps = jnp.asarray(f3x3_steps, dtype=jnp.float64)
     node_type, cells_np = np.asarray(node_type), np.asarray(cells)
     cells_j, dNdX, dA = jnp.asarray(cells_np), jnp.asarray(dNdX), jnp.asarray(dA)
@@ -531,16 +591,7 @@ def eiv_reaction_prediction(model: HSGPHyperelasticity, f3x3_steps, cells, node_
         if not correction:
             B = force_fn(f_t)
             return jnp.stack([B[rx].sum(0), B[ry].sum(0)])
-        psi = lambda f: model.basis(f) @ theta
-        f_int, K = assemble_internal_force_and_tangent(psi, f_t, cells_j, n_nodes, dNdX, dA, eiv)
-        Kff = K[free][:, free]
-        Krf = jnp.stack([K[rx][:, free].sum(0), K[ry][:, free].sum(0)])
-        eps = jnp.linalg.solve(Kff, f_int[free])
-        eps_nodes = jnp.zeros(2 * n_nodes).at[free].set(eps).reshape(n_nodes, 2)
-        dF = jnp.zeros_like(f_t).at[:, :2, :2].set(jnp.einsum("cai,caj->cij", eps_nodes[cells_j], dNdX))
-        B, D = jax.jvp(force_fn, (f_t,), (dF,))
-        J = jnp.linalg.solve(Kff, B[free] - D[free])
-        return jnp.stack([B[rx].sum(0), B[ry].sum(0)]) - Krf @ J - jnp.stack([D[rx].sum(0), D[ry].sum(0)])
+        return eiv_step_linearisation(model, theta, f_t, cells_j, n_nodes, dNdX, dA, eiv, damping)[2]
 
     JR = jnp.stack([jac_R(f3x3_steps[t]) for t in range(f3x3_steps.shape[0])])            # (T, 2, P)
     G = JR @ model.theta_factor                                                             # (T, 2, Q)
