@@ -9,7 +9,7 @@ otherwise); scripts/run_hsgp_pipeline.sh calls the two phases one after the othe
 
 HSGP settings are read from the recipe (keys below) and can be overridden on the command line:
     hsgp_likelihood: eiv            # eiv | residual | residual_learned
-    hsgp_prior_mean: none           # none | linear_elastic
+    hsgp_prior_mean: none           # none | linear_elastic | linear_elastic_fixed (mean frozen at the linear-elastic fit)
     hsgp_envelope: 1                # amplitude envelope s_dev, s_vol from the linear-elastic stage
     hsgp_warp: 1                    # GP inputs log(I_bar - 2), log J
     hsgp_continuation: 1            # load-step continuation over the training steps

@@ -148,8 +148,12 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              hyper_steps: int = 60, verbose: bool = True, log_fn=print):
     """
     f3x3_steps: (T, C, 3, 3) observed deformation gradients of the training steps; R_obs, sigma_R: (T, 2).
-    prior_mean: 'linear_elastic' (psi = mu h_mu + kappa h_kappa + GP, coefficients ~ N(0, lin_prior_scale^2)) or 'none'
-    (zero-mean GP prior: the linear-elastic fit only initialises the first tangent and the coefficients are fixed at 0).
+    prior_mean: 'linear_elastic' (psi = mu h_mu + kappa h_kappa + GP, coefficients ~ N(0, lin_prior_scale^2)), 'none'
+    (zero-mean GP prior: the linear-elastic fit only initialises the first tangent and the coefficients are fixed at 0), or
+    'linear_elastic_fixed' (fixed mean function: the coefficients are frozen at the linear-elastic stage values mu_hat,
+    kappa_hat and the GP models only the departure from that material). With free coefficients the linear-elastic terms and
+    the GP are not identifiable: e.g. kappa -> 20x its value inside the data, cancelled by a short-lengthscale GP, leaves
+    the excess stiffness alone outside the data. The fixed mean reverts to the fitted linear-elastic material there.
     envelope: multiply the GP bases by s_dev = 1 + mu h_mu / e_bar and s_vol = 1 + kappa h_kappa / e_bar, with (mu, kappa)
     from the linear-elastic stage and e_bar = energy_scale (see hsgp_model); for energies spanning orders of magnitude.
     likelihood: 'eiv' (module docstring) or 'residual': no state correction, free-node forces B_free theta ~ N(0, sigma_f^2)
@@ -333,7 +337,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         out = [step_stats(th, f3x3_steps[t], R_obs[t], 1.0 / sigma_R[t] ** 2, d) for t in active]
         stats = {k: sum(o[k] for o in out) for k in out[0]}
         w_all = (reaction_weight if learned_noise else 1.0) / sigma_R[np.asarray(active)] ** 2
-        stats.update(yWy_R=jnp.sum(w_all * R_obs[np.asarray(active)] ** 2), logdetW_R=jnp.sum(jnp.log(w_all)))
+        stats.update(yWy_R=jnp.sum(w_all * R_obs[np.asarray(active)] ** 2), logdetW_R=jnp.sum(jnp.log(w_all)),
+                     theta_fix=theta_fix)
         # square-root factors of the Gram blocks (G = R^T R, negative round-off eigenvalues clipped), so that the
         # posterior factor comes from a QR of [I; C] instead of a Cholesky of I + M^T G M (no squared condition number)
         for g in ("Gx", "Gy", "GR"):
@@ -348,8 +353,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         raise ValueError("likelihood='residual' needs sigma_u_known (displacement noise std) to set the force noise.")
     residual = likelihood == "residual"
 
-    if prior_mean not in ("linear_elastic", "none"):
-        raise ValueError(f"prior_mean must be 'linear_elastic' or 'none', got {prior_mean!r}")
+    if prior_mean not in ("linear_elastic", "none", "linear_elastic_fixed"):
+        raise ValueError(f"prior_mean must be 'linear_elastic', 'none' or 'linear_elastic_fixed', got {prior_mean!r}")
 
     def posterior_factors(eta_, stats, lin_only):
         h = unpack(eta_)
@@ -358,6 +363,11 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         wx, wy = (1.0, 1.0) if residual else (1.0 / h["su_x"] ** 2, 1.0 / h["su_y"] ** 2)   # residual: weights in stats
         b = wx * stats["cx"] + wy * stats["cy"] + stats["bR"]
         yWy = wx * stats["sx"] + wy * stats["sy"] + stats["yWy_R"]
+        # fixed mean function theta = theta_fix + M gamma: shift the data by the linear prediction of theta_fix
+        th_f = stats["theta_fix"]
+        G_th = wx * (stats["Gx"] @ th_f) + wy * (stats["Gy"] @ th_f) + stats["GR"] @ th_f
+        yWy = yWy - 2.0 * th_f @ b + th_f @ G_th
+        b = b - G_th
         # A = I + M^T G M = R^T R from the QR of [I; sqrt(wx) R_x M; sqrt(wy) R_y M; R_R M]; L = R^T (lower)
         C = jnp.concatenate([jnp.eye(P), jnp.sqrt(wx) * (stats["Rx"] @ M), jnp.sqrt(wy) * (stats["Ry"] @ M), stats["RR"] @ M])
         R = jnp.linalg.qr(C, mode="r")
@@ -395,7 +405,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         h, M, L, v, _ = posterior_factors(eta_, stats, lin_only)
         m_gamma = jax.scipy.linalg.solve_triangular(L.T, v, lower=False)
         L_inv_T = jax.scipy.linalg.solve_triangular(L.T, jnp.eye(P), lower=False)   # Cov(gamma) = L^-T L^-1
-        return M @ m_gamma, M @ L_inv_T
+        return stats["theta_fix"] + M @ m_gamma, M @ L_inv_T
 
     def force_change(th_new, th_old):
         num = sum(float(jnp.sum((B_steps[t] @ (th_new - th_old)) ** 2)) for t in active)
@@ -403,6 +413,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         return np.sqrt(num / max(den, 1e-300))
 
     history, theta_mean, converged = [], theta0, False
+    theta_fix = jnp.zeros(P)                   # fixed mean function (prior_mean='linear_elastic_fixed', after the linear stage)
     factor, relax, prev_change, eta_prev = jnp.zeros((P, 1)), 1.0, np.inf, eta
     theta_noise = None
     if residual:
@@ -528,6 +539,9 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                     stage_lin = False
                     log_fn(f"[HSGP] linear-elastic stage {'converged' if change < lin_tol else 'stopped (lin_max)'} after {n_lin} "
                            f"iterations: mu {float(theta_mean[0]):.4g}, kappa {float(theta_mean[1]):.4g}")
+                    if prior_mean == "linear_elastic_fixed":
+                        theta_fix = jnp.zeros(P).at[0].set(theta_mean[0]).at[1].set(theta_mean[1])
+                        log_fn(f"[HSGP] fixed mean function: mu {float(theta_mean[0]):.4g}, kappa {float(theta_mean[1]):.4g}")
                     if envelope:
                         mu_e, kappa_e = float(theta_mean[0]), float(theta_mean[1])
                         model.envelope = dict(mu=mu_e, kappa=kappa_e, scale=float(energy_scale))
