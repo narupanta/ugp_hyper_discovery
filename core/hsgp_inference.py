@@ -145,6 +145,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              tol: float = 1e-5, sigma_cap: float = 10.0, max_hyper_step: float = 2.0, continuation: bool = False,
              stability_search: bool = True, hyper_restarts: bool = True, continuation_stages=None,
              step_labels=None, eiv_damping: float = 0.0, eiv_damping_decay: float = 0.1,
+             adaptive: bool = False, hyper_iters_per_stage: int = 0, ls_floor_fraction: float = 0.0,
+             tol_intermediate: Optional[float] = None,
              hyper_steps: int = 60, verbose: bool = True, log_fn=print):
     """
     f3x3_steps: (T, C, 3, 3) observed deformation gradients of the training steps; R_obs, sigma_R: (T, 2).
@@ -191,6 +193,22 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     posterior (the noise correction lives in the softest tangent modes, lambda_min / rms(lambda) ~ 2e-4 at large
     stretches), so it is annealed: delta_0 = eiv_damping at the first GP iteration of each continuation stage, multiplied
     by eiv_damping_decay per iteration and set to 0 below 1e-8; a stage can only converge undamped.
+    adaptive: adaptive load-step continuation with rollback (like adaptive load stepping in nonlinear FE). Training
+    steps are indexed in the given order (smallest load first). The first stage tries the full range coarsely
+    {first, middle, last}; every later stage either extends the covered range (adding the midpoint and the end of the
+    new interval) or, once the full range is covered, refines it (adding the midpoints of all gaps). A stage that does
+    not converge (stability stop, iteration cap or non-finite) is rolled back to the last converged state (mean, factor,
+    hyperparameters) and retried with half the extension, or half the refinement points. If no smaller stage exists the
+    fit stops and returns the last converged posterior; info['valid_load_steps'] lists the steps it is conditioned on
+    (info['truncated'] is True if that is not all training steps). Overrides continuation / continuation_stages.
+    hyper_iters_per_stage: > 0 optimises the hyperparameters only in the first k GP iterations of each continuation
+    stage, then keeps them fixed and iterates the Gauss-Newton fixed point for theta alone (no flip-flop between
+    near-tied evidence modes). 0 = optimise at every iteration.
+    ls_floor_fraction: > 0 adds a one-sided log-normal penalty (width 0.1 log units) on lengthscales below
+    ls_floor_fraction x the span of the active stage's data (per GP input dimension): a stage that has only seen a narrow
+    range cannot select features much finer than that range, which it would extrapolate explosively. 0 = off.
+    tol_intermediate: convergence tolerance of the intermediate continuation stages (they only pass on the
+    linearisation point and the hyperparameters); default tol. The stage on all training steps always uses tol.
     Returns (HSGPHyperelasticity with the posterior, history list of dicts).
     """
     t0 = time.time()
@@ -212,6 +230,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         ref_d, ref_v = np.zeros(2), np.zeros(1)
     else:
         ref_d, ref_v = DEV_REFERENCE, VOL_REFERENCE
+    dev_x_steps, vol_x_steps = dev_x.reshape(T, -1, dev_x.shape[-1]), vol_x.reshape(T, -1, vol_x.shape[-1])
     dev_box = make_box(dev_x, ref_d, box_factor, num_basis_dev)
     vol_box = make_box(vol_x, ref_v, box_factor, num_basis_vol)
     P = 2 + dev_box.num_basis + vol_box.num_basis
@@ -258,8 +277,11 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             out[key] = to_raw(jnp.clip(log_l, lo + 1e-3 * (hi - lo), hi - 1e-3 * (hi - lo)), lo, hi)
         return out
 
-    def log_hyperprior(h):
+    def log_hyperprior(h, stats=None):
         lp = 0.0
+        if ls_floor_fraction > 0 and stats is not None:   # one-sided penalty below the stage's data-range floor
+            lp += -0.5 * (jnp.sum((jnp.minimum(jnp.log(h["dev_ls"]) - jnp.log(stats["ls_floor_dev"]), 0.0) / 0.1) ** 2)
+                          + jnp.sum((jnp.minimum(jnp.log(h["vol_ls"]) - jnp.log(stats["ls_floor_vol"]), 0.0) / 0.1) ** 2))
         if amplitude_prior_scale > 0:
             lp += -0.5 * (((jnp.log(h["dev_sig"]) - sig_centre) / amplitude_prior_scale) ** 2
                           + ((jnp.log(h["vol_sig"]) - sig_centre) / amplitude_prior_scale) ** 2)
@@ -338,7 +360,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         stats = {k: sum(o[k] for o in out) for k in out[0]}
         w_all = (reaction_weight if learned_noise else 1.0) / sigma_R[np.asarray(active)] ** 2
         stats.update(yWy_R=jnp.sum(w_all * R_obs[np.asarray(active)] ** 2), logdetW_R=jnp.sum(jnp.log(w_all)),
-                     theta_fix=theta_fix)
+                     theta_fix=theta_fix, ls_floor_dev=ls_floor[0], ls_floor_vol=ls_floor[1])
         # square-root factors of the Gram blocks (G = R^T R, negative round-off eigenvalues clipped), so that the
         # posterior factor comes from a QR of [I; C] instead of a Cholesky of I + M^T G M (no squared condition number)
         for g in ("Gx", "Gy", "GR"):
@@ -380,7 +402,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         noise_logdet = 0.5 * stats["logdetW_f"] if residual else -N_x * jnp.log(h["su_x"]) - N_y * jnp.log(h["su_y"])
         log_z = (-0.5 * yWy + 0.5 * v @ v - jnp.sum(jnp.log(jnp.abs(jnp.diag(L)))) + noise_logdet + 0.5 * stats["logdetW_R"]
                  - 0.5 * (N_x + N_y + 2 * len(active)) * jnp.log(2 * jnp.pi))
-        return -(log_z + log_hyperprior(h)), log_z
+        return -(log_z + log_hyperprior(h, stats)), log_z
 
     def _optimise_hyper(eta_, stats, lin_only):
         if learned_noise:   # sigma_f is set by the variational update, not by the (unbounded) evidence
@@ -414,6 +436,13 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
 
     history, theta_mean, converged = [], theta0, False
     theta_fix = jnp.zeros(P)                   # fixed mean function (prior_mean='linear_elastic_fixed', after the linear stage)
+
+    def stage_ls_floor(idx):
+        """Lengthscale floors (dev (2,), vol (1,)) from the span of the active steps' data in GP input space."""
+        d, v = dev_x_steps[np.asarray(idx)].reshape(-1, dev_x.shape[-1]), vol_x_steps[np.asarray(idx)].reshape(-1, vol_x.shape[-1])
+        frac = max(ls_floor_fraction, 0.0)
+        return (jnp.asarray(frac * np.maximum(d.max(0) - d.min(0), 1e-6)), jnp.asarray(frac * np.maximum(v.max(0) - v.min(0), 1e-6)))
+    ls_floor = stage_ls_floor(list(range(T)))
     factor, relax, prev_change, eta_prev = jnp.zeros((P, 1)), 1.0, np.inf, eta
     theta_noise = None
     if residual:
@@ -440,13 +469,41 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             stages.append(list(range(T)))     # always finish on all training steps
     else:
         stages = [list(range(k)) for k in range(2, T + 1)] if (continuation and T > 2) else [list(range(T))]
-    it, aborted, stage_status = -1, False, []
-    for si, active in enumerate(stages):
+
+    # adaptive continuation state: covered (last converged) step set, extension target, refinement batch size
+    ad = dict(D=[], r_try=T - 1, refine_n=None, snapshot=None, stop_reason=None, skipped=[], cap=T - 1, range_note=None)
+
+    def adaptive_proposal():
+        D = ad["D"]
+        if not D:
+            return sorted({0, ad["r_try"] // 2, ad["r_try"]})
+        r = max(D)
+        if r < ad["cap"]:
+            return sorted(set(D) | {(r + ad["r_try"]) // 2, ad["r_try"]})
+        new = []
+        for a, b in zip(D, D[1:]):          # per gap: the free step closest to its midpoint (skipped steps excluded)
+            free_in_gap = [t for t in range(a + 1, b) if t not in ad["skipped"]]
+            if free_in_gap:
+                new.append(min(free_in_gap, key=lambda t: abs(t - (a + b) / 2)))
+        if not new:
+            return None
+        return sorted(set(D) | set(new[:ad["refine_n"]] if ad["refine_n"] else new))
+
+    if adaptive:
+        stages = [adaptive_proposal()] if T > 2 else [list(range(T))]
+    all_idx = list(range(T))
+    it, aborted, stage_status, lin_done, si = -1, False, [], False, -1
+    while si + 1 < len(stages):
+        si += 1
+        active = stages[si]
+        aborted = False
         N_x, N_y = n_free_x * len(active), n_free_y * len(active)
+        ls_floor = stage_ls_floor(active)
         optimise_hyper = make_optimiser()
-        if len(stages) > 1:
+        if adaptive or len(stages) > 1:
             log_fn(f"[HSGP] continuation stage {si}: load steps {[labels[t] for t in active]}")
-        stage_lin, n_lin, n_full, converged, unstable_stop = si == 0, 0, 0, False, False
+        stage_lin, n_lin, n_full, converged, unstable_stop = not lin_done, 0, 0, False, False
+        stage_tol = tol if (sorted(active) == all_idx or tol_intermediate is None) else tol_intermediate
         relax, prev_change = 1.0, np.inf
         while n_full < max_outer:
             it += 1
@@ -461,8 +518,9 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 lambda a, b: a + jnp.clip(b - a, -max_hyper_step, max_hyper_step), eta, e)   # max_hyper_step per iteration
             starts = [eta] + ([] if (lin_only or not hyper_restarts) else
                               [clip_step(eta_init), with_lengthscales(eta, 0.5), with_lengthscales(eta, 2.0)])
-            best = None
-            for e0 in starts:
+            frozen = (not lin_only) and hyper_iters_per_stage > 0 and n_full >= hyper_iters_per_stage
+            best = (float(neg_log_post(eta, stats, lin_only)[0]), eta) if frozen else None
+            for e0 in ([] if frozen else starts):
                 cand = clip_step(optimise_hyper(e0, stats, lin_only))
                 val = float(neg_log_post(cand, stats, lin_only)[0])
                 if np.isfinite(val) and (best is None or val < best[0]):
@@ -536,7 +594,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             if stage_lin:
                 n_lin += 1
                 if change < lin_tol or n_lin >= lin_max:
-                    stage_lin = False
+                    stage_lin, lin_done = False, True
                     log_fn(f"[HSGP] linear-elastic stage {'converged' if change < lin_tol else 'stopped (lin_max)'} after {n_lin} "
                            f"iterations: mu {float(theta_mean[0]):.4g}, kappa {float(theta_mean[1]):.4g}")
                     if prior_mean == "linear_elastic_fixed":
@@ -548,9 +606,10 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                         B_steps, step_stats = compile_basis()
                         stability_margin = make_stability_check()
                         log_fn(f"[HSGP] envelope set: mu {mu_e:.4g}, kappa {kappa_e:.4g}, scale {energy_scale:.4g}")
+                    ad["snapshot"] = dict(theta=theta_mean, eta=eta, factor=factor, D=[])   # rollback point before any GP stage
                 continue
             n_full += 1
-            if change < tol and damping == 0.0:
+            if change < stage_tol and damping == 0.0:
                 if not stability_search or stability_margin(new_mean) >= min(stability_margin(theta_mean), 0.0):
                     theta_mean = new_mean
                 converged = True
@@ -562,14 +621,59 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             log_fn(f"[HSGP] WARNING: continuation stage {si} (load steps {[labels[t] for t in active]}) stopped at the "
                    f"iteration cap max_outer={max_outer} without converging; later stages start from this point and "
                    f"the result can depend on it. Increase max_outer.")
+        if adaptive:
+            if converged:
+                r_old, r_new = (max(ad["D"]) if ad["D"] else 0), max(active)
+                # next extension: twice the last successful jump (adaptive load stepping); the full range first
+                r_next = T - 1 if not ad["D"] else min(T - 1, r_new + 2 * max(r_new - r_old, 1))
+                ad.update(D=list(active), r_try=min(r_next, ad["cap"]), refine_n=None,
+                          snapshot=dict(theta=theta_mean, eta=eta, factor=factor, D=list(active)))
+            else:
+                snap = ad["snapshot"]
+                if snap is None:          # failed before the linear-elastic stage finished: nothing to roll back to
+                    ad["stop_reason"] = "failed before the first rollback point"
+                    break
+                theta_mean, eta, factor = snap["theta"], snap["eta"], snap["factor"]
+                D = ad["D"]
+                extending = (not D) or max(active) > max(D)
+                if extending:
+                    r = max(D) if D else 0
+                    if ad["r_try"] - r <= 1:
+                        if not D:
+                            ad["stop_reason"] = "no GP stage converged"
+                        else:   # range limited: keep refining inside the covered range, then stop
+                            ad["cap"] = r
+                            ad["range_note"] = f"range limited to load step {labels[r]} (adding {labels[ad['r_try']]} failed)"
+                            log_fn(f"[HSGP] {ad['range_note']}")
+                    else:
+                        ad["r_try"] = (r + ad["r_try"]) // 2
+                else:
+                    n_new = len(active) - len(D)
+                    if n_new <= 1:   # a single interior step that cannot be added: leave it out and continue
+                        ad["skipped"] += [t for t in active if t not in D]
+                        ad["refine_n"] = None
+                    else:
+                        ad["refine_n"] = n_new // 2
+                log_fn(f"[HSGP] stage {si} failed; rolled back to load steps {[labels[t] for t in D]}"
+                       + (f"; stopping: {ad['stop_reason']}" if ad["stop_reason"] else ""))
+                if ad["stop_reason"]:
+                    break
+            nxt = adaptive_proposal()
+            if nxt is not None:
+                stages.append(nxt)
+            continue
         if aborted:
             break
 
+    valid = sorted(ad["D"]) if adaptive else all_idx
     h = unpack(eta)
     hyper = {k: np.asarray(v) for k, v in h.items() if k not in ("su_x", "su_y")}
     info = dict(prior_mean=prior_mean, eiv_damping=float(eiv_damping), eiv_damping_decay=float(eiv_damping_decay), envelope=model.envelope, likelihood=likelihood, sigma_u_known=sigma_u_known,
                 reaction_weight=reaction_weight, warp=warp, continuation=continuation, continuation_stages=[[labels[t] for t in a] for a in stages],
-                stage_status=stage_status, sigma_cap=sigma_cap, stability_search=stability_search, hyper_restarts=hyper_restarts, all_stages_converged=bool(stage_status) and all(x["converged"] for x in stage_status), converged=converged, outer_iterations=len(history), log_evidence=history[-1]["log_evidence"],
+                adaptive=adaptive, valid_load_steps=[labels[t] for t in valid], truncated=valid != all_idx,
+                adaptive_stop_reason=ad["stop_reason"] or ad["range_note"], skipped_load_steps=[labels[t] for t in ad["skipped"]], hyper_iters_per_stage=hyper_iters_per_stage,
+                ls_floor_fraction=ls_floor_fraction, tol_intermediate=tol_intermediate,
+                stage_status=stage_status, sigma_cap=sigma_cap, stability_search=stability_search, hyper_restarts=hyper_restarts, all_stages_converged=(valid == all_idx) if adaptive else (bool(stage_status) and all(x["converged"] for x in stage_status)), converged=converged, outer_iterations=len(history), log_evidence=history[-1]["log_evidence"],
                 box_factor=box_factor, num_basis_dev=num_basis_dev, num_basis_vol=num_basis_vol,
                 dev_ls_bounds=[np.asarray(lsd_lo).tolist(), np.asarray(lsd_hi).tolist()],
                 vol_ls_bounds=[np.asarray(lsv_lo).tolist(), np.asarray(lsv_hi).tolist()],

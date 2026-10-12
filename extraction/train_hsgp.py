@@ -25,6 +25,10 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_hyper_restarts: 1          # multi-start hyperparameter optimisation (prior centre, lengthscales x0.5, x2)
     hsgp_eiv_damping: 0.0           # initial relative damping of the EIV correction (K^2 + mu^2)^-1 K f; 0 = Newton K^-1 f
     hsgp_eiv_damping_decay: 0.1     # damping factor per GP iteration within a stage (annealed to exactly 0)
+    hsgp_adaptive: 0                # 1: adaptive continuation with rollback (coarse full range first, bisect on failure)
+    hsgp_hyper_iters_per_stage: 0   # >0: optimise hyperparameters only in the first k GP iterations of each stage
+    hsgp_ls_floor_fraction: 0.0     # >0: soft lengthscale floor = fraction x span of the stage's data (GP input space)
+    hsgp_tol_intermediate: 0.0      # >0: convergence tolerance of intermediate continuation stages (final stage: 1e-5)
     hsgp_continuation_stages:       # optional explicit ladder of cumulative load-step sets (recipe only), e.g.
       - [1, 2, 3]                   #   default: [first two training steps], then one more step per stage
       - [1, 2, 3, 5]
@@ -58,7 +62,8 @@ HSGP_DEFAULTS = dict(hsgp_likelihood="eiv", hsgp_prior_mean="none", hsgp_envelop
                      hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_box_factor=8.0, hsgp_max_outer=60,
                      hsgp_amplitude_prior_scale=1.0, hsgp_lengthscale_prior_scale=1.0, hsgp_reaction_weight=1.0,
                      hsgp_sigma_cap=10.0, hsgp_stability_search=1, hsgp_hyper_restarts=1,
-                     hsgp_eiv_damping=0.0, hsgp_eiv_damping_decay=0.1)
+                     hsgp_eiv_damping=0.0, hsgp_eiv_damping_decay=0.1, hsgp_adaptive=0, hsgp_hyper_iters_per_stage=0,
+                     hsgp_ls_floor_fraction=0.0, hsgp_tol_intermediate=0.0)
 
 
 def parse_args():
@@ -184,14 +189,24 @@ def main():
             continuation=bool(opt["hsgp_continuation"]), max_outer=opt["hsgp_max_outer"], step_labels=train_steps,
             sigma_cap=opt["hsgp_sigma_cap"], stability_search=bool(opt["hsgp_stability_search"]),
             hyper_restarts=bool(opt["hsgp_hyper_restarts"]), continuation_stages=rec.get("hsgp_continuation_stages"),
-            eiv_damping=float(opt["hsgp_eiv_damping"]), eiv_damping_decay=float(opt["hsgp_eiv_damping_decay"]))
+            eiv_damping=float(opt["hsgp_eiv_damping"]), eiv_damping_decay=float(opt["hsgp_eiv_damping_decay"]),
+            adaptive=bool(opt["hsgp_adaptive"]), hyper_iters_per_stage=int(opt["hsgp_hyper_iters_per_stage"]),
+            ls_floor_fraction=float(opt["hsgp_ls_floor_fraction"]),
+            tol_intermediate=float(opt["hsgp_tol_intermediate"]) or None)
         fit_time = time.time() - t0
         model.save(post_path)
-        feats = jax.vmap(model.feature_extractor.extract)(F_all[jnp.array(train_steps)].reshape(-1, 3, 3))
+        # adaptive continuation may stop early: the posterior is then conditioned on fewer steps, and the teacher must
+        # only be exported at those states (distillation reads train_load_steps_indices from config.json)
+        valid_steps = model.info.get("valid_load_steps") or train_steps
+        if model.info.get("truncated"):
+            print(f"[HSGP] WARNING: posterior conditioned on load steps {valid_steps} only "
+                  f"({model.info.get('adaptive_stop_reason')}; skipped {model.info.get('skipped_load_steps')})", flush=True)
+        feats = jax.vmap(model.feature_extractor.extract)(F_all[jnp.array(valid_steps)].reshape(-1, 3, 3))
         I_obs = np.concatenate([np.asarray(feats[0]), np.asarray(feats[1])], axis=-1)
         np.save(os.path.join(save_path, "I_obs_all.npy"), I_obs)
         cfg_out = dict(rec, extraction_method="hsgp", dataset_path=args.dataset_path, seed=args.seed, batch_dir=save_path,
-                       train_load_steps_indices=train_steps, val_load_steps_indices=val_steps, test_load_steps_indices=test_steps,
+                       train_load_steps_indices=valid_steps, train_load_steps_requested=train_steps,
+                       val_load_steps_indices=val_steps, test_load_steps_indices=test_steps,
                        data_energy_scale=energy_scale, hsgp_continuation_stages=rec.get("hsgp_continuation_stages"), linear_elastic_prior_scale=lin_prior_scale, hsgp_options=opt,
                        hsgp=dict(model.info, hyper={k: np.asarray(v).tolist() for k, v in model.hyper.items()}))
         json.dump(cfg_out, open(os.path.join(save_path, "config.json"), "w"), indent=4, default=float)

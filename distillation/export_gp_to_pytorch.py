@@ -498,6 +498,13 @@ def main():
                             steps_str = first_line.split("]")[0].split("[")[1].strip()
                             if steps_str:
                                 load_steps = [int(x.strip()) for x in steps_str.split(",") if x.strip().isdigit()]
+            if load_steps is None:   # HSGP extraction (no optimization_log.txt): the steps the posterior is conditioned on
+                cfg_file = os.path.join(args.saved_model_dir, "config.json")
+                if os.path.exists(cfg_file):
+                    with open(cfg_file, "r") as cf:
+                        load_steps = json.load(cf).get("train_load_steps_indices")
+                    if load_steps:
+                        print(f"[EXPORT] Training load steps from {cfg_file}: {load_steps}")
             
             if load_steps and len(load_steps) > 0 and max(load_steps) < F_all_steps_2x2.shape[0]:
                 F_train_full_2x2 = F_all_steps_2x2[load_steps]
