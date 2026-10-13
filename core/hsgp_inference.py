@@ -146,7 +146,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              stability_search: bool = True, hyper_restarts: bool = True, continuation_stages=None,
              step_labels=None, eiv_damping: float = 0.0, eiv_damping_decay: float = 0.1,
              adaptive: bool = False, hyper_iters_per_stage: int = 0, ls_floor_fraction: float = 0.0,
-             tol_intermediate: Optional[float] = None,
+             tol_intermediate: Optional[float] = None, hyper_delay: int = 0, cap_accept_tol: float = 0.0,
              hyper_steps: int = 60, verbose: bool = True, log_fn=print):
     """
     f3x3_steps: (T, C, 3, 3) observed deformation gradients of the training steps; R_obs, sigma_R: (T, 2).
@@ -207,6 +207,13 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     ls_floor_fraction: > 0 adds a one-sided log-normal penalty (width 0.1 log units) on lengthscales below
     ls_floor_fraction x the span of the active stage's data (per GP input dimension): a stage that has only seen a narrow
     range cannot select features much finer than that range, which it would extrapolate explosively. 0 = off.
+    hyper_delay: > 0 keeps the hyperparameters fixed in the first k GP iterations of every stage after the first GP
+    stage, so the mean absorbs the newly added load steps before the evidence is re-optimised. Right after steps are
+    added the linearised misfit at them is large, and optimising the evidence then makes the GP much larger and rougher
+    (in the 40-step runs, failed stages started with a 3.5-7x amplitude jump; converged stages with none). With
+    hyper_iters_per_stage > 0 the optimisation window is iterations [hyper_delay, hyper_delay + hyper_iters_per_stage).
+    cap_accept_tol: > 0 (adaptive only) counts a stage that reaches the iteration cap with its last force change below
+    cap_accept_tol as converged instead of rolling it back (Gauss-Newton jitter just above tol at the noise floor).
     tol_intermediate: convergence tolerance of the intermediate continuation stages (they only pass on the
     linearisation point and the hyperparameters); default tol. The stage on all training steps always uses tol.
     Returns (HSGPHyperelasticity with the posterior, history list of dicts).
@@ -492,7 +499,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     if adaptive:
         stages = [adaptive_proposal()] if T > 2 else [list(range(T))]
     all_idx = list(range(T))
-    it, aborted, stage_status, lin_done, si = -1, False, [], False, -1
+    it, aborted, stage_status, lin_done, si, gp_done = -1, False, [], False, -1, False
     while si + 1 < len(stages):
         si += 1
         active = stages[si]
@@ -518,7 +525,9 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 lambda a, b: a + jnp.clip(b - a, -max_hyper_step, max_hyper_step), eta, e)   # max_hyper_step per iteration
             starts = [eta] + ([] if (lin_only or not hyper_restarts) else
                               [clip_step(eta_init), with_lengthscales(eta, 0.5), with_lengthscales(eta, 2.0)])
-            frozen = (not lin_only) and hyper_iters_per_stage > 0 and n_full >= hyper_iters_per_stage
+            delayed = (not lin_only) and gp_done and hyper_delay > 0 and n_full < hyper_delay
+            frozen = delayed or ((not lin_only) and hyper_iters_per_stage > 0
+                                 and n_full >= (hyper_delay if gp_done else 0) + hyper_iters_per_stage)
             best = (float(neg_log_post(eta, stats, lin_only)[0]), eta) if frozen else None
             for e0 in ([] if frozen else starts):
                 cand = clip_step(optimise_hyper(e0, stats, lin_only))
@@ -615,8 +624,17 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 converged = True
                 break
 
+        near_converged = False
+        if (adaptive and not converged and not unstable_stop and not aborted and cap_accept_tol > 0
+                and n_full >= max_outer and history and history[-1]["force_change"] < cap_accept_tol):
+            near_converged = True
+            log_fn(f"[HSGP] stage {si} reached the iteration cap with force change {history[-1]['force_change']:.2e} "
+                   f"< {cap_accept_tol:g}: accepted as converged")
         stage_status.append(dict(stage=si, load_steps=[labels[t] for t in active], converged=converged,
-                                 iterations=n_full, aborted=aborted, stopped_for_stability=unstable_stop))
+                                 iterations=n_full, aborted=aborted, stopped_for_stability=unstable_stop,
+                                 accepted_at_cap=near_converged))
+        converged = converged or near_converged
+        gp_done = gp_done or (converged and lin_done)
         if not converged and not aborted and not unstable_stop:
             log_fn(f"[HSGP] WARNING: continuation stage {si} (load steps {[labels[t] for t in active]}) stopped at the "
                    f"iteration cap max_outer={max_outer} without converging; later stages start from this point and "
@@ -672,7 +690,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 reaction_weight=reaction_weight, warp=warp, continuation=continuation, continuation_stages=[[labels[t] for t in a] for a in stages],
                 adaptive=adaptive, valid_load_steps=[labels[t] for t in valid], truncated=valid != all_idx,
                 adaptive_stop_reason=ad["stop_reason"] or ad["range_note"], skipped_load_steps=[labels[t] for t in ad["skipped"]], hyper_iters_per_stage=hyper_iters_per_stage,
-                ls_floor_fraction=ls_floor_fraction, tol_intermediate=tol_intermediate,
+                ls_floor_fraction=ls_floor_fraction, tol_intermediate=tol_intermediate, hyper_delay=hyper_delay,
+                cap_accept_tol=cap_accept_tol,
                 stage_status=stage_status, sigma_cap=sigma_cap, stability_search=stability_search, hyper_restarts=hyper_restarts, all_stages_converged=(valid == all_idx) if adaptive else (bool(stage_status) and all(x["converged"] for x in stage_status)), converged=converged, outer_iterations=len(history), log_evidence=history[-1]["log_evidence"],
                 box_factor=box_factor, num_basis_dev=num_basis_dev, num_basis_vol=num_basis_vol,
                 dev_ls_bounds=[np.asarray(lsd_lo).tolist(), np.asarray(lsd_hi).tolist()],

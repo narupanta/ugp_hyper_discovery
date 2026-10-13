@@ -29,6 +29,8 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_hyper_iters_per_stage: 0   # >0: optimise hyperparameters only in the first k GP iterations of each stage
     hsgp_ls_floor_fraction: 0.0     # >0: soft lengthscale floor = fraction x span of the stage's data (GP input space)
     hsgp_tol_intermediate: 0.0      # >0: convergence tolerance of intermediate continuation stages (final stage: 1e-5)
+    hsgp_hyper_delay: 0             # >0: hyperparameters fixed in the first k GP iterations of each later stage
+    hsgp_cap_accept_tol: 0.0        # >0 (adaptive): a stage at the iteration cap with force change below this counts as converged
     hsgp_continuation_stages:       # optional explicit ladder of cumulative load-step sets (recipe only), e.g.
       - [1, 2, 3]                   #   default: [first two training steps], then one more step per stage
       - [1, 2, 3, 5]
@@ -63,7 +65,7 @@ HSGP_DEFAULTS = dict(hsgp_likelihood="eiv", hsgp_prior_mean="none", hsgp_envelop
                      hsgp_amplitude_prior_scale=1.0, hsgp_lengthscale_prior_scale=1.0, hsgp_reaction_weight=1.0,
                      hsgp_sigma_cap=10.0, hsgp_stability_search=1, hsgp_hyper_restarts=1,
                      hsgp_eiv_damping=0.0, hsgp_eiv_damping_decay=0.1, hsgp_adaptive=0, hsgp_hyper_iters_per_stage=0,
-                     hsgp_ls_floor_fraction=0.0, hsgp_tol_intermediate=0.0)
+                     hsgp_ls_floor_fraction=0.0, hsgp_tol_intermediate=0.0, hsgp_hyper_delay=0, hsgp_cap_accept_tol=0.0)
 
 
 def parse_args():
@@ -192,7 +194,8 @@ def main():
             eiv_damping=float(opt["hsgp_eiv_damping"]), eiv_damping_decay=float(opt["hsgp_eiv_damping_decay"]),
             adaptive=bool(opt["hsgp_adaptive"]), hyper_iters_per_stage=int(opt["hsgp_hyper_iters_per_stage"]),
             ls_floor_fraction=float(opt["hsgp_ls_floor_fraction"]),
-            tol_intermediate=float(opt["hsgp_tol_intermediate"]) or None)
+            tol_intermediate=float(opt["hsgp_tol_intermediate"]) or None, hyper_delay=int(opt["hsgp_hyper_delay"]),
+            cap_accept_tol=float(opt["hsgp_cap_accept_tol"]))
         fit_time = time.time() - t0
         model.save(post_path)
         # adaptive continuation may stop early: the posterior is then conditioned on fewer steps, and the teacher must
