@@ -323,6 +323,12 @@ if [ -n "$ANGLES" ]; then MAT_EXTRA_ARGS="$MAT_EXTRA_ARGS --angles $ANGLES"; fi
 if [ -n "$DEV_PARAMS" ]; then MAT_EXTRA_ARGS="$MAT_EXTRA_ARGS --dev_params $DEV_PARAMS"; fi
 if [ -n "$VOL_PARAMS" ]; then MAT_EXTRA_ARGS="$MAT_EXTRA_ARGS --vol_params $VOL_PARAMS"; fi
 if [ -n "$ANISO_PARAMS" ]; then MAT_EXTRA_ARGS="$MAT_EXTRA_ARGS --aniso_params $ANISO_PARAMS"; fi
+# Ogden true material (generator only): mu_params / alpha_params
+MU_PARAMS=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); a=d.get('material_params', {}).get('mu_params', None); print(*(a if isinstance(a, list) else [a])) if a is not None else None" 2>/dev/null || true)
+ALPHA_PARAMS=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); a=d.get('material_params', {}).get('alpha_params', None); print(*(a if isinstance(a, list) else [a])) if a is not None else None" 2>/dev/null || true)
+GEN_MAT_ARGS="$MAT_EXTRA_ARGS"
+if [ -n "$MU_PARAMS" ]; then GEN_MAT_ARGS="$GEN_MAT_ARGS --mu_params $MU_PARAMS"; fi
+if [ -n "$ALPHA_PARAMS" ]; then GEN_MAT_ARGS="$GEN_MAT_ARGS --alpha_params $ALPHA_PARAMS"; fi
 
 # Resolve seeds list
 if [ -n "$SEEDS_CLI" ]; then
@@ -387,7 +393,7 @@ for SEED in $SEEDS_LIST; do
             --clamp_top_x 0 \
             --seed "$SEED" \
             --spec_out "$TRAIN_SPEC_FILE" $GEN_MODE_FLAG \
-            $MAT_EXTRA_ARGS
+            $GEN_MAT_ARGS
         TRAIN_DATASET_PATH=$(cat "$TRAIN_SPEC_FILE")
 
         if [ "$GEOMETRY_VAL" != "$GEOMETRY_TRAIN" ]; then
@@ -406,7 +412,7 @@ for SEED in $SEEDS_LIST; do
                 --clamp_top_x "$CLAMP_TOP_X" \
                 --seed "$SEED" \
                 --spec_out "$VAL_SPEC_FILE" $GEN_MODE_FLAG \
-                $MAT_EXTRA_ARGS
+                $GEN_MAT_ARGS
             VAL_DATASET_PATH=$(cat "$VAL_SPEC_FILE")
         else
             VAL_DATASET_PATH="$TRAIN_DATASET_PATH"
@@ -577,6 +583,10 @@ for SEED in $SEEDS_LIST; do
             $DEV_PARAMS_DISABLED_ARG \
             $SENSITIVITY_FLAG &
             
+        PLANE_STRESS_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('plane_stress_mode', ''))" 2>/dev/null || echo "")
+        if [ "$PLANE_STRESS_MODE" == "incompressible" ]; then
+            echo "Incompressible plane stress: no volumetric energy (J = 1); skipping the VOL distillation."
+        else
         echo "Distilling VOL component into $DISTILL_DIR..."
         python3 distillation/distill_uqmodeldisc.py \
             --saved_model_dir "$EXTRACT_DIR" \
@@ -595,6 +605,7 @@ for SEED in $SEEDS_LIST; do
             --seed "$SEED" \
             $VOL_PARAMS_DISABLED_ARG \
             $SENSITIVITY_FLAG &
+        fi
 
         if [ "$MODEL_MODE" == "anisotropic" ] || [ "$DIST_MODEL" == "gmr_aniso" ]; then
             if [ -z "$ANISO_DIST_ITERS" ]; then
@@ -623,6 +634,10 @@ for SEED in $SEEDS_LIST; do
         fi
             
         wait
+        if [ "$PLANE_STRESS_MODE" == "incompressible" ] && [ -f "$DISTILL_DIR/dev_flow_samples.npy" ]; then
+            # volumetric parameters are irrelevant at J = 1: zero samples keep the downstream [dev, vol] layout
+            python3 -c "import numpy as np; d=np.load('$DISTILL_DIR/dev_flow_samples.npy'); np.save('$DISTILL_DIR/vol_flow_samples.npy', np.zeros((d.shape[0], 3)))"
+        fi
 
         echo "Generating distillation diagnostics & sensitivity plots..."
         python3 plots/plot_distilled_validation.py \

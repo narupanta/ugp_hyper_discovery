@@ -203,7 +203,7 @@ def parse_args():
     parser.add_argument('--dataset_path', type=str, default="", help="Explicit path to precomputed dataset npz file")
     parser.add_argument('--num_steps', type=int, default=None, help="Number of load steps (defaults to dataset load shape or 10)")
     parser.add_argument('--control_mode', type=str, default=None, choices=['force', 'displacement'], help="Boundary control mode ('force' or 'displacement')")
-    parser.add_argument('--stress_mode', type=str, default=None, choices=['plane_strain', 'plane_stress'], help="Stress state assumption ('plane_strain' or 'plane_stress')")
+    parser.add_argument('--stress_mode', type=str, default=None, choices=['plane_strain', 'plane_stress', 'plane_stress_incompressible'], help="Stress state assumption ('plane_strain', 'plane_stress', or 'plane_stress_incompressible': F33 = 1/det F_2D)")
     parser.add_argument('--prescribe_right', type=lambda x: (str(x).lower() in ['true', '1', 'yes']), default=None, help="Prescribe right boundary")
     parser.add_argument('--clamp_top_x', type=lambda x: (str(x).lower() in ['true', '1', 'yes']), default=None, help="Clamp top boundary in X direction")
     parser.add_argument('--asym_factor', type=float, default=None, help="Asymmetry factor between top and right boundaries")
@@ -334,6 +334,20 @@ if __name__ == "__main__" :
     if stress_mode is None:
         stress_mode = "plane_strain"
     stress_mode = stress_mode.lower()
+    if stress_mode == "plane_stress":
+        # incompressible plane stress if the experiment config (preferred) or the dataset says so
+        ps_mode = None
+        for anc in [os.path.dirname(os.path.abspath(args.distilled_dir))] * 1 + [os.path.dirname(os.path.dirname(os.path.abspath(args.distilled_dir)))]:
+            cfg_p = os.path.join(anc, "config.yaml")
+            if os.path.exists(cfg_p):
+                import yaml
+                ps_mode = (yaml.safe_load(open(cfg_p)) or {}).get("plane_stress_mode")
+                if ps_mode:
+                    break
+        if not ps_mode and prep_data is not None and "plane_stress_mode" in prep_data:
+            ps_mode = str(prep_data["plane_stress_mode"])
+        if str(ps_mode).lower() == "incompressible":
+            stress_mode = "plane_stress_incompressible"
 
     prescribe_right = args.prescribe_right
     if prescribe_right is None:
@@ -403,7 +417,12 @@ if __name__ == "__main__" :
                 I6_m1 = I6_bar - 1.0
                 w_aniso += aniso_p[3] * I6_m1**2 + aniso_p[4] * I6_m1**3 + aniso_p[5] * I6_m1**4
 
-        return w_dev + w_vol + w_aniso
+        w_ogden = 0.0
+    if p.shape[-1] >= 25:          # Ogden block of the full vector (core/material_library.py)
+        from core.ogden import ogden_dev_energy_jax
+        w_ogden = ogden_dev_energy_jax(F_3d, p[19:25][0::2], p[19:25][1::2])
+
+    return w_dev + w_vol + w_aniso + w_ogden
 
     def p_3d_distilled(F_3d, p, a0=None, a1=None):
         return jax.grad(eval_psi_3d, argnums=0)(F_3d, p, a0, a1)
@@ -428,6 +447,12 @@ if __name__ == "__main__" :
         return jax.lax.fori_loop(0, max_iter, step_fn, lam3_0)
 
     def piola_stress_distilled(F_2d, p, a0=None, a1=None):
+        if stress_mode == "plane_stress_incompressible":
+            # reduced energy Psi(F_2D, F33 = 1/det F_2D): its in-plane gradient is P with sigma_33 = 0
+            def psi_red(f2):
+                F_3d = jnp.zeros((3, 3)).at[:2, :2].set(f2).at[2, 2].set(1.0 / jnp.linalg.det(f2))
+                return eval_psi_3d(F_3d, p, a0, a1)
+            return jax.grad(psi_red)(F_2d)
         if stress_mode == "plane_stress":
             lam3 = solve_lambda3_distilled(F_2d, p, a0, a1)
             F_3d = jnp.array([
@@ -594,7 +619,9 @@ if __name__ == "__main__" :
             num_total = min(len(dev_samples), len(vol_samples))
             dev_indices = np.random.choice(len(dev_samples), num_total, replace=False)
             vol_indices = np.random.choice(len(vol_samples), num_total, replace=False)
-            selected_samples = np.concatenate([dev_samples[dev_indices], vol_samples[vol_indices]], axis=1)
+            from core.material_library import full_param_vectors, distilled_library
+            selected_samples = full_param_vectors(dev_samples[dev_indices], vol_samples[vol_indices],
+                                                  distilled_library(args.distilled_dir))
         else:
             flow_samples = np.load(flow_samples_path)
             num_total = len(flow_samples)
@@ -629,9 +656,9 @@ if __name__ == "__main__" :
         a1 = getattr(true_material_model, "a1", None)
 
         # Helper to convert parameter sequence to fixed 19-vector (10 dev + 3 vol + 6 aniso)
-        def to_19_param_vec(p_seq):
-            p_arr = np.zeros(19, dtype=np.float64)
-            p_len = min(len(p_seq), 19)
+        def to_19_param_vec(p_seq):      # full layout incl. the Ogden block (core/material_library.py): 25 entries
+            p_arr = np.zeros(25, dtype=np.float64)
+            p_len = min(len(p_seq), 25)
             p_arr[:p_len] = p_seq[:p_len]
             return jnp.array(p_arr)
 
@@ -710,7 +737,7 @@ if __name__ == "__main__" :
             dirichlet_bc_info=dirichlet_bc_info,
             location_fns=location_fns,
             surface_maps=surface_maps,
-            num_internal_params=19,
+            num_internal_params=25,
             piola_func=lambda F, p: piola_stress_distilled(F[:2, :2] if F.shape == (3, 3) else F, p, a0, a1)
         )
         

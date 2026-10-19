@@ -89,7 +89,7 @@ CUSTOM_DATASET_PATH=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YA
 MAT_EXTRA_ARGS=$(python3 -c "
 import yaml; d = yaml.safe_load(open('$CONFIG_YAML')); m = d.get('material_params', {}) or {}
 out = []
-for k in ('angles', 'dev_params', 'vol_params', 'aniso_params'):
+for k in ('angles', 'dev_params', 'vol_params', 'aniso_params', 'mu_params', 'alpha_params'):
     v = m.get(k, d.get(k) if k == 'angles' else None)
     if v is not None:
         out += ['--' + k] + [str(x) for x in (v if isinstance(v, list) else [v])]

@@ -159,7 +159,15 @@ def extract_model_structure(distilled_dir):
                     "95ci_upper": high
                 }
 
-    process_file(dev_file, DEV_PARAM_NAMES)
+    from core.material_library import dev_names, distilled_library, sort_ogden_terms
+    library = distilled_library(distilled_dir)
+    if library == "gmr":
+        process_file(dev_file, DEV_PARAM_NAMES)
+    elif os.path.exists(dev_file):
+        # Ogden terms are interchangeable: report them ordered by decreasing alpha (inactive terms last)
+        sorted_file = os.path.join(distilled_dir, "dev_flow_samples_ogden_sorted.npy")
+        np.save(sorted_file, sort_ogden_terms(np.load(dev_file), library))
+        process_file(sorted_file, dev_names(library))
     process_file(vol_file, VOL_PARAM_NAMES)
     process_file(aniso_file, ANISO_PARAM_NAMES)
 
