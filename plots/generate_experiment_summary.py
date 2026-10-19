@@ -736,15 +736,20 @@ def format_param_md(p_dict):
 # Validation metrics of the per-seed table: (group, metric, keys into validation_metrics.json, kind)
 # kind: rmse (lower is better), r2 (higher is better), ec (closest to the nominal 95% is better)
 PER_SEED_METRICS = [
-    ("Energy Ψ", "RMSE", ("sef", "dist", "total", "rmse"), "rmse"),
-    ("Energy Ψ", "R²", ("sef", "dist", "total", "r2"), "r2"),
-    ("Energy Ψ", "EC (%)", ("sef", "dist", "total", "coverage"), "ec"),
+    ("Energy Ψ (GP)", "RMSE", ("sef", "gp", "total", "rmse"), "rmse"),
+    ("Energy Ψ (GP)", "R²", ("sef", "gp", "total", "r2"), "r2"),
+    ("Energy Ψ (GP)", "EC (%)", ("sef", "gp", "total", "coverage"), "ec"),
+    ("Energy Ψ (distilled)", "RMSE", ("sef", "dist", "total", "rmse"), "rmse"),
+    ("Energy Ψ (distilled)", "R²", ("sef", "dist", "total", "r2"), "r2"),
+    ("Energy Ψ (distilled)", "EC (%)", ("sef", "dist", "total", "coverage"), "ec"),
     ("Displacement (block)", "RMSE", ("fem_2x2", "block", "posterior_clean", "rmse_u"), "rmse"),
     ("Displacement (block)", "R²", ("fem_2x2", "block", "posterior_clean", "r2_u"), "r2"),
-    ("Displacement (block)", "EC (%)", ("fem_2x2", "block", "posterior_clean", "ec_u"), "ec"),
+    ("Displacement (block)", "EC post. vs clean (%)", ("fem_2x2", "block", "posterior_clean", "ec_u"), "ec"),
+    ("Displacement (block)", "EC pred. vs obs (%)", ("fem_2x2", "block", "predictive_obs", "ec_u"), "ec"),
     ("Reaction force (block)", "RMSE", ("fem_2x2", "block", "posterior_clean", "rmse_R"), "rmse"),
     ("Reaction force (block)", "R²", ("fem_2x2", "block", "posterior_clean", "r2_R"), "r2"),
-    ("Reaction force (block)", "EC (%)", ("fem_2x2", "block", "posterior_clean", "ec_R"), "ec"),
+    ("Reaction force (block)", "EC post. vs clean (%)", ("fem_2x2", "block", "posterior_clean", "ec_R"), "ec"),
+    ("Reaction force (block)", "EC pred. vs obs (%)", ("fem_2x2", "block", "predictive_obs", "ec_R"), "ec"),
 ]
 
 
@@ -826,16 +831,21 @@ def format_per_seed_tables(seeds):
     md.append("")
     md.append(f"**Best seed: {best}  ·  Median seed: {median}  ·  Worst seed: {worst}** (by overall rank)")
     md.append("")
-    md.append("Energy: distilled Ψ vs. the true energy. Displacement: FEM posterior mean/95% band vs. the clean FEM solution "
+    md.append("Energy (GP): extraction posterior, Energy (distilled): distilled parametric posterior, both vs. the true energy. Displacement: FEM posterior mean/95% band vs. the clean FEM solution "
               "at the free nodes. Reaction force: FEM-predicted reactions vs. the clean reactions. EC: empirical coverage of "
-              "the 95% interval. Rank: each metric ranks the seeds (RMSE lower, R² higher, EC closer to 95% is better); the "
-              "ranks are averaged over the nine metrics.")
+              "the 95% interval (validation steps); post. vs clean: posterior band vs. the clean data, pred. vs obs: predictive band "
+              "(posterior + measurement noise) vs. the observed data. Rank: each metric ranks the seeds (RMSE lower, R² "
+              "higher, EC closer to 95% is better); the ranks are averaged over all metrics.")
 
     n_c = len(PER_SEED_METRICS)
+    group_widths = [(g, sum(1 for m in PER_SEED_METRICS if m[0] == g)) for g in groups]
+    group_spans, col = [], 2
+    for _, w in group_widths:
+        group_spans.append((col, col + w - 1)); col += w
     tex = ["\n## LaTeX Table\n", "```latex", r"\begin{table}[htbp]", r"\centering", r"\resizebox{\textwidth}{!}{",
-           f"\\begin{{tabular}}{{l{'ccc' * len(groups)}cc}}", r"\toprule",
-           " & ".join([""] + [f"\\multicolumn{{3}}{{c}}{{\\textbf{{{g}}}}}" for g in groups] + ["", ""]) + r" \\",
-           " ".join(f"\\cmidrule(lr){{{2 + 3 * i}-{4 + 3 * i}}}" for i in range(len(groups))),
+           f"\\begin{{tabular}}{{l{'c' * n_c}cc}}", r"\toprule",
+           " & ".join([""] + [f"\\multicolumn{{{w}}}{{c}}{{\\textbf{{{g}}}}}" for g, w in group_widths] + ["", ""]) + r" \\",
+           " ".join(f"\\cmidrule(lr){{{a}-{b}}}" for a, b in group_spans),
            " & ".join([r"\textbf{Seed}"] + [m.replace("R²", "$R^2$").replace("%", r"\%") for _, m, _, _ in PER_SEED_METRICS]
                       + [r"Mean rank", r"Rank"]) + r" \\", r"\midrule"]
     for s in seeds:
@@ -847,7 +857,7 @@ def format_per_seed_tables(seeds):
                           + ["", ""]) + r" \\")
     tex += [r"\bottomrule", r"\end{tabular}", r"}",
             f"\\caption{{Per-seed validation results ($N={len(seeds)}$). Best seed {best}, median seed {median}, worst seed {worst} "
-            r"by the mean rank over all nine metrics.}",
+            r"by the mean rank over all metrics.}",
             r"\label{tab:results_per_seed}", r"\end{table}", "```\n"]
     return md, tex
 

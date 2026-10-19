@@ -174,8 +174,9 @@ def main():
     prep = DatasetFactory.create("dataset/precomputed_vfm", data_path=args.dataset_path).get_data()
     has_truth = bool(rec.get("has_ground_truth", True)) and "reaction_forces_true" in prep
     mat_p = rec.get("material_params", {}) or {}
-    mat = get_material(rec.get("material_model_name", "isihara"), dev_params=mat_p.get("dev_params"),
-                       vol_params=mat_p.get("vol_params")) if has_truth else None
+    # true material from the recipe (any family: dev/vol params, Ogden mu/alpha, ...)
+    from core.material_models import get_material_from_config
+    mat = get_material_from_config(dict(rec, material_model_name=rec.get("material_model_name", "isihara"))) if has_truth else None
     F_all = load_f3x3_from_dataset(prep, material_model=mat)                       # (n_steps, C, 3, 3) observed
     # incompressible plane stress (recipe or dataset): F33 = 1/det F_2D inside the model, no volumetric part
     ps_mode = str(rec.get("plane_stress_mode", prep.get("plane_stress_mode", "")) or "")

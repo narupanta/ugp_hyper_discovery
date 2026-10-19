@@ -505,21 +505,26 @@ class Ogden(BaseMaterialModel):
 
     @staticmethod
     def _as_3d(F: jnp.ndarray) -> jnp.ndarray:
+        """(..., 2, 2) plane strain -> (..., 3, 3) with F33 = 1; (..., 3, 3) unchanged."""
         if F.shape[-2:] == (2, 2):
-            return jnp.array([[F[..., 0, 0], F[..., 0, 1], 0.0],
-                              [F[..., 1, 0], F[..., 1, 1], 0.0],
-                              [0.0,           0.0,           1.0]])
+            return jnp.zeros(F.shape[:-2] + (3, 3), dtype=F.dtype).at[..., :2, :2].set(F).at[..., 2, 2].set(1.0)
         return F
 
     def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
         # From the principal stretches through a form that stays smooth where stretches coincide (F = I, uniform
-        # stretch), so the FEM tangent is finite there (core/ogden.py). F is (2, 2) (plane strain) or block-diagonal (3, 3).
+        # stretch), so the FEM tangent is finite there (core/ogden.py). F is (..., 2, 2) (plane strain) or
+        # block-diagonal (..., 3, 3); leading batch dimensions are mapped over.
         from core.ogden import ogden_dev_energy_jax
-        return ogden_dev_energy_jax(self._as_3d(F), jnp.asarray(self.mu_params, dtype=jnp.float64),
-                                    jnp.asarray(self.alpha_params, dtype=jnp.float64))
+        F3 = self._as_3d(jnp.asarray(F))
+        mus = jnp.asarray(self.mu_params, dtype=jnp.float64)
+        alphas = jnp.asarray(self.alpha_params, dtype=jnp.float64)
+        single = lambda f: ogden_dev_energy_jax(f, mus, alphas)
+        if F3.ndim == 2:
+            return single(F3)
+        return jax.vmap(single)(F3.reshape(-1, 3, 3)).reshape(F3.shape[:-2])
 
     def psi_vol(self, F: jnp.ndarray) -> jnp.ndarray:
-        J_minus_1 = jnp.sqrt(jnp.clip(I3_func(C_func(self._as_3d(F))), 1.0e-8, 1.0e8)) - 1.0
+        J_minus_1 = jnp.sqrt(jnp.clip(I3_func(C_func(self._as_3d(jnp.asarray(F)))), 1.0e-8, 1.0e8)) - 1.0
         return (
             self.vol_params[0] * J_minus_1**2 +
             (self.vol_params[1] * J_minus_1**4 if len(self.vol_params) > 1 else 0.0) +
