@@ -1,0 +1,57 @@
+# ==============================================================================
+# Recipe v2 (HSGP extraction): 2nd-order Ogden (mu1 = 1.0, alpha1 = 2.3, mu2 = 0.5, alpha2 = 1.4), plane strain, displacement control
+# distillation library: 3 Ogden terms (mu_k, alpha_k) + D1..D3; Ogden psi = sum_k mu_k/alpha_k (sum_i lam_bar_i^alpha_k - 3) + D1 (J-1)^2
+# Run: sbatch scripts/run_hsgp_slurm.sh configs/recipes_v2/ogden2_hsgp_t0.5.yaml
+# ==============================================================================
+material_model_name: ogden
+material_params:
+  mu_params: [1.0, 0.5]
+  alpha_params: [2.3, 1.4]
+  vol_params: [1.5, 0.0, 0.0]
+disp_noise: 0.0005
+load_noise: 0.05
+target_load_true_top: 0.5
+asym_factor: 0.5
+n_loadsteps: 20
+geometry_train: block
+geometry_val: holes
+target_load_holes: 1.0
+mesh_size: 0.08
+control_mode: displacement
+stress_mode: plane_strain
+train_load_steps_indices: [1, 3, 5, 7, 9, 11, 13, 15, 17, 19]
+val_load_steps_indices: [2, 4, 6, 8, 10, 12, 14, 16, 18]
+dev_vol_distillation_n_iterations: 10000
+distill_target: sef_split
+distillation_n_iterations: 10000
+distilled_material_model: ogden
+do_sensitivity: 1
+hsgp_adaptive: 1
+hsgp_amplitude_prior_scale: 1.0
+hsgp_box_factor: 8.0
+hsgp_cap_accept_tol: 1e-4
+hsgp_continuation: 1
+hsgp_eiv_damping: 0.0
+hsgp_envelope: 0
+hsgp_hyper_delay: 2
+hsgp_hyper_restarts: 1
+hsgp_lengthscale_prior_scale: 1.0
+hsgp_likelihood: eiv
+hsgp_ls_floor_fraction: 0.0
+hsgp_max_outer: 60
+hsgp_num_basis_dev: 24
+hsgp_num_basis_vol: 32
+hsgp_prior_mean: none
+hsgp_sigma_cap: 10.0
+hsgp_stability_search: 1
+hsgp_warp: 0
+max_gamma: 1.0
+num_func_samples: 512
+num_points: 512
+run_validation: 1
+sample_mode: dataset_f
+seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+sobol_samples_factor: 4096
+sobol_threshold: 0.0001
+val_number_samples: 1024
+val_workers: 4
