@@ -20,15 +20,25 @@ from core.utils import infer_material_model_name, deformation_gradient_element
 from core.dataset_store import dataset_exists, load_dataset
 
 def find_dataset_path(saved_model_dir, true_model_name):
-    meta_path = os.path.join(saved_model_dir, "metadata.json")
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r") as mf:
-                mdata = json.load(mf)
-                if "dataset_path" in mdata and dataset_exists(mdata["dataset_path"]):
-                    return mdata["dataset_path"]
-        except Exception:
-            pass
+    # the extraction's own record of its dataset (metadata.json: SVGP, config.json: HSGP), then the seed's spec file
+    for fname in ("metadata.json", "config.json"):
+        meta_path = os.path.join(saved_model_dir, fname)
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r") as mf:
+                    mdata = json.load(mf)
+                    if "dataset_path" in mdata and dataset_exists(mdata["dataset_path"]):
+                        return mdata["dataset_path"]
+            except Exception:
+                pass
+    spec_file = os.path.join(os.path.dirname(os.path.abspath(saved_model_dir)), "dataset_train.spec")
+    if os.path.exists(spec_file):
+        with open(spec_file) as sf:
+            spec = sf.read().strip()
+        if dataset_exists(spec):
+            return spec
+        raise FileNotFoundError(f"Dataset of this extraction not found: {spec}")
+    print("Warning: dataset of the extraction unknown; guessing from the folder name (may be a different dataset)")
 
     saved_dir_abs = os.path.abspath(saved_model_dir)
     all_parts = saved_dir_abs.split(os.sep)
@@ -58,6 +68,15 @@ def find_dataset_path(saved_model_dir, true_model_name):
     return None
 
 def parse_train_load_steps(saved_model_dir):
+    cfg_file = os.path.join(saved_model_dir, "config.json")   # HSGP: the load steps the posterior is conditioned on
+    if os.path.exists(cfg_file):
+        try:
+            with open(cfg_file) as cf:
+                steps = json.load(cf).get("train_load_steps_indices")
+            if steps:
+                return [int(s) for s in steps]
+        except Exception:
+            pass
     log_file = os.path.join(saved_model_dir, "optimization_log.txt")
     if os.path.exists(log_file):
         try:
@@ -81,6 +100,8 @@ def main():
     parser.add_argument("--material_model", type=str, default="gmr", choices=["ogden", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
     parser.add_argument("--distill_target", type=str, default="sef_split", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
     parser.add_argument("--val_load_steps", type=int, nargs="+", default=None, help="Validation load steps (e.g. 7 8 9)")
+    parser.add_argument("--use_fem_bundle", action="store_true",
+                        help="Take the training kinematics from <seed>/fem_validation/block/fem_distilled_samples.npz")
     parser.add_argument("--num_samples", type=int, default=100, help="Number of posterior parameter samples to use")
     args = parser.parse_args()
 
@@ -122,12 +143,17 @@ def main():
         print(f"Skipping plot_distilled_r2_energy: No analytical ground truth model found (experimental mode).")
         return
 
-    # 1. Load Dataset F field
-    dataset_path = find_dataset_path(saved_model_dir, true_model_name)
-    if dataset_path is None or not dataset_exists(dataset_path):
-        raise FileNotFoundError(f"Could not locate dataset .npz file for {true_model_name} from {saved_model_dir}")
-
-    prep_data = load_dataset(dataset_path)
+    # 1. Load Dataset F field (or the exact training kinematics stored in the block FEM bundle)
+    bundle = os.path.join(os.path.dirname(os.path.abspath(saved_model_dir)), "fem_validation", "block", "fem_distilled_samples.npz")
+    if args.use_fem_bundle and os.path.exists(bundle):
+        from core.dataset_store import dataset_from_fem_bundle
+        dataset_path = bundle
+        prep_data = dataset_from_fem_bundle(bundle)
+    else:
+        dataset_path = find_dataset_path(saved_model_dir, true_model_name)
+        if dataset_path is None or not dataset_exists(dataset_path):
+            raise FileNotFoundError(f"Could not locate dataset .npz file for {true_model_name} from {saved_model_dir}")
+        prep_data = load_dataset(dataset_path)
     F_all_steps_2x2 = prep_data["F"]  # [num_steps, num_elements, 2, 2]
     total_steps = F_all_steps_2x2.shape[0]
 
@@ -181,6 +207,7 @@ def main():
     learned_gp = load_hsgp_teacher(saved_model_dir)   # HSGP extraction or None (SVGP: rebuilt below)
     if learned_gp is not None:
         I_z = None
+        feature_extractor = learned_gp.feature_extractor
         dev_z, vol_z, aniso_z = learned_gp.dev_z, learned_gp.vol_z, None
         min_dev, max_dev = dev_z.min(0), dev_z.max(0)
         min_vol, max_vol = vol_z.min(0), vol_z.max(0)
@@ -812,6 +839,22 @@ def main():
     with open(val_json_path, "w") as f:
         json.dump(val_summary, f, indent=4)
     print(f"Saved validation metrics JSON to: {val_json_path}", flush=True)
+
+    # keep the "sef" section of existing validation_metrics.json files (read by the summary table) in step
+    sef = {"gp": {}, "dist": {}}
+    for comp, m in val_summary.items():
+        sef["dist"][comp] = {"rmse": m["rmse_dist"], "r2": m["r2_dist"], "coverage": m["coverage_dist"]}
+        sef["gp"][comp] = {"rmse": m["rmse_gp"], "r2": m["r2_gp"], "coverage": m["coverage_gp"]}
+    seed_dir = os.path.dirname(os.path.abspath(distilled_dir))
+    for p in (os.path.join(distilled_dir, "validation_metrics.json"),
+              os.path.join(seed_dir, "fem_validation", "validation_metrics.json"),
+              os.path.join(seed_dir, "validation_metrics.json")):
+        if os.path.exists(p):
+            with open(p) as f:
+                vm = json.load(f)
+            vm["sef"] = sef
+            with open(p, "w") as f:
+                json.dump(vm, f, indent=1)
 
 if __name__ == "__main__":
     main()

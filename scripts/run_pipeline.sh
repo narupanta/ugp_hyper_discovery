@@ -661,6 +661,11 @@ for SEED in $SEEDS_LIST; do
             --dataset_path "$TRAIN_DATASET_PATH" \
             --save_path "$DISTILL_DIR/block_validation" || true
 
+        # free-node counterpart of the reaction check: force residual and EIV correction K^-1 f vs. inferred noise
+        if [ -f "$EXTRACT_DIR/hsgp_posterior.npz" ]; then
+            python3 plots/plot_free_node_residual_eiv.py --seed_dir "$SEED_DIR" || true
+        fi
+
         echo "✅ Step 3 (Distillation for Seed $SEED) completed."
     else
         echo "⏭️ Skipping Step 3 (Distillation) for Seed $SEED."
@@ -814,41 +819,11 @@ for SEED in $SEEDS_LIST; do
                     --n_sample "$VAL_SAMPLES" || true
             fi
 
-            if [ -d "$VAL_DIR/block" ] && [ -f "$VAL_DIR/block/fem_distilled_samples.npz" ]; then
-                echo "Generating UQ displacement verification plots for Block (evaluating steps: $FEM_VAL_STEPS)..."
-                python3 plots/uq_verification_disp.py \
-                    --model_path "$VAL_DIR/block" \
-                    --validation_load_step_indices $FEM_VAL_STEPS \
-                    --n_sample "$VAL_SAMPLES" || true
-            else
-                echo "⚠️ Notice: $VAL_DIR/block/fem_distilled_samples.npz not found; skipping Block UQ verification plots."
-            fi
-
-            if [ -d "$VAL_DIR/holes" ] && [ -f "$VAL_DIR/holes/fem_distilled_samples.npz" ]; then
-                echo "Generating UQ displacement verification plots for Holes (evaluating steps: $FEM_VAL_STEPS)..."
-                python3 plots/uq_verification_disp.py \
-                    --model_path "$VAL_DIR/holes" \
-                    --validation_load_step_indices $FEM_VAL_STEPS \
-                    --n_sample "$VAL_SAMPLES" || true
-            else
-                echo "⚠️ Notice: $VAL_DIR/holes/fem_distilled_samples.npz not found; skipping Holes UQ verification plots."
-            fi
-
+            # Block/holes displacement and reaction plots: one 2x2 figure per geometry (plots/plot_fem_validation_2x2.py,
+            # run after the validation metrics below so its coverages are added to validation_metrics.json).
             if [ -d "$VAL_DIR" ]; then
-                echo "Generating Reaction Force verification plots for Seed $SEED..."
-                python3 plots/plot_reaction_force_distilled.py --model_path "$VAL_DIR" || true
                 python3 plots/plot_fem_sampled_parameters.py --model_path "$VAL_DIR" || true
                 python3 plots/plot_failed_fem_samples.py --folder "$VAL_DIR" || true
-
-                echo "Generating merged 2x2 displacement & reaction force validation plots..."
-                python3 plots/merge_displacement_and_force_2x2.py \
-                    --exp_dir "$EXPERIMENT_DIR" \
-                    --seed "$SEED" \
-                    --out_dir "$VAL_DIR" || true
-                python3 plots/merge_displacement_and_force_2x2.py \
-                    --exp_dir "$EXPERIMENT_DIR" \
-                    --seed "$SEED" \
-                    --out_dir "$EXPERIMENT_DIR/plots" || true
             fi
 
             # Re-run distilled energy R2 plot and split summary if distilled outputs exist
@@ -879,6 +854,17 @@ for SEED in $SEEDS_LIST; do
                 cp "$DISTILL_DIR/validation_metrics.json" "$VAL_DIR/validation_metrics.json" 2>/dev/null || true
                 cp "$DISTILL_DIR/validation_metrics.json" "$SEED_DIR/validation_metrics.json" 2>/dev/null || true
             fi
+
+            echo "Generating 2x2 FEM validation figures (displacement + reaction forces) for Seed $SEED..."
+            python3 plots/plot_fem_validation_2x2.py --seed_dir "$SEED_DIR" || true
+            # emulated-experiment version (observed data only) for the training geometry
+            python3 plots/plot_fem_validation_2x2.py --seed_dir "$SEED_DIR" --geometries "$GEOMETRY_TRAIN" --experimental || true
+            mkdir -p "$EXPERIMENT_DIR/plots"
+            for G in block holes block_exp; do
+                if [ -f "$VAL_DIR/${G%_exp}/fem_validation_2x2_$G.pdf" ]; then
+                    cp "$VAL_DIR/${G%_exp}/fem_validation_2x2_$G.pdf" "$EXPERIMENT_DIR/plots/fem_validation_2x2_${G}_seed${SEED}.pdf"
+                fi
+            done
 
             echo "✅ Step 5 (Validation Metrics & Plots for Seed $SEED) completed."
         fi

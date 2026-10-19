@@ -36,6 +36,58 @@ def to_latex(name):
         return r"$E$"
     return rf"${clean}$"
 
+LINESTYLES = ["-", (0, (5, 1.5)), (0, (1.2, 1.2)), (0, (5, 1.5, 1.2, 1.5)), (0, (8, 2)), (0, (3, 1, 1, 1, 1, 1))]
+
+
+def plot_sensitivity_curves(ax, x, df, params, label_fn, fontsize=7.0, n_bins=30, scatter_size=4):
+    """
+    Sobol total index of each parameter against one invariant: faint raw points, a binned-median curve with a
+    per-parameter line style, and the parameter name at the right end of its curve (labels are pushed apart
+    vertically so they never overlap; a thin leader joins a moved label to its curve end). Identity therefore never
+    relies on color alone, and the scheme scales to any number of parameters.
+    """
+    x = np.asarray(x, float)
+    edges = np.linspace(x.min(), x.max(), n_bins + 1)              # equal width: the curve follows the data into the tail
+    ends = []
+    for k, p in enumerate(params):
+        y = np.asarray(df[p].values, float)
+        col = get_comp_color(p)
+        ax.scatter(x, y, color=col, alpha=0.18, s=scatter_size, edgecolors="none", zorder=1)
+        idx = np.clip(np.digitize(x, edges[1:-1]), 0, len(edges) - 2)
+        xc, yc = [], []
+        for b in range(len(edges) - 1):
+            m = idx == b
+            if m.sum() >= 3:
+                xc.append(np.median(x[m])); yc.append(np.median(y[m]))
+        if not xc:
+            continue
+        ax.plot(xc, yc, color=col, lw=1.6, ls=LINESTYLES[k % len(LINESTYLES)], zorder=3,
+                solid_capstyle="round", dash_capstyle="round")
+        ends.append([yc[-1], xc[-1], yc[-1], p, col])               # [label y, curve-end x, curve-end y, name, color]
+
+    # push labels apart (minimum gap in data units of the 0..1 index axis)
+    gap = 0.17
+    ends.sort(key=lambda e: e[0])
+    for i in range(1, len(ends)):
+        ends[i][0] = max(ends[i][0], ends[i - 1][0] + gap)
+    overshoot = ends[-1][0] - 1.0 if ends else 0.0
+    if overshoot > 0:
+        for e in ends:
+            e[0] -= overshoot
+        for i in range(len(ends) - 2, -1, -1):
+            ends[i][0] = min(ends[i][0], ends[i + 1][0] - gap)
+
+    x0, x1 = x.min(), x.max()
+    x_lab = x1 + 0.06 * (x1 - x0)
+    for y_lab, xe, ye, p, col in ends:
+        if abs(y_lab - ye) > 0.02:
+            ax.plot([xe, x_lab - 0.01 * (x1 - x0)], [ye, y_lab], color=col, lw=0.6, alpha=0.8, zorder=2)
+        ax.text(x_lab, y_lab, label_fn(p), color="#222222", fontsize=fontsize, va="center", ha="left",
+                bbox=dict(boxstyle="round,pad=0.12", fc="white", ec=col, lw=0.8), zorder=5)
+    ax.set_xlim(x0 - 0.03 * (x1 - x0), x1 + 0.30 * (x1 - x0))
+    ax.spines["right"].set_visible(False); ax.spines["top"].set_visible(False)
+
+
 def get_comp_color(name):
     clean = name.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
     dev_palette = {
@@ -153,8 +205,11 @@ def main():
     
     from core.teacher import load_hsgp_teacher
     learned_gp = load_hsgp_teacher(saved_model_dir)   # HSGP extraction or None (SVGP: rebuilt below)
-    if learned_gp is not None:
+    is_hsgp = learned_gp is not None
+    if is_hsgp:
         I_z = None
+        feature_extractor = learned_gp.feature_extractor
+        cov_mode, constraint_lengthscale = "diag", 1
         dev_z, vol_z, aniso_z = learned_gp.dev_z, learned_gp.vol_z, None
         min_dev, max_dev = dev_z.min(0), dev_z.max(0)
         min_vol, max_vol = vol_z.min(0), vol_z.max(0)
@@ -218,49 +273,52 @@ def main():
                 a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
                 feature_extractor = AnisotropicFeatureExtractor(a0)
     
-        obs_path = os.path.join(saved_model_dir, "I_obs_all.npy")
-        if os.path.exists(obs_path):
-            I_obs_all = jnp.load(obs_path)
-            I_obs_all = I_obs_all.reshape(-1, I_obs_all.shape[-1])
-            dev_obs = I_obs_all[:, :2]
-            vol_obs = I_obs_all[:, 2:3]
-        else:
-            dev_obs = dev_z
-            vol_obs = vol_z
-            I_obs_all = I_z
-        
-        limit_min_vol, limit_max_vol = jnp.min(vol_obs, axis=0), jnp.max(vol_obs, axis=0)
-        dev_hull = ConvexHull(np.array(dev_obs))
-        hull_eqs = dev_hull.equations
-        dev_tol = 0.001
-        vol_tol = 0.001
 
-        import json
-        metadata_path = os.path.join(saved_model_dir, "metadata.json")
-        cov_mode = "diag"
-        constraint_lengthscale = 1
-        stress_mode = args.stress_mode
+    # shared by both teachers: observed-invariant hull and limits, stress mode
+    obs_path = os.path.join(saved_model_dir, "I_obs_all.npy")
+    if os.path.exists(obs_path):
+        I_obs_all = jnp.load(obs_path)
+        I_obs_all = I_obs_all.reshape(-1, I_obs_all.shape[-1])
+        dev_obs = I_obs_all[:, :2]
+        vol_obs = I_obs_all[:, 2:3]
+    else:
+        dev_obs = dev_z
+        vol_obs = vol_z
+        I_obs_all = I_z
+    
+    limit_min_vol, limit_max_vol = jnp.min(vol_obs, axis=0), jnp.max(vol_obs, axis=0)
+    dev_hull = ConvexHull(np.array(dev_obs))
+    hull_eqs = dev_hull.equations
+    dev_tol = 0.001
+    vol_tol = 0.001
 
-        if os.path.exists(metadata_path):
-            with open(metadata_path, "r") as f:
-                _meta = json.load(f)
-                cov_mode = _meta.get("covariance_mode", "diag")
-                constraint_lengthscale = _meta.get("constraint_lengthscale", 1)
-                if stress_mode is None:
-                    stress_mode = _meta.get("stress_mode", None)
+    import json
+    metadata_path = os.path.join(saved_model_dir, "metadata.json")
+    cov_mode = "diag"
+    constraint_lengthscale = 1
+    stress_mode = args.stress_mode
 
-        if stress_mode is None:
-            from core.utils import load_model_config
-            try:
-                cfg = load_model_config(saved_model_dir)
-                stress_mode = cfg.get("stress_mode", None)
-            except Exception:
-                pass
+    if os.path.exists(metadata_path):
+        with open(metadata_path, "r") as f:
+            _meta = json.load(f)
+            cov_mode = _meta.get("covariance_mode", "diag")
+            constraint_lengthscale = _meta.get("constraint_lengthscale", 1)
+            if stress_mode is None:
+                stress_mode = _meta.get("stress_mode", None)
 
-        if stress_mode is None:
-            stress_mode = "plane_strain"
-        print(f"[PLOT SUMMARY] Using stress_mode='{stress_mode}' for standard deformation mode generation.")
-            
+    if stress_mode is None:
+        from core.utils import load_model_config
+        try:
+            cfg = load_model_config(saved_model_dir)
+            stress_mode = cfg.get("stress_mode", None)
+        except Exception:
+            pass
+
+    if stress_mode is None:
+        stress_mode = "plane_strain"
+    print(f"[PLOT SUMMARY] Using stress_mode='{stress_mode}' for standard deformation mode generation.")
+
+    if not is_hsgp:            
         learned_gp = SparseHyperelasticityGP(
             gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
             beta=1.0, feature_extractor=feature_extractor,
@@ -751,12 +809,10 @@ def main():
     fig_sigma.savefig(os.path.join(distilled_dir, f"split_cauchy_stress_{true_model_name}.png"), dpi=300, bbox_inches='tight')
     plt.close(fig_sigma)
 
-    # 1c. Standalone First Piola-Kirchhoff Stress Plot (6 rows x 1 column, square subplots)
-    # Includes P11, P22, P12, and P21 components with uncertainty bands
-    fig_w_p = 2.0
-    fig_h_p = 10.5
-    fig_piola = plt.figure(figsize=(fig_w_p, fig_h_p))
-    gs_piola = fig_piola.add_gridspec(6, 1, hspace=0.35, top=0.98, bottom=0.04, left=0.18, right=0.96)
+    # 1c. Standalone First Piola-Kirchhoff Stress Plot (2 rows x 3 columns, square subplots, same layout as the
+    # energy plot). Includes P11, P22, P12, and P21 components with uncertainty bands
+    fig_piola = plt.figure(figsize=(fig_w_energy, fig_h_energy))
+    gs_piola = fig_piola.add_gridspec(2, 3, hspace=0.36, wspace=0.34, top=0.94, bottom=0.18, left=0.11, right=0.98)
 
     piola_comps = [
         ((0, 0), r"$P_{11}$", "#1f77b4"),   # Blue
@@ -766,7 +822,9 @@ def main():
     ]
 
     for i, name in enumerate(mode_names):
-        ax_p_stand = fig_piola.add_subplot(gs_piola[i, 0])
+        row, col = divmod(i, 3)
+        ax_p_stand = fig_piola.add_subplot(gs_piola[row, col])
+        ax_p_stand.set_box_aspect(1)  # Exact square subplot, as in the energy plot
 
         has_gt_p = P_true is not None and i < len(P_true) and P_true[i] is not None
         for (r_idx, c_idx), c_lbl, c_col in piola_comps:
@@ -790,15 +848,17 @@ def main():
                 p_gt = P_true[i][:, r_idx, c_idx]
                 ax_p_stand.plot(gamma, p_gt, color=c_col, linestyle='--', lw=1.2, dashes=(4, 2.5), zorder=5)
 
-        if i == 5:
-            ax_p_stand.set_xlabel(r"$\gamma$", fontsize=8.5, labelpad=2)
+        if col == 0:
+            ax_p_stand.set_ylabel(r"$P_{ij}$", fontsize=8.0, labelpad=2)
+        if row == 1:
+            ax_p_stand.set_xlabel(r"$\gamma$", fontsize=7.5, labelpad=2)
         else:
             ax_p_stand.tick_params(axis='x', which='both', labelbottom=False)
-            
+
         title_text = mode_full_names.get(name, name)
-        ax_p_stand.set_title(f"({i+1}) {title_text}", fontsize=8.0, pad=3, fontweight='bold')
+        ax_p_stand.set_title(f"({i+1}) {title_text}", fontsize=7.8, pad=2, fontweight='bold')
         ax_p_stand.grid(False)
-        ax_p_stand.tick_params(axis='both', which='major', labelsize=7.5, pad=1.5)
+        ax_p_stand.tick_params(axis='both', which='major', labelsize=6.8, pad=1.5)
 
         # Extrapolation shading
         feats_ext = jax.vmap(extractor.extract)(F_all[i])
@@ -836,8 +896,9 @@ def main():
         mlines.Line2D([], [], color='gray', linestyle='-', alpha=0.5, linewidth=1.0, label='Dist. Realiz. (64)'),
         mpatches.Patch(color='#E69F00', alpha=extrap_alpha, label='Extrapolation'),
     ]
-    leg_piola = fig_piola.legend(handles=piola_legend_handles, loc='lower center', ncol=3,
-                                  bbox_to_anchor=(0.5, -0.06), fontsize=6.3, frameon=False, handlelength=1.3, handletextpad=0.3, columnspacing=0.6)
+    leg_piola = fig_piola.legend(handles=piola_legend_handles, loc='lower center', ncol=5,
+                                  bbox_to_anchor=(0.54, -0.01), fontsize=6.0, frameon=False,
+                                  handlelength=1.1, handletextpad=0.22, columnspacing=0.55)
     fig_piola.savefig(os.path.join(distilled_dir, f"split_piola_stress_{true_model_name}_with_legend.pdf"), dpi=300, bbox_inches='tight')
     fig_piola.savefig(os.path.join(distilled_dir, f"split_piola_stress_{true_model_name}_with_legend.png"), dpi=300, bbox_inches='tight')
     plt.close(fig_piola)
@@ -1001,7 +1062,13 @@ def main():
 
         ax_s_viol.plot([0, xlim_upper], [y_i, y_i], color='#eeeeee', lw=0.5, zorder=1)
 
-        if is_active:
+        if is_active and ci_lower - 0.04 >= xlim_upper:
+            # posterior entirely beyond the axis: arrow at the right edge with the mean and 95% CI written out
+            ax_s_viol.annotate("", xy=(xlim_upper - 0.01, y_i + 0.2), xytext=(xlim_upper - 0.16, y_i + 0.2),
+                               arrowprops=dict(arrowstyle="-|>", color=bar_color if val > 0.05 else "#666666", lw=1.2), zorder=5)
+            ax_s_viol.text(xlim_upper - 0.18, y_i + 0.2, f"{mean_val:.3g} [{ci_lower:.3g}, {ci_upper:.3g}]",
+                           ha="right", va="center", fontsize=5.6, color="#333333", zorder=5)
+        elif is_active:
             counts, bin_edges = np.histogram(data, bins=25, range=(max(0, ci_lower - 0.04), min(xlim_upper, ci_upper + 0.04)))
             if np.max(counts) > 0:
                 counts = counts / np.max(counts) * 0.44
@@ -1090,9 +1157,7 @@ def main():
                 active_vol_inv = [vol_inv_cols[0]]
 
             # Panel 1: ST,d vs I1_bar
-            for p in active_dev_inv:
-                col = get_comp_color(p)
-                ax_inv1.scatter(I1_bar, df_dev_inv[p].values, color=col, alpha=0.7, s=7, edgecolors='none')
+            plot_sensitivity_curves(ax_inv1, I1_bar, df_dev_inv, active_dev_inv, to_latex)
             ax_inv1.set_xlabel(r"$\bar{I}_1$", fontsize=8.0, labelpad=1.0)
             ax_inv1.set_ylabel(r"$S_{\mathrm{T,d}}$", fontsize=8.0, labelpad=1.0)
             ax_inv1.set_ylim(-0.06, 1.06)
@@ -1101,9 +1166,7 @@ def main():
             ax_inv1.grid(False)
 
             # Panel 2: ST,d vs I2_bar
-            for p in active_dev_inv:
-                col = get_comp_color(p)
-                ax_inv2.scatter(I2_bar, df_dev_inv[p].values, color=col, alpha=0.7, s=7, edgecolors='none')
+            plot_sensitivity_curves(ax_inv2, I2_bar, df_dev_inv, active_dev_inv, to_latex)
             ax_inv2.set_xlabel(r"$\bar{I}_2$", fontsize=8.0, labelpad=1.0)
             ax_inv2.set_ylabel(r"$S_{\mathrm{T,d}}$", fontsize=8.0, labelpad=1.0)
             ax_inv2.set_ylim(-0.06, 1.06)
@@ -1112,9 +1175,7 @@ def main():
             ax_inv2.grid(False)
 
             # Panel 3: ST,v vs J
-            for p in active_vol_inv:
-                col = get_comp_color(p)
-                ax_inv3.scatter(J, df_vol_inv[p].values, color=col, alpha=0.7, s=7, edgecolors='none')
+            plot_sensitivity_curves(ax_inv3, J, df_vol_inv, active_vol_inv, to_latex)
             ax_inv3.set_xlabel(r"$J$", fontsize=8.0, labelpad=1.0)
             ax_inv3.set_ylabel(r"$S_{\mathrm{T,v}}$", fontsize=8.0, labelpad=1.0)
             ax_inv3.set_ylim(-0.06, 1.06)
@@ -1128,7 +1189,8 @@ def main():
             inv_labels = []
             for p in all_inv_active:
                 col = get_comp_color(p)
-                inv_handles.append(mlines.Line2D([], [], color=col, marker='o', linestyle='none', markersize=4))
+                grp = active_dev_inv if p in active_dev_inv else active_vol_inv
+                inv_handles.append(mlines.Line2D([], [], color=col, lw=1.6, ls=LINESTYLES[grp.index(p) % len(LINESTYLES)]))
                 inv_labels.append(to_latex(p))
 
             ax_inv_leg.legend(handles=inv_handles, labels=inv_labels, loc='center left',
@@ -1143,13 +1205,9 @@ def main():
                 ax_h.set_yticks([0.0, 0.5, 1.0])
                 ax_h.tick_params(axis='both', which='major', labelsize=7.0, pad=1)
 
-            for p in active_dev_inv:
-                col = get_comp_color(p)
-                axes_inv_h[0].scatter(I1_bar, df_dev_inv[p].values, color=col, alpha=0.65, s=10, edgecolors='none')
-                axes_inv_h[1].scatter(I2_bar, df_dev_inv[p].values, color=col, alpha=0.65, s=10, edgecolors='none')
-            for p in active_vol_inv:
-                col = get_comp_color(p)
-                axes_inv_h[2].scatter(J, df_vol_inv[p].values, color=col, alpha=0.65, s=10, edgecolors='none')
+            plot_sensitivity_curves(axes_inv_h[0], I1_bar, df_dev_inv, active_dev_inv, to_latex, fontsize=7.5)
+            plot_sensitivity_curves(axes_inv_h[1], I2_bar, df_dev_inv, active_dev_inv, to_latex, fontsize=7.5)
+            plot_sensitivity_curves(axes_inv_h[2], J, df_vol_inv, active_vol_inv, to_latex, fontsize=7.5)
 
             axes_inv_h[0].set_xlabel(r"$\bar{I}_1$", fontsize=8.5, labelpad=2)
             axes_inv_h[0].set_ylabel(r"$S_{\mathrm{T,d}}$", fontsize=8.5, labelpad=2)
@@ -1162,7 +1220,8 @@ def main():
             inv_h_labels = []
             for p in all_inv_active:
                 col = get_comp_color(p)
-                inv_h_handles.append(mlines.Line2D([], [], color=col, marker='o', linestyle='none', markersize=5))
+                grp = active_dev_inv if p in active_dev_inv else active_vol_inv
+                inv_h_handles.append(mlines.Line2D([], [], color=col, lw=1.6, ls=LINESTYLES[grp.index(p) % len(LINESTYLES)]))
                 inv_h_labels.append(to_latex(p))
 
             fig_inv_horiz.legend(handles=inv_h_handles, labels=inv_h_labels, loc='lower center',
@@ -1230,7 +1289,13 @@ def main():
         # Baseline horizontal line for parameter row
         ax_s_viol.plot([0, xlim_upper], [y_i, y_i], color='#eeeeee', lw=0.5, zorder=1)
 
-        if is_active:
+        if is_active and ci_lower - 0.04 >= xlim_upper:
+            # posterior entirely beyond the axis: arrow at the right edge with the mean and 95% CI written out
+            ax_s_viol.annotate("", xy=(xlim_upper - 0.01, y_i + 0.2), xytext=(xlim_upper - 0.16, y_i + 0.2),
+                               arrowprops=dict(arrowstyle="-|>", color=bar_color if val > 0.05 else "#666666", lw=1.2), zorder=5)
+            ax_s_viol.text(xlim_upper - 0.18, y_i + 0.2, f"{mean_val:.3g} [{ci_lower:.3g}, {ci_upper:.3g}]",
+                           ha="right", va="center", fontsize=5.6, color="#333333", zorder=5)
+        elif is_active:
             # Histogram bars (stepped upper half)
             counts, bin_edges = np.histogram(data, bins=25, range=(max(0, ci_lower - 0.04), min(xlim_upper, ci_upper + 0.04)))
             if np.max(counts) > 0:

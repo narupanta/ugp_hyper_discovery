@@ -22,6 +22,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Generate cross-seed summary tables and plots for an experiment.")
     parser.add_argument("--experiment_dir", type=str, required=True, help="Path to the experiment folder under results/")
     parser.add_argument("--true_model", type=str, default=None, help="Ground truth material model name (e.g. nh2, isihara)")
+    parser.add_argument("--conformal", action="store_true",
+                        help="Also report the conformal calibration & variance budget section (omitted by default)")
     return parser.parse_args()
 
 
@@ -83,6 +85,25 @@ def load_seed_metrics(seed_path):
                     pass
 
     if data is not None:
+        # Extraction: load steps the posterior is conditioned on, inferred kinematic noise (HSGP)
+        ext = {}
+        try:
+            with open(os.path.join(seed_path, "extracted", "config.json")) as f:
+                steps = json.load(f).get("train_load_steps_indices")
+            if steps:
+                ext["max_step"], ext["n_steps"] = max(steps), len(steps)
+        except Exception:
+            pass
+        try:
+            with open(os.path.join(seed_path, "extracted", "extraction_metrics.json")) as f:
+                em = json.load(f)
+            for k in ("sigma_u_x", "sigma_u_y"):
+                if k in em:
+                    ext[k] = em[k]
+        except Exception:
+            pass
+        if ext:
+            data["extraction"] = ext
         # Load reaction force metrics if available
         for geom in ["block", "holes", "ttc"]:
             for cand_rf in [
@@ -124,6 +145,13 @@ def rank_seeds(seed_data_list):
         cov_dist = abs(cov - 95.0)
         return (r2, -rmse, -cov_dist)
 
+    if any(_metric(s, ("fem_2x2", "block", "posterior_clean", "ec_u")) is not None for s in seed_data_list):
+        # overall rank over the energy, displacement and reaction metrics of the per-seed table
+        ranks = overall_rank(seed_data_list)
+        sorted_list = sorted(seed_data_list, key=lambda s: ranks[s["seed"]][1])
+        for rank, item in enumerate(sorted_list, start=1):
+            item["rank"] = rank
+        return sorted_list
     sorted_list = sorted(seed_data_list, key=score_seed, reverse=True)
     for rank, item in enumerate(sorted_list, start=1):
         item["rank"] = rank
@@ -150,6 +178,10 @@ def copy_seed_plots(seed_item, target_dir, mat_model):
     seed_p = seed_item["path"]
     distilled_p = os.path.join(seed_p, "distilled")
     fem_p = os.path.join(seed_p, "fem_validation")
+
+    # 2x2 FEM validation figures (plots/plot_fem_validation_2x2.py)
+    for cand in glob.glob(os.path.join(fem_p, "*", "fem_validation_2x2_*.pdf")):
+        shutil.copyfile(cand, os.path.join(target_dir, os.path.basename(cand)))
 
     # 1. Distillation plots
     for ext in ["pdf", "png"]:
@@ -692,7 +724,126 @@ def format_param_md(p_dict):
     return f"{m:.4f}<br>({l:.4f}, {u:.4f})"
 
 
-def format_summary_markdown(ranked_seeds, exp_dir, config):
+# Validation metrics of the per-seed table: (group, metric, keys into validation_metrics.json, kind)
+# kind: rmse (lower is better), r2 (higher is better), ec (closest to the nominal 95% is better)
+PER_SEED_METRICS = [
+    ("Energy Ψ", "RMSE", ("sef", "dist", "total", "rmse"), "rmse"),
+    ("Energy Ψ", "R²", ("sef", "dist", "total", "r2"), "r2"),
+    ("Energy Ψ", "EC (%)", ("sef", "dist", "total", "coverage"), "ec"),
+    ("Displacement (block)", "RMSE", ("fem_2x2", "block", "posterior_clean", "rmse_u"), "rmse"),
+    ("Displacement (block)", "R²", ("fem_2x2", "block", "posterior_clean", "r2_u"), "r2"),
+    ("Displacement (block)", "EC (%)", ("fem_2x2", "block", "posterior_clean", "ec_u"), "ec"),
+    ("Reaction force (block)", "RMSE", ("fem_2x2", "block", "posterior_clean", "rmse_R"), "rmse"),
+    ("Reaction force (block)", "R²", ("fem_2x2", "block", "posterior_clean", "r2_R"), "r2"),
+    ("Reaction force (block)", "EC (%)", ("fem_2x2", "block", "posterior_clean", "ec_R"), "ec"),
+]
+
+
+def _metric(s, keys):
+    cur = s["metrics"]
+    for k in keys:
+        if not isinstance(cur, dict) or cur.get(k) is None:
+            return None
+        cur = cur[k]
+    try:
+        v = float(cur)
+        return None if not np.isfinite(v) else v
+    except (TypeError, ValueError):
+        return None
+
+
+def overall_rank(seeds):
+    """
+    Rank of each seed on every validation metric (RMSE: lower, R²: higher, EC: closer to 95%), averaged over the
+    metrics; the overall rank orders the seeds by this mean rank. A missing metric counts as the worst rank.
+    Returns {seed: (mean rank, overall rank)}.
+    """
+    n = len(seeds)
+    per_seed = {s["seed"]: [] for s in seeds}
+    for _, _, keys, kind in PER_SEED_METRICS:
+        vals = [_metric(s, keys) for s in seeds]
+        if all(v is None for v in vals):
+            continue
+        score = []
+        for v in vals:
+            if v is None:
+                score.append(np.inf)
+            elif kind == "rmse":
+                score.append(v)
+            elif kind == "r2":
+                score.append(-v)
+            else:
+                score.append(abs(v - 95.0))
+        order = np.argsort(np.argsort(score, kind="stable"), kind="stable") + 1    # 1 = best
+        for s, r in zip(seeds, order):
+            per_seed[s["seed"]].append(int(r))
+    mean_rank = {k: (float(np.mean(v)) if v else float(n)) for k, v in per_seed.items()}
+    ordered = sorted(mean_rank, key=lambda k: (mean_rank[k], k))
+    return {k: (mean_rank[k], ordered.index(k) + 1) for k in mean_rank}
+
+
+def format_per_seed_tables(seeds):
+    """One row per seed: RMSE, R² and EC of energy, block displacement and reaction force, and the overall rank;
+    then mean ± std and the best / median / worst seed. Markdown and LaTeX."""
+    def fmt(v, kind):
+        if v is None:
+            return "–"
+        if kind == "r2":
+            return f"{v:.4f}"
+        if kind == "ec":
+            return f"{v:.1f}"
+        return f"{v:.2e}" if abs(v) < 1e-2 else f"{v:.3f}"
+
+    def agg(keys, kind, pm):
+        vs = [v for v in (_metric(s, keys) for s in seeds) if v is not None]
+        if not vs:
+            return "–"
+        return f"{fmt(float(np.mean(vs)), kind)} {pm} {fmt(float(np.std(vs)), kind)}"
+
+    seeds = sorted(seeds, key=lambda s: s["seed"])
+    ranks = overall_rank(seeds)
+    by_rank = sorted(seeds, key=lambda s: ranks[s["seed"]][1])
+    best, median, worst = by_rank[0]["seed"], by_rank[(len(by_rank) - 1) // 2]["seed"], by_rank[-1]["seed"]
+    groups = list(dict.fromkeys(m[0] for m in PER_SEED_METRICS))
+
+    md = ["## Per-Seed Comparison (validation load steps)\n",
+          "| Seed | " + " | ".join(f"{g}: {m}" for g, m, _, _ in PER_SEED_METRICS) + " | Mean rank | Rank |",
+          "| --- | " + " | ".join(":---:" for _ in PER_SEED_METRICS) + " | :---: | :---: |"]
+    for s in seeds:
+        mr, r = ranks[s["seed"]]
+        md.append(f"| {s['seed']} | " + " | ".join(fmt(_metric(s, k), kd) for _, _, k, kd in PER_SEED_METRICS)
+                  + f" | {mr:.1f} | {r} |")
+    md.append(f"| **Mean ± std (N={len(seeds)})** | " + " | ".join(agg(k, kd, "±") for _, _, k, kd in PER_SEED_METRICS) + " | | |")
+    md.append("")
+    md.append(f"**Best seed: {best}  ·  Median seed: {median}  ·  Worst seed: {worst}** (by overall rank)")
+    md.append("")
+    md.append("Energy: distilled Ψ vs. the true energy. Displacement: FEM posterior mean/95% band vs. the clean FEM solution "
+              "at the free nodes. Reaction force: FEM-predicted reactions vs. the clean reactions. EC: empirical coverage of "
+              "the 95% interval. Rank: each metric ranks the seeds (RMSE lower, R² higher, EC closer to 95% is better); the "
+              "ranks are averaged over the nine metrics.")
+
+    n_c = len(PER_SEED_METRICS)
+    tex = ["\n## LaTeX Table\n", "```latex", r"\begin{table}[htbp]", r"\centering", r"\resizebox{\textwidth}{!}{",
+           f"\\begin{{tabular}}{{l{'ccc' * len(groups)}cc}}", r"\toprule",
+           " & ".join([""] + [f"\\multicolumn{{3}}{{c}}{{\\textbf{{{g}}}}}" for g in groups] + ["", ""]) + r" \\",
+           " ".join(f"\\cmidrule(lr){{{2 + 3 * i}-{4 + 3 * i}}}" for i in range(len(groups))),
+           " & ".join([r"\textbf{Seed}"] + [m.replace("R²", "$R^2$").replace("%", r"\%") for _, m, _, _ in PER_SEED_METRICS]
+                      + [r"Mean rank", r"Rank"]) + r" \\", r"\midrule"]
+    for s in seeds:
+        mr, r = ranks[s["seed"]]
+        tex.append(" & ".join([str(s["seed"])] + [fmt(_metric(s, k), kd).replace("–", "--") for _, _, k, kd in PER_SEED_METRICS]
+                              + [f"{mr:.1f}", str(r)]) + r" \\")
+    tex.append(r"\midrule")
+    tex.append(" & ".join([f"Mean $\\pm$ std"] + [agg(k, kd, r"$\pm$").replace("–", "--") for _, _, k, kd in PER_SEED_METRICS]
+                          + ["", ""]) + r" \\")
+    tex += [r"\bottomrule", r"\end{tabular}", r"}",
+            f"\\caption{{Per-seed validation results ($N={len(seeds)}$). Best seed {best}, median seed {median}, worst seed {worst} "
+            r"by the mean rank over all nine metrics.}",
+            r"\label{tab:results_per_seed}", r"\end{table}", "```\n"]
+    return md, tex
+
+
+def format_summary_markdown(ranked_seeds, exp_dir, config, include_conformal=False):
     """Generates summary_across_seeds.md with Top 5 seeds and aggregate stats across all seeds."""
     out_md = os.path.join(exp_dir, "summary_across_seeds.md")
 
@@ -748,7 +899,15 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
     # (section_name, [ (row_label, tex_label, keys_tuple, decimals, is_pct) ])
     has_obs_disp = any(get_val(s, "disp_obs", "block", "norm", "rmse") is not None for s in ranked_seeds)
     disp_title = "Displacement Field Metrics (Clean FEM)" if has_obs_disp else "Displacement Field Metrics (FEM)"
-    sections = [
+    sections = []
+    if any(get_val(s, "extraction", "max_step") is not None for s in ranked_seeds):
+        sections.append(("Extraction (HSGP)", [
+            ("Last conditioned load step", "Last conditioned load step", ("extraction", "max_step"), 0, False),
+            ("Conditioned load steps", "Conditioned load steps", ("extraction", "n_steps"), 0, False),
+            ("Inferred $\\sigma_x$", r"Inferred $\sigma_x$", ("extraction", "sigma_u_x"), 4, False),
+            ("Inferred $\\sigma_y$", r"Inferred $\sigma_y$", ("extraction", "sigma_u_y"), 4, False),
+        ]))
+    sections += [
         ("GP Posterior Extraction (SEF)", [
             ("GP $\\Psi$ RMSE", r"GP $\Psi$ RMSE", ("sef", "gp", "total", "rmse"), 4, False),
             ("GP $\\Psi$ EC (%)", r"GP $\Psi$ EC (\%)", ("sef", "gp", "total", "coverage"), 2, True),
@@ -771,7 +930,53 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
             ("Disp $R^2$ (Block)", r"Disp $R^2$ (Block)", ("disp", "block", "norm", "r2"), 4, False),
         ]),
     ]
-    if has_obs_disp:
+    # Distilled parameters (posterior mean); true values in the labels
+    true_params, _ = get_true_model_info(config)
+    mp = config.get("material_params", {}) or {}
+    dev_true, vol_true = mp.get("dev_params"), mp.get("vol_params")
+    if dev_true is not None and vol_true is not None and len(dev_true) + len(vol_true) == len(ALL_CANDIDATE_PARAMS):
+        # full candidate vector in the config (C10..E, D1..D3): use it, zeros included
+        true_params = {p: f"{float(v):g}" for p, v in zip(ALL_CANDIDATE_PARAMS, list(dev_true) + list(vol_true))}
+    present = [p for p in ALL_CANDIDATE_PARAMS
+               if any(get_val(s, "model_structure", p, "mean") is not None for s in ranked_seeds)]
+    # parameters pruned by the sensitivity analysis are zero in the distilled model
+    for s in ranked_seeds:
+        ms = s["metrics"].get("model_structure") if isinstance(s["metrics"], dict) else None
+        if isinstance(ms, dict) and ms:
+            for p in present:
+                ms.setdefault(p, {"mean": 0.0})
+    if present:
+        sections.insert(len(sections) - 1, ("Distilled Parameters (posterior mean)", [
+            (f"{p} (true {true_params.get(p, '-')})", f"{p} (true {true_params.get(p, '-')})",
+             ("model_structure", p, "mean"), 3, False) for p in present]))
+
+    # FEM forward validation from the 2x2 figures: these replace the older displacement rows, whose coverage
+    # also counts the prescribed boundary nodes
+    has_2x2 = any(get_val(s, "fem_2x2", "block", "posterior_clean", "ec_u") is not None for s in ranked_seeds)
+    if has_2x2:
+        sections = [sec for sec in sections if not sec[0].startswith("Displacement Field Metrics")]
+        sections.append(("FEM Validation, Block (training geometry, val. steps)", [
+            ("Posterior EC$_u$ vs. clean (%)", r"Posterior EC$_u$ vs.\ clean (\%)", ("fem_2x2", "block", "posterior_clean", "ec_u"), 2, True),
+            ("Posterior EC$_R$ vs. clean (%)", r"Posterior EC$_R$ vs.\ clean (\%)", ("fem_2x2", "block", "posterior_clean", "ec_R"), 2, True),
+            ("Predictive EC$_u$ vs. observed (%)", r"Predictive EC$_u$ vs.\ observed (\%)", ("fem_2x2", "block", "predictive_obs", "ec_u"), 2, True),
+            ("Predictive EC$_R$ vs. observed (%)", r"Predictive EC$_R$ vs.\ observed (\%)", ("fem_2x2", "block", "predictive_obs", "ec_R"), 2, True),
+            ("$R^2_{u_x}$ / clean", r"$R^2_{u_x}$ / clean", ("fem_2x2", "block", "posterior_clean", "r2_ux"), 4, False),
+            ("$R^2_{u_y}$ / clean", r"$R^2_{u_y}$ / clean", ("fem_2x2", "block", "posterior_clean", "r2_uy"), 4, False),
+            ("RMSE$_{u_x}$ / clean", r"RMSE$_{u_x}$ / clean", ("fem_2x2", "block", "posterior_clean", "rmse_ux"), 4, False),
+            ("RMSE$_{u_y}$ / clean", r"RMSE$_{u_y}$ / clean", ("fem_2x2", "block", "posterior_clean", "rmse_uy"), 4, False),
+            ("$R^2_{R_x}$ / clean", r"$R^2_{R_x}$ / clean", ("fem_2x2", "block", "posterior_clean", "r2_Rx"), 4, False),
+            ("$R^2_{R_y}$ / clean", r"$R^2_{R_y}$ / clean", ("fem_2x2", "block", "posterior_clean", "r2_Ry"), 4, False),
+        ]))
+        sections.append(("FEM Validation, Holes (forward prediction, val. steps)", [
+            ("Posterior EC$_u$ vs. clean (%)", r"Posterior EC$_u$ vs.\ clean (\%)", ("fem_2x2", "holes", "posterior_clean", "ec_u"), 2, True),
+            ("Posterior EC$_R$ vs. clean (%)", r"Posterior EC$_R$ vs.\ clean (\%)", ("fem_2x2", "holes", "posterior_clean", "ec_R"), 2, True),
+            ("$R^2_{u_x}$ / clean", r"$R^2_{u_x}$ / clean", ("fem_2x2", "holes", "posterior_clean", "r2_ux"), 4, False),
+            ("$R^2_{u_y}$ / clean", r"$R^2_{u_y}$ / clean", ("fem_2x2", "holes", "posterior_clean", "r2_uy"), 4, False),
+            ("RMSE$_{u_x}$ / clean", r"RMSE$_{u_x}$ / clean", ("fem_2x2", "holes", "posterior_clean", "rmse_ux"), 4, False),
+            ("RMSE$_{u_y}$ / clean", r"RMSE$_{u_y}$ / clean", ("fem_2x2", "holes", "posterior_clean", "rmse_uy"), 4, False),
+            ("$R^2_{R_y}$ / clean", r"$R^2_{R_y}$ / clean", ("fem_2x2", "holes", "posterior_clean", "r2_Ry"), 4, False),
+        ]))
+    if has_obs_disp and not has_2x2:
         sections.append(
             ("Displacement Field Metrics (Observed DIC)", [
                 ("Disp RMSE (TTC)", "Disp RMSE (TTC)", ("disp_obs", "ttc", "norm", "rmse"), 4, False),
@@ -785,7 +990,8 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
                 ("Disp $R^2$ (Block)", r"Disp $R^2$ (Block)", ("disp_obs", "block", "norm", "r2"), 4, False),
             ])
         )
-    sections.append(
+    if include_conformal:
+      sections.append(
         ("Conformal Calibration & Variance Budget", [
             ("Disp $Q_{0.95}$ (Calibrated on TTC)", r"Disp $Q_{0.95}$ (TTC)", ("conformal", "ttc", "q_disp"), 3, False),
             ("Calibrated Disp EC (%) (TTC)", r"Calib Disp EC (\%) (TTC)", ("conformal", "ttc", "calibrated_coverage_xy"), 2, True),
@@ -872,23 +1078,29 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
     # ==============================================================================
     n_seeds = len(ranked_seeds)
     best_seed = ranked_seeds[0]
-    median_seed = ranked_seeds[n_seeds // 2]
+    median_seed = ranked_seeds[(n_seeds - 1) // 2]
     worst_seed = ranked_seeds[-1]
 
     vis_lines = []
     vis_lines.append(f"## Key Visualizations\n")
     vis_lines.append(f"Model visualizations are organized into dedicated subfolders based on cross-seed ranking:")
     vis_lines.append(f"- **Best Model (Rank 1, Seed {best_seed['seed']})**: `plots/best/`")
-    vis_lines.append(f"- **Median Model (Rank {n_seeds // 2 + 1}, Seed {median_seed['seed']})**: `plots/median/`")
+    vis_lines.append(f"- **Median Model (Rank {(n_seeds - 1) // 2 + 1}, Seed {median_seed['seed']})**: `plots/median/`")
     vis_lines.append(f"- **Worst Model (Rank {n_seeds}, Seed {worst_seed['seed']})**: `plots/worst/`\n")
     vis_lines.append(f"### Key Plots in Each Folder")
     vis_lines.append(f"- **Strain Energy Splitting**: `split_energy_{mat_model}.pdf` & `split_energy_{mat_model}_with_legend.pdf`")
     vis_lines.append(f"- **Candidate Parameters Posterior**: `split_params_{mat_model}.pdf` & `split_params_{mat_model}_with_legend.pdf`")
     vis_lines.append(f"- **Sobol Sensitivity Analysis**: `sobol_total_order_vs_invariants.pdf`")
-    vis_lines.append(f"- **Merged 2x2 Disp & Force (Block, Clean FEM)**: `merged_2x2_disp_force_raw_clean_block.pdf` & `merged_2x2_disp_force_conformal_clean_block.pdf`")
-    vis_lines.append(f"- **Merged 2x2 Disp & Force (Block, Observed)**: `merged_2x2_disp_force_raw_block.pdf` & `merged_2x2_disp_force_conformal_block.pdf`")
-    vis_lines.append(f"- **Merged 2x2 Disp & Force (Holes, Clean FEM)**: `merged_2x2_disp_force_raw_clean_holes.pdf` & `merged_2x2_disp_force_conformal_clean_holes.pdf`")
-    vis_lines.append(f"- **Merged 2x2 Disp & Force (Holes, Observed)**: `merged_2x2_disp_force_raw_holes.pdf` & `merged_2x2_disp_force_conformal_holes.pdf`")
+    vis_lines.append(f"- **FEM Validation 2x2**: `fem_validation_2x2_block.pdf` (clean + observed), "
+                     f"`fem_validation_2x2_block_exp.pdf` (emulated experiment), `fem_validation_2x2_holes.pdf` (forward prediction)")
+    if include_conformal:
+        vis_lines.append(f"- **Merged 2x2 Disp & Force (Block, Clean FEM)**: `merged_2x2_disp_force_raw_clean_block.pdf` & `merged_2x2_disp_force_conformal_clean_block.pdf`")
+    if include_conformal:
+        vis_lines.append(f"- **Merged 2x2 Disp & Force (Block, Observed)**: `merged_2x2_disp_force_raw_block.pdf` & `merged_2x2_disp_force_conformal_block.pdf`")
+    if include_conformal:
+        vis_lines.append(f"- **Merged 2x2 Disp & Force (Holes, Clean FEM)**: `merged_2x2_disp_force_raw_clean_holes.pdf` & `merged_2x2_disp_force_conformal_clean_holes.pdf`")
+    if include_conformal:
+        vis_lines.append(f"- **Merged 2x2 Disp & Force (Holes, Observed)**: `merged_2x2_disp_force_raw_holes.pdf` & `merged_2x2_disp_force_conformal_holes.pdf`")
     vis_lines.append(f"- **Block Displacement UQ (Clean FEM)**: `displacement_analysis_clean_block.pdf` & `disp_r2_coverage_xy__piola_clean_block.pdf`")
     vis_lines.append(f"- **Block Displacement UQ (Observed DIC)**: `displacement_analysis_block.pdf` & `disp_r2_coverage_xy__piola_block.pdf`")
     vis_lines.append(f"- **Holes Displacement UQ (Clean FEM)**: `displacement_analysis_clean_holes.pdf` & `disp_r2_coverage_xy__piola_clean_holes.pdf`")
@@ -898,6 +1110,10 @@ def format_summary_markdown(ranked_seeds, exp_dir, config):
     vis_lines.append(f"- **Free Node Equilibrium Residuals (Step 16)**: `free_node_residuals_block.pdf` & `free_node_residuals_holes.pdf`")
     vis_lines.append(f"- **Sampled Material Parameters Posterior**: `fem_material_parameters_distribution.pdf` & `fem_material_parameters_joint.pdf`\n")
 
+    if has_2x2:
+        # per-seed table (one row per seed) replaces the top-seed table when the 2x2 FEM metrics exist
+        md_lines, tex_lines = format_per_seed_tables(ranked_seeds)
+        md_lines.insert(0, f"# Results Summary ({total_seeds_count} Seeds)\n")
     final_content = "\n".join(md_lines) + "\n" + "\n".join(tex_lines) + "\n" + "\n".join(vis_lines)
 
     with open(out_md, "w") as f:
@@ -944,7 +1160,7 @@ def main():
     ranked_seeds = rank_seeds(seed_data_list)
     n_seeds = len(ranked_seeds)
     best_seed = ranked_seeds[0]
-    median_idx = n_seeds // 2
+    median_idx = (n_seeds - 1) // 2
     median_seed = ranked_seeds[median_idx]
     worst_seed = ranked_seeds[-1]
 
@@ -965,7 +1181,8 @@ def main():
 
     # Generate 2x2 merged displacement and force plots for best, median, worst
     merge_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "merge_displacement_and_force_2x2.py")
-    if os.path.exists(merge_script):
+    # the merged 2x2 figures include the conformal bands; the new fem_validation_2x2_* figures replace them
+    if args.conformal and os.path.exists(merge_script):
         import subprocess
         for s_item, s_dir in [
             (best_seed, best_plots_dir),
@@ -988,7 +1205,7 @@ def main():
     generate_confusion_matrix_plot(ranked_seeds, exp_dir, config)
 
     # Generate Markdown summary table
-    format_summary_markdown(ranked_seeds, exp_dir, config)
+    format_summary_markdown(ranked_seeds, exp_dir, config, include_conformal=args.conformal)
 
 
 if __name__ == "__main__":

@@ -289,6 +289,24 @@ def _plane_stress_lambda3_solver(config: Dict[str, Any]) -> Callable:
     return solve_lambda3
 
 
+def dataset_from_fem_bundle(path: str) -> Dict[str, Any]:
+    """
+    Observed/clean kinematics of the training geometry from a fem_validation/block/fem_distilled_samples.npz bundle
+    (written with the exact training dataset and mesh): mesh, node types, u_obs (u_exp), u_true and the element
+    deformation gradients, under the key names of load_dataset. Reactions are the observed ones only.
+    """
+    b = np.load(path, allow_pickle=True)
+    mesh_pos, cells = np.asarray(b["node_coords"]), np.asarray(b["cells"])
+    u_obs, u_true = np.asarray(b["u_exp"], float), np.asarray(b["u_true"], float)
+    m_cells = jnp.asarray(mesh_pos[cells])
+    F_obs = np.stack([np.asarray(deformation_gradient_element(m_cells, jnp.asarray(u[cells]))[0]) for u in u_obs])
+    F_true = np.stack([np.asarray(deformation_gradient_element(m_cells, jnp.asarray(u[cells]))[0]) for u in u_true])
+    return {"mesh_pos": mesh_pos, "cells": cells, "node_type": np.asarray(b["node_type"]),
+            "u": u_obs, "u_obs": u_obs, "u_true": u_true, "F": F_obs, "F_obs": F_obs, "F_true": F_true,
+            "reaction_forces": np.asarray(b["loads"]), "stress_mode": str(b["stress_mode"]),
+            "control_mode": str(b["control_mode"])}
+
+
 def load_dataset(spec: str, seed: Optional[int] = None, disp_noise: Optional[float] = None,
                  load_noise: Optional[float] = None) -> DatasetDict:
     """

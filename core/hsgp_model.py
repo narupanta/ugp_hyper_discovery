@@ -139,6 +139,12 @@ class HSGPHyperelasticity:
     def vol_psi_dist(self, f, params=None, weights=None) -> EnergyDist:
         return self._dist(f, self.idx_vol)
 
+    def aniso_psi_dist(self, f, params=None, weights=None) -> EnergyDist:
+        """Isotropic model: the anisotropic energy is identically zero (same interface as the SVGP teacher)."""
+        f = jnp.asarray(f, dtype=jnp.float64)
+        z = jnp.zeros(()) if f.ndim == 2 else jnp.zeros(f.shape[0])
+        return EnergyDist(z, z)
+
     def _joint_cov(self, f, idx=None):
         phi, _, F = self._rows(jnp.asarray(f, dtype=jnp.float64).reshape(-1, 3, 3), idx)
         G = phi @ F
