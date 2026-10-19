@@ -870,7 +870,10 @@ def main():
     mock_gp = MockGP(mean_psi, cov_psi, device=device, sampling_mode=sampling_mode, L=L_tensor)
     include_log = args.material_model not in ["gmr_nolog", "gmr_no_log"]
     # deviatoric library: "gmr" polynomial (+log) terms, "ogden" three Ogden terms, "gmr_ogden" both
-    dev_library = {"ogden": "ogden", "gmr_ogden": "gmr_ogden"}.get(args.material_model, "gmr")
+    from core.material_library import library_from_material_model, is_dev_only
+    dev_library = library_from_material_model(args.material_model)
+    if is_dev_only(args.material_model) and args.component != "dev":
+        raise ValueError(f"--material_model {args.material_model} distills the deviatoric part only (--component dev)")
     if dev_library != "gmr" and args.distill_target != "sef_split":
         raise ValueError(f"--material_model {args.material_model} requires --distill_target sef_split")
     if args.material_model in ["gmr_aniso", "aniso_gmr"] or args.component == "aniso":

@@ -97,7 +97,7 @@ def main():
     parser = argparse.ArgumentParser(description="Plot distilled model and GP energy predictions on validation load steps.")
     parser.add_argument("--distilled_dir", type=str, required=True, help="Path to distillation output directory")
     parser.add_argument("--saved_model_dir", type=str, default=None, help="Path to extraction output directory")
-    parser.add_argument("--material_model", type=str, default="gmr", choices=["ogden", "gmr_ogden", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
+    parser.add_argument("--material_model", type=str, default="gmr", choices=["ogden", "gmr_ogden", "gmr_dev", "ogden_dev", "gmr_ogden_dev", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
     parser.add_argument("--distill_target", type=str, default="sef_split", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
     parser.add_argument("--val_load_steps", type=int, nargs="+", default=None, help="Validation load steps (e.g. 7 8 9)")
     parser.add_argument("--use_fem_bundle", action="store_true",

@@ -584,8 +584,10 @@ for SEED in $SEEDS_LIST; do
             $SENSITIVITY_FLAG &
             
         PLANE_STRESS_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('plane_stress_mode', ''))" 2>/dev/null || echo "")
-        if [ "$PLANE_STRESS_MODE" == "incompressible" ]; then
-            echo "Incompressible plane stress: no volumetric energy (J = 1); skipping the VOL distillation."
+        DEV_ONLY=false
+        if [ "$PLANE_STRESS_MODE" == "incompressible" ] || [[ "$DIST_MODEL" == *_dev ]]; then DEV_ONLY=true; fi
+        if [ "$DEV_ONLY" == true ]; then
+            echo "Deviatoric-only distillation (incompressible plane stress or '$DIST_MODEL'); skipping the VOL distillation."
         else
         echo "Distilling VOL component into $DISTILL_DIR..."
         python3 distillation/distill_uqmodeldisc.py \
@@ -634,7 +636,7 @@ for SEED in $SEEDS_LIST; do
         fi
             
         wait
-        if [ "$PLANE_STRESS_MODE" == "incompressible" ] && [ -f "$DISTILL_DIR/dev_flow_samples.npy" ]; then
+        if [ "$DEV_ONLY" == true ] && [ -f "$DISTILL_DIR/dev_flow_samples.npy" ]; then
             # volumetric parameters are irrelevant at J = 1: zero samples keep the downstream [dev, vol] layout
             python3 -c "import numpy as np; d=np.load('$DISTILL_DIR/dev_flow_samples.npy'); np.save('$DISTILL_DIR/vol_flow_samples.npy', np.zeros((d.shape[0], 3)))"
         fi

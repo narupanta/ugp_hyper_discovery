@@ -21,8 +21,15 @@ FULL_NAMES = GMR_DEV_NAMES + VOL_NAMES + ANISO_NAMES + OGDEN_NAMES      # 25
 OGDEN_START = 19
 
 
+def is_dev_only(material_model):
+    """'<library>_dev' (gmr_dev, ogden_dev, gmr_ogden_dev): deviatoric library only, no volumetric distillation."""
+    return str(material_model or "").lower().endswith("_dev")
+
+
 def library_from_material_model(material_model):
-    return {"ogden": "ogden", "gmr_ogden": "gmr_ogden"}.get(str(material_model or "gmr").lower(), "gmr")
+    name = str(material_model or "gmr").lower()
+    name = name[:-4] if name.endswith("_dev") else name
+    return {"ogden": "ogden", "gmr_ogden": "gmr_ogden"}.get(name, "gmr")
 
 
 def distilled_library(distilled_dir):
