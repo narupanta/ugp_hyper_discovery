@@ -91,7 +91,10 @@ def main():
         from core.dataset_store import dataset_from_fem_bundle
         data = dataset_from_fem_bundle(str(bundle))
     else:
-        spec = open(seed_dir / "dataset_train.spec").read().strip()
+        from plots.plot_distilled_r2_energy import find_dataset_path
+        spec = find_dataset_path(str(edir), cfg.get("material_model_name", ""))   # metadata.json / config.json / spec
+        if spec is None:
+            raise FileNotFoundError(f"Dataset of the extraction in {edir} not found (try --use_fem_bundle)")
         data = load_dataset(spec)
     mesh_pos, cells, node_type = np.asarray(data["mesh_pos"]), np.asarray(data["cells"]), np.asarray(data["node_type"])
     u_obs, u_clean = np.asarray(data["u_obs"], float), np.asarray(data["u_true"], float)
@@ -105,7 +108,11 @@ def main():
 
     val_steps = [int(s) for s in cfg.get("val_load_steps_indices", []) if 0 <= int(s) < T]
     train_steps = [int(s) for s in ecfg.get("train_load_steps_indices", []) if 0 <= int(s) < T]
-    sig = np.array([em["sigma_u_x"], em["sigma_u_y"]], float)
+    if "sigma_u_x" in em and "sigma_u_y" in em:                      # inferred by the (HSGP) extraction
+        sig, sig_src = np.array([em["sigma_u_x"], em["sigma_u_y"]], float), "inferred"
+    else:                                                            # not inferred (SVGP): recipe noise level
+        sig, sig_src = np.full(2, float(cfg.get("disp_noise", 0.0))), "recipe"
+        print(f"sigma_u not inferred by this extraction: using the recipe disp_noise {sig[0]:g}")
 
     # posterior samples: dev and vol are distilled separately, drawn independently
     rng = np.random.default_rng(0)
@@ -211,7 +218,7 @@ def main():
         if ref:
             ax_b.plot(steps, eps_rms(ref["eps_obs"], c), "--", color=col, lw=1.0, alpha=0.9,
                       label=rf"True material, $\varepsilon_{name}$")
-        ax_b.axhline(sig[c], color=col, ls=":", lw=1.3, label=rf"Inferred $\hat\sigma_{name}$")
+        ax_b.axhline(sig[c], color=col, ls=":", lw=1.3, label=rf"{sig_src.capitalize()} $\hat\sigma_{name}$")
     if np.isfinite(noise_true):
         ax_b.axhline(noise_true, color="k", ls="-", lw=0.8, alpha=0.6, label=r"True $\sigma_u$")
     ax_b.set_yscale("log")
@@ -258,7 +265,7 @@ def main():
     frac_unstable_val = float(np.mean(lmin[:, V] <= 0) * 100)
     t_rms = [float(np.sqrt(np.mean(eps_rms(ref["eps_obs"][V], c) ** 2))) for c in range(2)] if ref else [np.nan, np.nan]
     line1 = (rf"Validation steps: median RMS $\varepsilon_x = {vrms[0]:.2e}$, $\varepsilon_y = {vrms[1]:.2e}$   $\vert$   "
-             rf"inferred $\hat\sigma_x = {sig[0]:.2e}$, $\hat\sigma_y = {sig[1]:.2e}$   $\vert$   "
+             rf"{sig_src} $\hat\sigma_x = {sig[0]:.2e}$, $\hat\sigma_y = {sig[1]:.2e}$   $\vert$   "
              rf"true material: $\varepsilon_x = {t_rms[0]:.2e}$, $\varepsilon_y = {t_rms[1]:.2e}$")
     line2 = (rf"$|\varepsilon/\hat\sigma| \leq 1.96$: {within:.1f}% (nominal 95%),  std$(\varepsilon/\hat\sigma) = {std_z:.2f}$   $\vert$   "
              rf"{S} samples (force), {Se} samples (EIV; unstable $\mathbf{{K}}_{{ff}}$ in {frac_unstable_val:.1f}% of sample-step pairs on val. steps, excluded)")

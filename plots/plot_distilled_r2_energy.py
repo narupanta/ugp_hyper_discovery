@@ -31,6 +31,10 @@ def find_dataset_path(saved_model_dir, true_model_name):
                         return mdata["dataset_path"]
             except Exception:
                 pass
+            else:
+                if mdata.get("dataset_path"):   # recorded but missing: never fall back to a guessed (different) dataset
+                    raise FileNotFoundError(f"Dataset of this extraction not available here: {mdata['dataset_path']} "
+                                            f"(use --use_fem_bundle)")
     spec_file = os.path.join(os.path.dirname(os.path.abspath(saved_model_dir)), "dataset_train.spec")
     if os.path.exists(spec_file):
         with open(spec_file) as sf:

@@ -347,8 +347,11 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
     """
     Deviatoric candidate library. library = "gmr": polynomial terms in (I1_bar - 3, I2_bar - 3) (+ E log(I2_bar/3));
     "ogden": three Ogden terms mu_k / alpha_k (sum_i lam_bar_i^alpha_k - 3) (parameters mu_1, alpha_1, ..., alpha_3);
-    "gmr_ogden": both, polynomial terms first. All parameters are positive (exponential output of the flow), so the
-    Ogden exponents are positive; the Ogden terms are interchangeable (no ordering is imposed).
+    "gmr_ogden": both, polynomial terms first. The polynomial coefficients are positive (exponential output of the flow).
+    Ogden terms: the flow gives a positive magnitude mu~_k and a real exponent alpha_k (unconstrained output), and the
+    term uses mu_k = sign(alpha_k) mu~_k, so mu_k alpha_k > 0 (positive shear contribution mu_k alpha_k / 2, the
+    stability condition of each term) for either sign of the exponent. Saved samples hold the signed mu_k
+    (physical_samples). The Ogden terms are interchangeable (no ordering is imposed).
     """
     def __init__(self, num_points, device, include_log_terms=False, distill_target="sef", library="gmr"):
         super().__init__()
@@ -389,6 +392,21 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
     def parameter_scales(self): return self._parameter_scales
     @parameter_scales.setter
     def parameter_scales(self, val): self._parameter_scales = val
+    @property
+    def unconstrained_parameter_indices(self):
+        """Active parameters the flow leaves real-valued: the Ogden exponents."""
+        return [i for i, n in enumerate(self.parameter_names) if "alpha" in n]
+
+    @staticmethod
+    def physical_samples(samples, names):
+        """Flow samples (mu~_k > 0, alpha_k) -> physical (mu_k = sign(alpha_k) mu~_k, alpha_k), columns by name."""
+        out = np.array(samples, dtype=float, copy=True)
+        names = list(names)
+        for k in range(1, 4):
+            mu_n, al_n = f"$\\mu_{{{k}}}$", f"$\\alpha_{{{k}}}$"
+            if mu_n in names and al_n in names:
+                out[:, names.index(mu_n)] *= np.sign(out[:, names.index(al_n)])
+        return out
 
     def __call__(self, inputs, test_cases, parameters, validate_args=False):
         full_parameters = mask_and_populate_parameters(parameters, self._parameter_mask, self._parameter_population_matrix)
@@ -396,7 +414,8 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
         if self.use_ogden:
             from core.ogden import ogden_dev_energy_torch
             og = full_parameters[self._num_poly:]
-            W_ogden = ogden_dev_energy_torch(inputs, og[0::2], og[1::2])
+            alphas = og[1::2]
+            W_ogden = ogden_dev_energy_torch(inputs, torch.sign(alphas) * og[0::2], alphas)   # mu = sign(alpha) mu~
             if not self.use_poly:
                 return W_ogden.unsqueeze(-1)
             full_parameters = full_parameters[:self._num_poly]
@@ -1073,6 +1092,8 @@ def main():
                 samples_pre = full_samples_pre.cpu().numpy()
             else:
                 samples_pre = raw_samples_pre.cpu().numpy()
+            if hasattr(model, "physical_samples"):
+                samples_pre = model.physical_samples(samples_pre, full_param_names_master)
             
         full_param_names_pre = list(full_param_names_master)
         pre_samples_path = os.path.join(out_dir, pfx("flow_samples_before_sensitivity.npy"))
@@ -1334,7 +1355,9 @@ def main():
             samples_np = full_samples.cpu().numpy()
         else:
             samples_np = samples.cpu().numpy()
-            
+        if hasattr(model, "physical_samples"):
+            samples_np = model.physical_samples(samples_np, full_param_names)
+
         samples_path = os.path.join(settings.PROJECT_DIR, pfx("flow_samples.npy"))
         np.save(samples_path, samples_np)
         print(f"Saved distilled PyTorch parameter samples (shape: {samples_np.shape}) to {samples_path}")
