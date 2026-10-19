@@ -70,7 +70,7 @@ def main():
     ap.add_argument("--seed_dir", required=True)
     ap.add_argument("--n_samples", type=int, default=1024, help="posterior samples for the force residual")
     ap.add_argument("--n_eps_samples", type=int, default=256, help="of these, samples for the EIV correction (K solves)")
-    ap.add_argument("--batch", type=int, default=16)
+    ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--save_path", default=None, help="default: <seed>/distilled/block_validation")
     ap.add_argument("--use_fem_bundle", action="store_true",
                     help="take the training kinematics from <seed>/fem_validation/block/fem_distilled_samples.npz")
@@ -111,9 +111,14 @@ def main():
     rng = np.random.default_rng(0)
     dev, vol = np.load(ddir / "dev_flow_samples.npy"), np.load(ddir / "vol_flow_samples.npy")
     S = min(args.n_samples, len(dev), len(vol))
-    params = np.concatenate([dev[rng.choice(len(dev), S, replace=False)], vol[rng.choice(len(vol), S, replace=False)]], 1)
+    from core.material_library import full_param_vectors, distilled_library
+    params = full_param_vectors(dev[rng.choice(len(dev), S, replace=False)], vol[rng.choice(len(vol), S, replace=False)],
+                                distilled_library(str(ddir)))
     mp = cfg.get("material_params", {}) or {}
-    p_true = np.array(list(mp["dev_params"]) + list(mp["vol_params"]), float) if "dev_params" in mp else None
+    from core.material_library import true_full_vector
+    p_true = true_full_vector(mp)
+    if p_true is not None and "mu_params" not in mp:
+        p_true = p_true[:13]                                     # GMR family: former 13-entry layout
 
     dNdX, dA, f_elem, k_elem = build_operators(mesh_pos, cells, stress_mode)
     cells_j = jnp.asarray(cells)

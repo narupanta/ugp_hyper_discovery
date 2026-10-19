@@ -340,19 +340,34 @@ class PyTorchGMRModel(BasePyTorchMaterialModel):
         return energy.unsqueeze(-1)
 
 
+OGDEN_PARAM_NAMES = ("$\\mu_{1}$", "$\\alpha_{1}$", "$\\mu_{2}$", "$\\alpha_{2}$", "$\\mu_{3}$", "$\\alpha_{3}$")
+
+
 class PyTorchGMRDevModel(BasePyTorchMaterialModel):
-    def __init__(self, num_points, device, include_log_terms=False, distill_target="sef"):
+    """
+    Deviatoric candidate library. library = "gmr": polynomial terms in (I1_bar - 3, I2_bar - 3) (+ E log(I2_bar/3));
+    "ogden": three Ogden terms mu_k / alpha_k (sum_i lam_bar_i^alpha_k - 3) (parameters mu_1, alpha_1, ..., alpha_3);
+    "gmr_ogden": both, polynomial terms first. All parameters are positive (exponential output of the flow), so the
+    Ogden exponents are positive; the Ogden terms are interchangeable (no ordering is imposed).
+    """
+    def __init__(self, num_points, device, include_log_terms=False, distill_target="sef", library="gmr"):
         super().__init__()
         self.include_log_terms = include_log_terms
         self.distill_target = distill_target
+        self.library = library
+        self.use_poly = library in ("gmr", "gmr_ogden")
+        self.use_ogden = library in ("ogden", "gmr_ogden")
+        if self.use_ogden and distill_target in ["sef_stress", "sef_cauchy"]:
+            raise NotImplementedError("Ogden libraries support energy targets (sef, sef_split) only")
         self._output_dim = 4 if distill_target in ["sef_stress", "sef_cauchy"] else 1
-        
+
+        poly_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$")
         if self.include_log_terms:
-            self._num_parameters = 10
-            self._parameter_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$", "$E$")
-        else:
-            self._num_parameters = 9
-            self._parameter_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$")
+            poly_names = poly_names + ("$E$",)
+        names = (poly_names if self.use_poly else ()) + (OGDEN_PARAM_NAMES if self.use_ogden else ())
+        self._num_poly = len(poly_names) if self.use_poly else 0
+        self._num_parameters = len(names)
+        self._parameter_names = names
         
         self._parameter_scales = torch.ones(self._num_parameters, device=device)
         self._device = device
@@ -377,6 +392,14 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
 
     def __call__(self, inputs, test_cases, parameters, validate_args=False):
         full_parameters = mask_and_populate_parameters(parameters, self._parameter_mask, self._parameter_population_matrix)
+        W_ogden = 0.0
+        if self.use_ogden:
+            from core.ogden import ogden_dev_energy_torch
+            og = full_parameters[self._num_poly:]
+            W_ogden = ogden_dev_energy_torch(inputs, og[0::2], og[1::2])
+            if not self.use_poly:
+                return W_ogden.unsqueeze(-1)
+            full_parameters = full_parameters[:self._num_poly]
         C = torch.matmul(inputs.transpose(1, 2), inputs)
         I1 = torch.diagonal(C, dim1=1, dim2=2).sum(-1)
         I2 = 0.5 * (I1**2 - torch.diagonal(torch.matmul(C, C), dim1=1, dim2=2).sum(-1))
@@ -394,14 +417,14 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
 
         W_dev = (C10 * I1_m3 + C01 * I2_m3 + C20 * I1_m3**2 + C11 * I1_m3 * I2_m3 + C02 * I2_m3**2 +
                  C30 * I1_m3**3 + C21 * (I1_m3**2) * I2_m3 + C12 * I1_m3 * (I2_m3**2) + C03 * I2_m3**3 + W_log)
-        energy = W_dev
+        energy = W_dev + W_ogden
 
         if self.distill_target in ["sef_stress", "sef_cauchy"]:
             F_inv_T = torch.linalg.inv(inputs).transpose(1, 2)
             dI1bar_dF = J.view(-1, 1, 1)**(-2/3) * (2.0 * inputs - (2.0/3.0) * I1.view(-1, 1, 1) * F_inv_T)
             dI2_dF = 2.0 * I1.view(-1, 1, 1) * inputs - 2.0 * torch.matmul(inputs, torch.matmul(inputs.transpose(1, 2), inputs))
             dI2bar_dF = J.view(-1, 1, 1)**(-4/3) * (dI2_dF - (4.0/3.0) * I2.view(-1, 1, 1) * F_inv_T)
-            
+
             dW_dI1 = C10 + 2.0 * C20 * I1_m3 + C11 * I2_m3 + 3.0 * C30 * (I1_m3**2) + 2.0 * C21 * I1_m3 * I2_m3 + C12 * (I2_m3**2)
             dW_dI2 = C01 + C11 * I1_m3 + 2.0 * C02 * I2_m3 + C21 * (I1_m3**2) + 2.0 * C12 * I1_m3 * I2_m3 + 3.0 * C03 * (I2_m3**2)
             if self.include_log_terms:
@@ -846,6 +869,10 @@ def main():
 
     mock_gp = MockGP(mean_psi, cov_psi, device=device, sampling_mode=sampling_mode, L=L_tensor)
     include_log = args.material_model not in ["gmr_nolog", "gmr_no_log"]
+    # deviatoric library: "gmr" polynomial (+log) terms, "ogden" three Ogden terms, "gmr_ogden" both
+    dev_library = {"ogden": "ogden", "gmr_ogden": "gmr_ogden"}.get(args.material_model, "gmr")
+    if dev_library != "gmr" and args.distill_target != "sef_split":
+        raise ValueError(f"--material_model {args.material_model} requires --distill_target sef_split")
     if args.material_model in ["gmr_aniso", "aniso_gmr"] or args.component == "aniso":
         if args.component == "dev":
             model = PyTorchGMRDevModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log)
@@ -857,7 +884,8 @@ def main():
             model = PyTorchGMRAnisoModel(num_points, device=device, theta1=theta1, theta2=theta2, distill_target=args.distill_target)
     else:
         if args.component == "dev":
-            model = PyTorchGMRDevModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log)
+            model = PyTorchGMRDevModel(num_points, device=device, distill_target=args.distill_target,
+                                       include_log_terms=include_log, library=dev_library)
         elif args.component == "vol":
             model = PyTorchGMRVolModel(num_points, device=device, distill_target=args.distill_target)
         else:
@@ -915,6 +943,10 @@ def main():
             for name, val in zip(aniso_names, true_model.aniso_params):
                 if abs(val) > 1e-12:
                     true_params[name] = float(val)
+        if hasattr(true_model, "mu_params") and hasattr(true_model, "alpha_params"):     # Ogden true material
+            for k, (mu_k, a_k) in enumerate(zip(true_model.mu_params, true_model.alpha_params)):
+                true_params[OGDEN_PARAM_NAMES[2 * k]] = float(mu_k)
+                true_params[OGDEN_PARAM_NAMES[2 * k + 1]] = float(a_k)
 
         source_type = "exp" if any(x in args.saved_model_dir.lower() for x in ["exp", "dic", "18617429"]) else "syn"
 

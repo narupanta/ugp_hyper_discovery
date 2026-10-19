@@ -54,7 +54,12 @@ def eval_psi_3d(F_3d, p, a0=None, a1=None):
             I6_m1 = I6_bar - 1.0
             w_aniso += aniso_p[3] * I6_m1**2 + aniso_p[4] * I6_m1**3 + aniso_p[5] * I6_m1**4
 
-    return w_dev + w_vol + w_aniso
+    w_ogden = 0.0
+    if p.shape[-1] >= 25:          # Ogden block of the full vector (core/material_library.py)
+        from core.ogden import ogden_dev_energy_jax
+        w_ogden = ogden_dev_energy_jax(F_3d, p[19:25][0::2], p[19:25][1::2])
+
+    return w_dev + w_vol + w_aniso + w_ogden
 
 
 def p_3d_func(F_3d, p, a0=None, a1=None):
@@ -82,6 +87,12 @@ def solve_lambda3_distilled(F_2d, p, a0=None, a1=None, max_iter=8):
 
 
 def piola_stress_2d(F_2d, p, a0=None, a1=None, stress_mode="plane_strain"):
+    if stress_mode == "plane_stress_incompressible":
+        # reduced energy Psi(F_2D, F33 = 1/det F_2D): its in-plane gradient is P with sigma_33 = 0
+        def psi_red(f2):
+            F_3d = jnp.zeros((3, 3)).at[:2, :2].set(f2).at[2, 2].set(1.0 / jnp.linalg.det(f2))
+            return eval_psi_3d(F_3d, p, a0, a1)
+        return jax.grad(psi_red)(F_2d)
     if stress_mode == "plane_stress":
         lam3 = solve_lambda3_distilled(F_2d, p, a0, a1)
         F_3d = jnp.array([

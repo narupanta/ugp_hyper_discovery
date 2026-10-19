@@ -503,35 +503,31 @@ class Ogden(BaseMaterialModel):
         self.alpha_params = alpha_params
         self.vol_params = vol_params
 
-    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
+    @staticmethod
+    def _as_3d(F: jnp.ndarray) -> jnp.ndarray:
         if F.shape[-2:] == (2, 2):
-            F = jnp.array([[F[..., 0, 0], F[..., 0, 1], 0.0],
-                           [F[..., 1, 0], F[..., 1, 1], 0.0],
-                           [0.0,           0.0,           1.0]])
-        C = C_func(F)
-        I3 = I3_func(C)
-        I3_safe = jnp.clip(I3, 1.0e-8, 1.0e8)
+            return jnp.array([[F[..., 0, 0], F[..., 0, 1], 0.0],
+                              [F[..., 1, 0], F[..., 1, 1], 0.0],
+                              [0.0,           0.0,           1.0]])
+        return F
 
-        eigenvalues = jnp.linalg.eigvalsh(C)
-        eigenvalues = jnp.clip(eigenvalues, 1.0e-8, 1.0e8)
-        lam = jnp.sqrt(eigenvalues)
-        lam_bar = lam * I3_safe ** (-1 / 6)
+    def psi_dev(self, F: jnp.ndarray) -> jnp.ndarray:
+        # From the principal stretches through a form that stays smooth where stretches coincide (F = I, uniform
+        # stretch), so the FEM tangent is finite there (core/ogden.py). F is (2, 2) (plane strain) or block-diagonal (3, 3).
+        from core.ogden import ogden_dev_energy_jax
+        return ogden_dev_energy_jax(self._as_3d(F), jnp.asarray(self.mu_params, dtype=jnp.float64),
+                                    jnp.asarray(self.alpha_params, dtype=jnp.float64))
 
-        dev_terms = 0.0
-        for i in range(len(self.mu_params)):
-            val = (lam_bar[..., 0]**self.alpha_params[i] + lam_bar[..., 1]**self.alpha_params[i] + lam_bar[..., 2]**self.alpha_params[i] - 3.0)
-            alpha_safe = jnp.where(jnp.abs(self.alpha_params[i]) < 1e-6, 1e-6 * jnp.sign(self.alpha_params[i] + 1e-9), self.alpha_params[i])
-            dev_terms += (self.mu_params[i] / alpha_safe) * val
-
-        J = jnp.sqrt(I3_safe)
-        J_minus_1 = J - 1.0
-
-        vol_terms = (
+    def psi_vol(self, F: jnp.ndarray) -> jnp.ndarray:
+        J_minus_1 = jnp.sqrt(jnp.clip(I3_func(C_func(self._as_3d(F))), 1.0e-8, 1.0e8)) - 1.0
+        return (
             self.vol_params[0] * J_minus_1**2 +
             (self.vol_params[1] * J_minus_1**4 if len(self.vol_params) > 1 else 0.0) +
             (self.vol_params[2] * J_minus_1**6 if len(self.vol_params) > 2 else 0.0)
         )
-        return dev_terms + vol_terms
+
+    def psi(self, F: jnp.ndarray) -> jnp.ndarray:
+        return self.psi_dev(F) + self.psi_vol(F)
 
 
 @register_material("holzapfel")

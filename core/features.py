@@ -24,6 +24,28 @@ class IsotropicFeatureExtractor(FeatureExtractor):
         dev, vol = transform_input_features(invariants)
         return dev, vol
 
+class IncompressiblePlaneStressFeatureExtractor(FeatureExtractor):
+    """
+    Plane stress with an incompressible material: the out-of-plane stretch follows from the in-plane deformation,
+    F33 = 1 / det(F_2D), so J = 1 and I1_bar = I1, I2_bar = I2. The input's F33 is ignored and recomputed from the
+    in-plane block, so derivatives with respect to the in-plane entries are those of the reduced energy
+    Psi(F_2D, 1 / det F_2D), i.e. the in-plane first Piola-Kirchhoff stress with sigma_33 = 0 (the pressure is
+    eliminated by the plane-stress condition). The volumetric feature is the constant J = 1.
+    """
+    def extract(self, f: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        f2 = f[:2, :2]
+        c2 = f2.T @ f2
+        tr2, det2 = jnp.trace(c2), jnp.linalg.det(c2)
+        c33 = 1.0 / det2                                     # lambda_3^2 = 1 / det(C_2D)
+        i1 = tr2 + c33
+        i2 = det2 + c33 * tr2                                # 1/2 [(tr C)^2 - tr C^2] for C = diag(C_2D, c33)
+        return jnp.stack([i1, i2], axis=-1), jnp.array([1.0])
+
+
+def make_feature_extractor(incompressible_plane_stress: bool = False) -> FeatureExtractor:
+    return IncompressiblePlaneStressFeatureExtractor() if incompressible_plane_stress else IsotropicFeatureExtractor()
+
+
 class AnisotropicFeatureExtractor(FeatureExtractor):
     def __init__(self, a0: jnp.ndarray, a1: jnp.ndarray = None, cap_compression: bool = False):
         self.a0 = jnp.asarray(a0, dtype=jnp.float64)

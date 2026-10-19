@@ -20,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, default=None)
     parser.add_argument("--distilled_dir", type=str, required=True)
-    parser.add_argument("--material_model", type=str, default=None, choices=["ogden", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
+    parser.add_argument("--material_model", type=str, default=None, choices=["ogden", "gmr_ogden", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
     parser.add_argument("--distill_target", type=str, default="sef_split", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
     args = parser.parse_args()
     
@@ -222,10 +222,16 @@ def main():
             for name, val in zip(aniso_names, true_model.aniso_params):
                 if abs(val) > 1e-12:
                     true_params[name] = float(val)
+        if hasattr(true_model, "mu_params") and hasattr(true_model, "alpha_params"):     # Ogden true material
+            for k, (mu_k, a_k) in enumerate(zip(true_model.mu_params, true_model.alpha_params)):
+                true_params[rf"$\mu_{{{k + 1}}}$"] = float(mu_k)
+                true_params[rf"$\alpha_{{{k + 1}}}$"] = float(a_k)
 
     if args.distill_target == "sef_split":
         # Load samples for components
-        dev_samples = np.load(os.path.join(distilled_dir, "dev_flow_samples.npy"))[:num_samples]
+        from core.material_library import dev16, distilled_library
+        dev_samples = dev16(np.load(os.path.join(distilled_dir, "dev_flow_samples.npy"))[:num_samples],
+                            distilled_library(distilled_dir))                       # [GMR 10 | Ogden 6]
         vol_samples = np.load(os.path.join(distilled_dir, "vol_flow_samples.npy"))[:num_samples]
         aniso_samples = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy"))[:num_samples] if has_aniso else None
         
@@ -262,12 +268,21 @@ def main():
                 return (C42 * I4_m1**2 + C44 * I4_m1**4 + k1 * (jnp.exp(exp_arg1) - 1.0) +
                         C62 * I6_m1**2 + C64 * I6_m1**4 + k3 * (jnp.exp(exp_arg2) - 1.0))
 
+        def _ogden_split(theta_dev, F_chunk):
+            """Energy and Piola stress of the Ogden block (dev columns 10..15)."""
+            from core.ogden import ogden_dev_energy_jax
+            og = jnp.asarray(theta_dev)[10:16]
+            e = lambda f: ogden_dev_energy_jax(f, og[0::2], og[1::2])
+            return jax.vmap(e)(F_chunk), jax.vmap(jax.grad(e))(F_chunk)
+
         def get_distilled_energy_stress_split(theta_dev, theta_vol, F_chunk):
             dev_theta = list(theta_dev) + [0.0] * max(0, 10 - len(theta_dev))
             vol_theta = list(theta_vol) + [0.0] * max(0, 3 - len(theta_vol))
             mat_dev = get_material("gmr", dev_params=dev_theta[:10], vol_params=[0.0, 0.0, 0.0], jit_P=False)
             mat_vol = get_material("gmr", dev_params=[0.0]*10, vol_params=vol_theta[:3], jit_P=False)
-            return jax.vmap(mat_dev.psi)(F_chunk), jax.vmap(mat_vol.psi)(F_chunk), jax.vmap(mat_dev.P)(F_chunk) + jax.vmap(mat_vol.P)(F_chunk)
+            og_psi, og_p = _ogden_split(theta_dev, F_chunk)
+            return (jax.vmap(mat_dev.psi)(F_chunk) + og_psi, jax.vmap(mat_vol.psi)(F_chunk),
+                    jax.vmap(mat_dev.P)(F_chunk) + jax.vmap(mat_vol.P)(F_chunk) + og_p)
 
         def get_distilled_energy_stress_split_3(theta_dev, theta_vol, theta_aniso, F_chunk):
             dev_theta = list(theta_dev) + [0.0] * max(0, 10 - len(theta_dev))
@@ -279,9 +294,10 @@ def main():
             s_psi_aniso = jax.vmap(lambda f: psi_aniso_single(theta_aniso, f))(F_chunk)
             s_p_aniso = jax.vmap(p_aniso_single)(F_chunk)
             
-            s_psi_dev = jax.vmap(mat_dev.psi)(F_chunk)
+            og_psi, og_p = _ogden_split(theta_dev, F_chunk)
+            s_psi_dev = jax.vmap(mat_dev.psi)(F_chunk) + og_psi
             s_psi_vol = jax.vmap(mat_vol.psi)(F_chunk)
-            s_p_dev = jax.vmap(mat_dev.P)(F_chunk)
+            s_p_dev = jax.vmap(mat_dev.P)(F_chunk) + og_p
             s_p_vol = jax.vmap(mat_vol.P)(F_chunk)
             
             return s_psi_dev, s_psi_vol, s_psi_aniso, s_p_dev + s_p_vol + s_p_aniso
@@ -496,7 +512,13 @@ def main():
             
             # Form param names
             dev_names = ["$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$"]
-            if dev_df_samples.shape[1] == 10:
+            og_names = [r"$\mu_{1}$", r"$\alpha_{1}$", r"$\mu_{2}$", r"$\alpha_{2}$", r"$\mu_{3}$", r"$\alpha_{3}$"]
+            lib = distilled_library(distilled_dir) if args.distill_target == "sef_split" else "gmr"
+            if lib == "ogden":
+                dev_names = og_names[:dev_df_samples.shape[1]]
+            elif lib == "gmr_ogden":
+                dev_names = dev_names + ["$E$"] + og_names
+            elif dev_df_samples.shape[1] == 10:
                 dev_names.append("$E$")
             elif dev_df_samples.shape[1] < len(dev_names):
                 dev_names = [f"$C_{{{i+1}}}$" for i in range(dev_df_samples.shape[1])]

@@ -97,7 +97,7 @@ def main():
     parser = argparse.ArgumentParser(description="Plot distilled model and GP energy predictions on validation load steps.")
     parser.add_argument("--distilled_dir", type=str, required=True, help="Path to distillation output directory")
     parser.add_argument("--saved_model_dir", type=str, default=None, help="Path to extraction output directory")
-    parser.add_argument("--material_model", type=str, default="gmr", choices=["ogden", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
+    parser.add_argument("--material_model", type=str, default="gmr", choices=["ogden", "gmr_ogden", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
     parser.add_argument("--distill_target", type=str, default="sef_split", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
     parser.add_argument("--val_load_steps", type=int, nargs="+", default=None, help="Validation load steps (e.g. 7 8 9)")
     parser.add_argument("--use_fem_bundle", action="store_true",
@@ -288,13 +288,19 @@ def main():
         aniso_raw = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy")) if has_aniso else None
         
         n_eval_samples = min(args.num_samples, dev_raw.shape[0], vol_raw.shape[0])
-        dev_samples = np.zeros((n_eval_samples, 10))
-        dev_samples[:, :dev_raw.shape[1]] = dev_raw[:n_eval_samples, :10]
+        from core.material_library import dev16, distilled_library
+        dev_samples = dev16(dev_raw[:n_eval_samples], distilled_library(distilled_dir))   # [GMR 10 | Ogden 6]
         
         vol_samples = np.zeros((n_eval_samples, 3))
         vol_samples[:, :vol_raw.shape[1]] = vol_raw[:n_eval_samples, :3]
 
         from core.utils import C_func, I1_func, I2_func, I3_func
+
+        def _ogden(p, F_3d):
+            if p.shape[-1] < 16:
+                return 0.0
+            from core.ogden import ogden_dev_energy_jax
+            return ogden_dev_energy_jax(F_3d, p[10:16][0::2], p[10:16][1::2])
 
         def psi_dev_formula(p, F_3d):
             C = C_func(F_3d)
@@ -317,7 +323,7 @@ def main():
                 p[7] * i1_m3 * (i2_m3**2) +
                 p[8] * i2_m3**3 +
                 p[9] * jnp.log(jnp.maximum(i2_dev / 3.0, 1e-8))
-            )
+            ) + _ogden(p, F_3d)
 
         def psi_vol_formula(p, F_3d):
             C = C_func(F_3d)

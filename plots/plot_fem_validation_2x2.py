@@ -65,10 +65,13 @@ def find_config(seed_dir: Path) -> dict:
 
 def true_parameters(cfg: dict):
     mp = cfg.get("material_params", {}) or {}
-    dev, vol = mp.get("dev_params"), mp.get("vol_params")
-    if dev is None or vol is None or not cfg.get("has_ground_truth", True):
+    if not cfg.get("has_ground_truth", True):
         return None
-    return np.array(list(dev) + list(vol), dtype=float)
+    from core.material_library import true_full_vector
+    p = true_full_vector(mp)
+    if p is not None and "mu_params" not in mp:
+        p = p[:13]                                               # GMR family: former 13-entry layout
+    return p
 
 
 def make_reaction_fn(node_coords, cells, node_type, stress_mode):
@@ -129,7 +132,12 @@ def plot_geometry(seed_dir: Path, geom: str, cfg: dict, n_noise_draws: int = 4, 
     u_pred = np.asarray(d["u_pred"], dtype=float)            # (S, T, N, 2)
     params = np.asarray(d["selected_samples"], dtype=float)  # (S, P)
     coords, cells, node_type = d["node_coords"], d["cells"], np.asarray(d["node_type"])
-    u_clean, u_obs = np.asarray(d["u_true"], dtype=float), np.asarray(d["u_exp"], dtype=float)
+    u_obs = np.asarray(d["u_exp"], dtype=float)
+    has_truth = bool(cfg.get("has_ground_truth", True)) and "u_true" in d.files
+    if not experimental and not has_truth:
+        print(f"[2x2] {geom}: no ground truth (experimental data); only the --experimental figure applies")
+        return None
+    u_clean = np.asarray(d["u_true"], dtype=float) if "u_true" in d.files else u_obs
     r_obs = np.asarray(d["loads"], dtype=float)              # observed (noisy) reactions, (T, 2)
     stress_mode = str(d["stress_mode"]) if "stress_mode" in d else "plane_strain"
     S, T = u_pred.shape[:2]

@@ -144,6 +144,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              likelihood: str = "eiv", sigma_u_known: Optional[float] = None, reaction_weight: float = 1.0, warp: bool = False, max_outer: int = 30, lin_max: int = 15, lin_tol: float = 1e-4,
              tol: float = 1e-5, sigma_cap: float = 10.0, max_hyper_step: float = 2.0, continuation: bool = False,
              stability_search: bool = True, hyper_restarts: bool = True, continuation_stages=None,
+             incompressible_plane_stress: bool = False,
              step_labels=None, eiv_damping: float = 0.0, eiv_damping_decay: float = 0.1,
              adaptive: bool = False, hyper_iters_per_stage: int = 0, ls_floor_fraction: float = 0.0,
              tol_intermediate: Optional[float] = None, hyper_delay: int = 0, cap_accept_tol: float = 0.0,
@@ -230,7 +231,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     T = f3x3_steps.shape[0]
 
     # basis boxes from the training features (+ reference)
-    feats = jax.vmap(IsotropicFeatureExtractor().extract)(f3x3_steps.reshape(-1, 3, 3))
+    from .features import make_feature_extractor
+    feats = jax.vmap(make_feature_extractor(incompressible_plane_stress).extract)(f3x3_steps.reshape(-1, 3, 3))
     dev_x, vol_x = np.asarray(feats[0]), np.asarray(feats[1])
     if warp:   # GP input space (same map as HSGPHyperelasticity.gp_inputs)
         dev_x, vol_x = np.log(np.maximum(dev_x - 2.0, 1e-12)), np.log(np.maximum(vol_x, 1e-12))
@@ -239,10 +241,17 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         ref_d, ref_v = DEV_REFERENCE, VOL_REFERENCE
     dev_x_steps, vol_x_steps = dev_x.reshape(T, -1, dev_x.shape[-1]), vol_x.reshape(T, -1, vol_x.shape[-1])
     dev_box = make_box(dev_x, ref_d, box_factor, num_basis_dev)
-    vol_box = make_box(vol_x, ref_v, box_factor, num_basis_vol)
+    if incompressible_plane_stress:
+        # J = 1 everywhere: the volumetric features have no spread; a nominal box keeps the (inactive) volumetric
+        # basis well-scaled. Its contribution is the constant phi_vol(1), which the reference conditions remove.
+        vol_box = make_box(np.array([[0.5], [1.5]]) if not warp else np.log(np.array([[0.5], [1.5]])), ref_v,
+                           1.0, num_basis_vol)
+    else:
+        vol_box = make_box(vol_x, ref_v, box_factor, num_basis_vol)
     P = 2 + dev_box.num_basis + vol_box.num_basis
     theta0 = jnp.zeros(P).at[0].set(1.0).at[1].set(1.0)
-    model = HSGPHyperelasticity(dev_box, vol_box, theta0, jnp.zeros((P, 1)), warp=warp)
+    model = HSGPHyperelasticity(dev_box, vol_box, theta0, jnp.zeros((P, 1)), warp=warp,
+                                incompressible_plane_stress=incompressible_plane_stress)
     cons = _Constraints(model)
 
     # hyperparameter bounds, priors and initial values
@@ -257,7 +266,9 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     bounds = dict(dev=(jnp.log(lsd_lo), jnp.log(lsd_hi)), vol=(jnp.log(lsv_lo), jnp.log(lsv_hi)))
 
     def to_raw(log_l, lo, hi):
-        s = (log_l - lo) / (hi - lo)
+        # few basis functions per input (m < ~7) leave too narrow a range for the half-log-unit margin of the
+        # initial value: keep it strictly inside the bounds
+        s = jnp.clip((log_l - lo) / (hi - lo), 0.05, 0.95)
         return jnp.log(s / (1 - s))
 
     def unpack(eta):
@@ -700,7 +711,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 amplitude_prior_centre=float(np.exp(sig_centre)), fit_time=time.time() - t0)
     model = HSGPHyperelasticity(dev_box, vol_box, theta_mean, factor, hyper=hyper,
                                 noise=dict(sigma_u_x=float(h["su_x"]), sigma_u_y=float(h["su_y"])), info=info,
-                                envelope=model.envelope, warp=warp)
+                                envelope=model.envelope, warp=warp,
+                                incompressible_plane_stress=incompressible_plane_stress)
     return model, history
 
 

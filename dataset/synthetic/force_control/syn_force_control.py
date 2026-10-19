@@ -98,6 +98,8 @@ def main():
     parser.add_argument('--dev_params', type=float, nargs='+', default=None)
     parser.add_argument('--vol_params', type=float, nargs='+', default=None)
     parser.add_argument('--aniso_params', type=float, nargs='+', default=None)
+    parser.add_argument('--mu_params', type=float, nargs='+', default=None, help="Ogden moduli mu_k")
+    parser.add_argument('--alpha_params', type=float, nargs='+', default=None, help="Ogden exponents alpha_k")
     args = parser.parse_args()
 
     material_model_name = args.model
@@ -140,9 +142,11 @@ def main():
     if args.dev_params is not None: mat_kwargs["dev_params"] = args.dev_params
     if args.vol_params is not None: mat_kwargs["vol_params"] = args.vol_params
     if args.aniso_params is not None: mat_kwargs["aniso_params"] = args.aniso_params
+    if args.mu_params is not None: mat_kwargs["mu_params"] = args.mu_params
+    if args.alpha_params is not None: mat_kwargs["alpha_params"] = args.alpha_params
 
     mat_p = rec.get("material_params", {})
-    for k in ("dev_params", "vol_params", "aniso_params", "angles"):
+    for k in ("dev_params", "vol_params", "aniso_params", "angles", "mu_params", "alpha_params"):
         if k not in mat_kwargs and k in mat_p:
             mat_kwargs[k] = mat_p[k]
 

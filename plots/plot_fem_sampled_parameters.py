@@ -71,10 +71,15 @@ def plot_fem_parameter_distributions(samples, true_dict, save_path):
                 param_labels.append(r"$K$ (Bulk Modulus)")
             else:
                 param_labels.append(rf"$\theta_{{\mathrm{{vol}}, {v_idx}}}$")
-        else:
+        elif idx < 19:
             a_idx = idx - 13
             param_names.append(f"aniso_p{a_idx}")
             param_labels.append(rf"$\theta_{{\mathrm{{aniso}}, {a_idx}}}$")
+        else:                                       # Ogden block (core/material_library.py): mu1, alpha1, ...
+            o_idx = idx - 19
+            sym, k = ("mu", o_idx // 2 + 1) if o_idx % 2 == 0 else ("alpha", o_idx // 2 + 1)
+            param_names.append(f"{sym}{k}")
+            param_labels.append(rf"$\{sym}_{{{k}}}$")
 
     n_params = len(active_indices)
     if n_params == 0:

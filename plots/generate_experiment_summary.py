@@ -13,8 +13,9 @@ import yaml
 from plots.theme import apply_style, save_figure, MODE_COLORS, COMPONENT_COLORS
 
 # Default candidate parameters in GMR model discovery
-ALL_CANDIDATE_PARAMS = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E", "D1", "D2", "D3"]
-DEV_PARAMS_SET = {"C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E"}
+OGDEN_CANDIDATE_PARAMS = ["mu1", "alpha1", "mu2", "alpha2", "mu3", "alpha3"]
+ALL_CANDIDATE_PARAMS = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E", "D1", "D2", "D3"] + OGDEN_CANDIDATE_PARAMS
+DEV_PARAMS_SET = {"C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E"} | set(OGDEN_CANDIDATE_PARAMS)
 VOL_PARAMS_SET = {"D1", "D2", "D3"}
 
 
@@ -683,6 +684,14 @@ def get_true_model_info(config):
         true_params["C20"] = "0.05" if not (dev_p and len(dev_p) > 2) else f"{float(dev_p[2]):.4f}".rstrip('0').rstrip('.')
         true_params["D1"] = "1.5" if not (vol_p and len(vol_p) > 0) else f"{float(vol_p[0]):.4f}".rstrip('0').rstrip('.')
         true_active = {"C10", "C01", "C20", "D1"}
+    elif mat_model == "ogden":
+        mu, al = mat_p.get("mu_params", []), mat_p.get("alpha_params", [])
+        for k, (m, a) in enumerate(zip(mu, al)):
+            true_params[f"mu{k + 1}"], true_params[f"alpha{k + 1}"] = f"{float(m):g}", f"{float(a):g}"
+            true_active |= {f"mu{k + 1}", f"alpha{k + 1}"}
+        if vol_p and len(vol_p) > 0 and vol_p[0] != 0:
+            true_params["D1"] = f"{float(vol_p[0]):g}"
+            true_active.add("D1")
     elif mat_model == "gentthomas":
         true_params["C10"] = "0.5" if not (dev_p and len(dev_p) > 0) else f"{float(dev_p[0]):.4f}".rstrip('0').rstrip('.')
         true_params["C01"] = "0.1" if not (dev_p and len(dev_p) > 1) else f"{float(dev_p[1]):.4f}".rstrip('0').rstrip('.')
@@ -934,9 +943,9 @@ def format_summary_markdown(ranked_seeds, exp_dir, config, include_conformal=Fal
     true_params, _ = get_true_model_info(config)
     mp = config.get("material_params", {}) or {}
     dev_true, vol_true = mp.get("dev_params"), mp.get("vol_params")
-    if dev_true is not None and vol_true is not None and len(dev_true) + len(vol_true) == len(ALL_CANDIDATE_PARAMS):
+    if dev_true is not None and vol_true is not None and len(dev_true) + len(vol_true) == 13:
         # full candidate vector in the config (C10..E, D1..D3): use it, zeros included
-        true_params = {p: f"{float(v):g}" for p, v in zip(ALL_CANDIDATE_PARAMS, list(dev_true) + list(vol_true))}
+        true_params.update({p: f"{float(v):g}" for p, v in zip(ALL_CANDIDATE_PARAMS[:13], list(dev_true) + list(vol_true))})
     present = [p for p in ALL_CANDIDATE_PARAMS
                if any(get_val(s, "model_structure", p, "mean") is not None for s in ranked_seeds)]
     # parameters pruned by the sensitivity analysis are zero in the distilled model

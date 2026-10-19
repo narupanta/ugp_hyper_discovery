@@ -48,11 +48,14 @@ class HSGPHyperelasticity:
 
     def __init__(self, dev_box: Box, vol_box: Box, theta_mean, theta_factor, hyper: Dict[str, np.ndarray] = None,
                  noise: Dict[str, float] = None, info: Dict = None, envelope: Optional[Dict[str, float]] = None,
-                 warp: bool = False):
+                 warp: bool = False, incompressible_plane_stress: bool = False):
         self.dev_box, self.vol_box = dev_box, vol_box
         self.warp = bool(warp)
         self.envelope = None if envelope is None else {k: float(v) for k, v in envelope.items()}   # mu, kappa, scale
-        self.feature_extractor = IsotropicFeatureExtractor()
+        # incompressible plane stress: F33 = 1/det F_2D inside the features, J = 1, the volumetric part drops out
+        self.incompressible_plane_stress = bool(incompressible_plane_stress)
+        from .features import make_feature_extractor
+        self.feature_extractor = make_feature_extractor(self.incompressible_plane_stress)
         self.n_lin = 2
         self.k_dev, self.k_vol = dev_box.num_basis, vol_box.num_basis
         self.sl_dev = slice(self.n_lin, self.n_lin + self.k_dev)
@@ -275,7 +278,8 @@ class HSGPHyperelasticity:
                  theta_mean=np.asarray(self.theta_mean), theta_factor=np.asarray(self.theta_factor),
                  hyper=json.dumps({k: np.asarray(v).tolist() for k, v in self.hyper.items()}),
                  noise=json.dumps(self.noise), info=json.dumps(self.info, default=float),
-                 envelope=json.dumps(self.envelope), warp=self.warp)
+                 envelope=json.dumps(self.envelope), warp=self.warp,
+                 incompressible_plane_stress=self.incompressible_plane_stress)
 
     @classmethod
     def load(cls, path: str) -> "HSGPHyperelasticity":
@@ -286,4 +290,6 @@ class HSGPHyperelasticity:
                    hyper={k: np.asarray(v) for k, v in json.loads(str(d["hyper"])).items()},
                    noise=json.loads(str(d["noise"])), info=json.loads(str(d["info"])),
                    envelope=json.loads(str(d["envelope"])) if "envelope" in d.files else None,
-                   warp=bool(d["warp"]) if "warp" in d.files else False)
+                   warp=bool(d["warp"]) if "warp" in d.files else False,
+                   incompressible_plane_stress=bool(d["incompressible_plane_stress"])
+                   if "incompressible_plane_stress" in d.files else False)

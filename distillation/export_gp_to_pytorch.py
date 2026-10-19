@@ -488,6 +488,15 @@ def main():
             prep_data = load_dataset(prep_dataset_path)
             F_all_steps_2x2 = prep_data["F"]
             F_all_steps_3d = prep_data.get("F_3d", None)
+            post = os.path.join(args.saved_model_dir, "hsgp_posterior.npz")
+            if os.path.exists(post) and "incompressible_plane_stress" in np.load(post).files \
+                    and bool(np.load(post)["incompressible_plane_stress"]):
+                # incompressible plane stress: F33 = 1/det F_2D (J = 1), as in the extraction's features
+                F2 = np.asarray(F_all_steps_2x2, dtype=np.float64)
+                F_all_steps_3d = np.zeros(F2.shape[:-2] + (3, 3))
+                F_all_steps_3d[..., :2, :2] = F2
+                F_all_steps_3d[..., 2, 2] = 1.0 / np.linalg.det(F2)
+                print("[EXPORT] incompressible plane stress: F33 = 1/det(F_2D)")
             
             if load_steps is None:
                 log_file = os.path.join(args.saved_model_dir, "optimization_log.txt")

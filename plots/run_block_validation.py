@@ -79,7 +79,8 @@ def resolve_data_bundle(distilled_dir: Path, extracted_dir: Path = None, dataset
     np.random.seed(42)
     dev_idx = np.random.choice(len(dev_samples), n_samples, replace=False)
     vol_idx = np.random.choice(len(vol_samples), n_samples, replace=False)
-    selected_samples = np.concatenate([dev_samples[dev_idx], vol_samples[vol_idx]], axis=1)
+    from core.material_library import full_param_vectors, distilled_library
+    selected_samples = full_param_vectors(dev_samples[dev_idx], vol_samples[vol_idx], distilled_library(str(distilled_dir)))
 
     # Resolve dataset path
     ds_path = None

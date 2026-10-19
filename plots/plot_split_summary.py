@@ -27,13 +27,16 @@ from core.utils import (
 from scipy.spatial import ConvexHull
 
 def to_latex(name):
-    clean = str(name).replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+    clean = str(name).replace("$", "").replace("{", "").replace("}", "").replace("_", "").replace("\\", "")
     if clean.startswith("C") and len(clean) == 3 and clean[1:].isdigit():
         return rf"$C_{{{clean[1:]}}}$"
     if clean.startswith("D") and len(clean) == 2 and clean[1:].isdigit():
         return rf"$D_{{{clean[1:]}}}$"
     if clean == "E":
         return r"$E$"
+    for greek in ("mu", "alpha"):                                  # Ogden terms: mu1 -> $\mu_{1}$
+        if clean.startswith(greek) and clean[len(greek):].isdigit():
+            return rf"$\{greek}_{{{clean[len(greek):]}}}$"
     return rf"${clean}$"
 
 LINESTYLES = ["-", (0, (5, 1.5)), (0, (1.2, 1.2)), (0, (5, 1.5, 1.2, 1.5)), (0, (8, 2)), (0, (3, 1, 1, 1, 1, 1))]
@@ -89,7 +92,7 @@ def plot_sensitivity_curves(ax, x, df, params, label_fn, fontsize=7.0, n_bins=30
 
 
 def get_comp_color(name):
-    clean = name.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+    clean = name.replace("$", "").replace("{", "").replace("}", "").replace("_", "").replace("\\", "")
     dev_palette = {
         "C10": "#1f77b4",  # deep classic blue
         "C01": "#4ba3e3",  # sky blue
@@ -101,6 +104,9 @@ def get_comp_color(name):
         "C12": "#225ea8",  # royal blue
         "C03": "#a6bddb",  # soft ice blue
         "E":   "#02818a",  # rich deep teal
+        "mu1": "#5e3c99", "alpha1": "#9e86c8",                   # Ogden terms: purple shades
+        "mu2": "#7b3294", "alpha2": "#c2a5cf",
+        "mu3": "#40004b", "alpha3": "#d9c6e8",
     }
     vol_palette = {
         "D1": "#d95f02",   # vivid rust orange
@@ -369,7 +375,10 @@ def main():
     num_samples = 64
     has_aniso = os.path.exists(os.path.join(distilled_dir, "aniso_flow_samples.npy"))
     
-    all_dev_names = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E"]
+    from core.material_library import dev_names as _lib_dev_names, distilled_library, dev16, GMR_DEV_NAMES, OGDEN_NAMES
+    dev_library = distilled_library(distilled_dir)
+    all_dev_names = list(_lib_dev_names(dev_library))          # columns of dev_flow_samples, in order
+    dev16_names = GMR_DEV_NAMES + OGDEN_NAMES
     all_vol_names = ["D1", "D2", "D3"]
     all_aniso_names = ["C42", "C43", "C44", "C62", "C63", "C64"]
     
@@ -379,8 +388,7 @@ def main():
         aniso_raw = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy")) if has_aniso else None
         
         # Pad filtered-out parameters with 0.0
-        dev_samples = np.zeros((min(num_samples, dev_raw.shape[0]), 10))
-        dev_samples[:, :dev_raw.shape[1]] = dev_raw[:num_samples, :10]
+        dev_samples = dev16(dev_raw[:num_samples], dev_library)       # [GMR 10 | Ogden 6]
         
         vol_samples = np.zeros((min(num_samples, vol_raw.shape[0]), 3))
         vol_samples[:, :vol_raw.shape[1]] = vol_raw[:num_samples, :3]
@@ -417,16 +425,27 @@ def main():
             return (C42 * I4_m1**2 + C43 * I4_m1**3 + C44 * I4_m1**4 +
                     C62 * I6_m1**2 + C63 * I6_m1**3 + C64 * I6_m1**4)
 
+        def _ogden_split(theta_dev, F_chunk):
+            """Energy and Piola stress of the Ogden block (dev columns 10..15); zero for polynomial-only libraries."""
+            if len(theta_dev) < 16:
+                return 0.0, 0.0
+            from core.ogden import ogden_dev_energy_jax
+            og = jnp.asarray(theta_dev)[10:16]
+            e = lambda f: ogden_dev_energy_jax(f, og[0::2], og[1::2])
+            return jax.vmap(e)(F_chunk), jax.vmap(jax.grad(e))(F_chunk)
+
         def get_distilled_energy_stress_split(theta_dev, theta_vol, F_chunk):
+            og_psi, og_p = _ogden_split(theta_dev, F_chunk)
             dev_theta = list(theta_dev) + [0.0] * max(0, 10 - len(theta_dev))
             vol_theta = list(theta_vol) + [0.0] * max(0, 3 - len(theta_vol))
             mat_dev = get_material("gmr", dev_params=dev_theta[:10], vol_params=[0.0, 0.0, 0.0], jit_P=False)
             mat_vol = get_material("gmr", dev_params=[0.0]*10, vol_params=vol_theta[:3], jit_P=False)
-            s_psi = jax.vmap(mat_dev.psi)(F_chunk) + jax.vmap(mat_vol.psi)(F_chunk)
-            s_p = jax.vmap(mat_dev.P)(F_chunk) + jax.vmap(mat_vol.P)(F_chunk)
+            s_psi = jax.vmap(mat_dev.psi)(F_chunk) + jax.vmap(mat_vol.psi)(F_chunk) + og_psi
+            s_p = jax.vmap(mat_dev.P)(F_chunk) + jax.vmap(mat_vol.P)(F_chunk) + og_p
             return s_psi, s_p
 
         def get_distilled_energy_stress_split_3(theta_dev, theta_vol, theta_aniso, F_chunk):
+            og_psi, og_p = _ogden_split(theta_dev, F_chunk)
             dev_theta = list(theta_dev) + [0.0] * max(0, 10 - len(theta_dev))
             vol_theta = list(theta_vol) + [0.0] * max(0, 3 - len(theta_vol))
             mat_dev = get_material("gmr", dev_params=dev_theta[:10], vol_params=[0.0, 0.0, 0.0], jit_P=False)
@@ -434,8 +453,8 @@ def main():
             p_aniso_single = jax.grad(lambda f: psi_aniso_single(theta_aniso, f))
             s_psi_aniso = jax.vmap(lambda f: psi_aniso_single(theta_aniso, f))(F_chunk)
             s_p_aniso = jax.vmap(p_aniso_single)(F_chunk)
-            s_psi = jax.vmap(mat_dev.psi)(F_chunk) + jax.vmap(mat_vol.psi)(F_chunk) + s_psi_aniso
-            s_p = jax.vmap(mat_dev.P)(F_chunk) + jax.vmap(mat_vol.P)(F_chunk) + s_p_aniso
+            s_psi = jax.vmap(mat_dev.psi)(F_chunk) + jax.vmap(mat_vol.psi)(F_chunk) + s_psi_aniso + og_psi
+            s_p = jax.vmap(mat_dev.P)(F_chunk) + jax.vmap(mat_vol.P)(F_chunk) + s_p_aniso + og_p
             return s_psi, s_p
             
         dist_psi_samples = []
@@ -478,7 +497,9 @@ def main():
     
     # Violin data
     if is_split:
-        dev = np.load(os.path.join(distilled_dir, "dev_flow_samples.npy"))
+        from core.material_library import sort_ogden_terms
+        # Ogden terms are interchangeable: shown ordered by decreasing alpha (inactive terms last)
+        dev = sort_ogden_terms(np.load(os.path.join(distilled_dir, "dev_flow_samples.npy")), dev_library)
         vol = np.load(os.path.join(distilled_dir, "vol_flow_samples.npy"))
         aniso = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy")) if has_aniso else None
         
@@ -512,19 +533,17 @@ def main():
             active_params_k = sorted_params[:k]
             
             # Construct mean parameters
-            theta_dev = np.zeros(10)
+            theta_dev = np.zeros(16)
             theta_vol = np.zeros(3)
             theta_aniso = np.zeros(6)
             
             for p in active_params_k:
-                clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+                clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "").replace("\\", "")
                 if clean_p in df.columns:
                     mean_val = float(df[clean_p].values.mean())
                     if param_types.get(p) == "dev":
-                        if clean_p in all_dev_names:
-                            idx = all_dev_names.index(clean_p)
-                            if idx < 10:
-                                theta_dev[idx] = mean_val
+                        if clean_p in dev16_names:
+                            theta_dev[dev16_names.index(clean_p)] = mean_val
                     elif param_types.get(p) == "vol":
                         if clean_p in all_vol_names:
                             idx = all_vol_names.index(clean_p)
@@ -570,6 +589,11 @@ def main():
     if hasattr(true_model, "aniso_params") and true_model.aniso_params is not None:
         for name, val in zip(all_aniso_names, true_model.aniso_params):
             if abs(val) > 1e-12:
+                true_params_set.add(name)
+                true_val_dict[name] = float(val)
+    if hasattr(true_model, "mu_params") and hasattr(true_model, "alpha_params"):     # Ogden true material
+        for k, (mu_k, a_k) in enumerate(zip(true_model.mu_params, true_model.alpha_params)):
+            for name, val in ((f"mu{k + 1}", mu_k), (f"alpha{k + 1}", a_k)):
                 true_params_set.add(name)
                 true_val_dict[name] = float(val)
 
@@ -982,7 +1006,7 @@ def main():
                 if disabled is not None:
                     for idx in (disabled if isinstance(disabled, list) else [disabled]):
                         if idx < len(names_list):
-                            disabled_params_names.add(names_list[idx].replace("$", "").replace("{", "").replace("}", "").replace("_", ""))
+                            disabled_params_names.add(names_list[idx].replace("$", "").replace("{", "").replace("}", "").replace("_", "").replace("\\", ""))
     except Exception:
         pass
 
@@ -1039,14 +1063,14 @@ def main():
     max_active_val = 0.0
     for i, p in enumerate(sorted_params):
         if sorted_tot_means[i] > args.sobol_threshold:
-            clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+            clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "").replace("\\", "")
             d_p = df[clean_p].values
             max_active_val = max(max_active_val, float(np.percentile(d_p, 99.0)), float(true_val_dict.get(clean_p, 0.0)))
     xlim_upper = min(2.05, max(1.15, np.ceil((max_active_val + 0.08) * 10.0) / 10.0))
 
     for i, p in enumerate(sorted_params):
         y_i = y_indices[i]
-        clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+        clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "").replace("\\", "")
         val = float(sorted_tot_means[i])
         is_active = val > args.sobol_threshold
         is_true = clean_p in true_params_set
@@ -1261,14 +1285,14 @@ def main():
     max_active_val = 0.0
     for i, p in enumerate(sorted_params):
         if sorted_tot_means[i] > args.sobol_threshold:
-            clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+            clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "").replace("\\", "")
             d_p = df[clean_p].values
             max_active_val = max(max_active_val, float(np.percentile(d_p, 99.0)), float(true_val_dict.get(clean_p, 0.0)))
     xlim_upper = min(2.05, max(1.15, np.ceil((max_active_val + 0.08) * 10.0) / 10.0))
 
     for i, p in enumerate(sorted_params):
         y_i = y_indices[i]
-        clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+        clean_p = p.replace("$", "").replace("{", "").replace("}", "").replace("_", "").replace("\\", "")
         val = float(sorted_tot_means[i])
         is_active = val > args.sobol_threshold
         is_true = clean_p in true_params_set
@@ -1331,7 +1355,7 @@ def main():
             tick_label.set_weight('bold')
             pt = param_types.get(txt)
             if pt is None:
-                clean_txt = txt.replace("$", "").replace("{", "").replace("}", "").replace("_", "")
+                clean_txt = txt.replace("$", "").replace("{", "").replace("}", "").replace("_", "").replace("\\", "")
                 pt = "vol" if clean_txt.startswith("D") else "dev"
             circle_color = "#D55E00" if pt == "vol" else "#0072B2"
             tick_label.set_bbox(dict(boxstyle="round,pad=0.18,rounding_size=0.25", facecolor='none', edgecolor=circle_color, lw=1.1))

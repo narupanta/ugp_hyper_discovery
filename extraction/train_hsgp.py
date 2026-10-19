@@ -91,6 +91,11 @@ def external_work_density(prep, node_type, last_step):
     nt = np.asarray(node_type)
     ux = u[:, nt[:, 3] == 1, 0].mean(axis=1) if np.any(nt[:, 3] == 1) else np.zeros(len(u))
     uy = u[:, nt[:, 4] == 1, 1].mean(axis=1) if np.any(nt[:, 4] == 1) else np.zeros(len(u))
+    # the reaction side may move too (e.g. a DIC region of interest cut at both ends): use the relative displacement
+    if np.any(nt[:, 1] == 1):
+        ux = ux - u[:, nt[:, 1] == 1, 0].mean(axis=1)
+    if np.any(nt[:, 2] == 1):
+        uy = uy - u[:, nt[:, 2] == 1, 1].mean(axis=1)
     dW = 0.5 * (R[1:, 0] + R[:-1, 0]) * np.diff(ux) + 0.5 * (R[1:, 1] + R[:-1, 1]) * np.diff(uy)
     e = float(np.sum(dW)) / area
     return e if np.isfinite(e) and e > 0 else 1.0
@@ -172,6 +177,19 @@ def main():
     mat = get_material(rec.get("material_model_name", "isihara"), dev_params=mat_p.get("dev_params"),
                        vol_params=mat_p.get("vol_params")) if has_truth else None
     F_all = load_f3x3_from_dataset(prep, material_model=mat)                       # (n_steps, C, 3, 3) observed
+    # incompressible plane stress (recipe or dataset): F33 = 1/det F_2D inside the model, no volumetric part
+    ps_mode = str(rec.get("plane_stress_mode", prep.get("plane_stress_mode", "")) or "")
+    incompressible_ps = str(prep.get("stress_mode", rec.get("stress_mode", ""))) == "plane_stress" and ps_mode == "incompressible"
+    # reaction components with a load cell (e.g. [0] for a uniaxial machine): the others get no weight in the likelihood
+    sigma_R_steps = np.array(prep["load_noise_std_steps"], dtype=float)
+    if rec.get("reaction_components") is not None:
+        unmeasured = [i for i in range(sigma_R_steps.shape[1]) if i not in [int(c) for c in rec["reaction_components"]]]
+        sigma_R_steps[:, unmeasured] = 1e12
+    if rec.get("reaction_noise_rel") is not None:      # load-cell noise relative to the reading (+ optional floor)
+        R_abs = np.abs(np.asarray(prep["reaction_forces"], dtype=float))
+        rel = np.maximum(float(rec["reaction_noise_rel"]) * R_abs, float(rec.get("reaction_noise_floor", 0.0)))
+        meas = [int(c) for c in rec.get("reaction_components", range(sigma_R_steps.shape[1]))]
+        sigma_R_steps[:, meas] = rel[:, meas]
     energy_scale = external_work_density(prep, prep["node_type"], max(train_steps))
     lin_prior_scale = float(rec.get("linear_elastic_prior_scale", 100.0 * energy_scale))
     disp_noise = float(rec.get("disp_noise", prep.get("disp_noise", 0.0)))
@@ -182,7 +200,7 @@ def main():
         t0 = time.time()
         model, hist = fit_hsgp(
             F_all[jnp.array(train_steps)], np.asarray(prep["reaction_forces"])[train_steps],
-            np.asarray(prep["load_noise_std_steps"])[train_steps], prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"],
+            sigma_R_steps[train_steps], prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"],
             energy_scale=energy_scale, lin_prior_scale=lin_prior_scale,
             num_basis_dev=opt["hsgp_num_basis_dev"], num_basis_vol=opt["hsgp_num_basis_vol"], box_factor=opt["hsgp_box_factor"],
             amplitude_prior_scale=opt["hsgp_amplitude_prior_scale"], lengthscale_prior_scale=opt["hsgp_lengthscale_prior_scale"],
@@ -195,7 +213,7 @@ def main():
             adaptive=bool(opt["hsgp_adaptive"]), hyper_iters_per_stage=int(opt["hsgp_hyper_iters_per_stage"]),
             ls_floor_fraction=float(opt["hsgp_ls_floor_fraction"]),
             tol_intermediate=float(opt["hsgp_tol_intermediate"]) or None, hyper_delay=int(opt["hsgp_hyper_delay"]),
-            cap_accept_tol=float(opt["hsgp_cap_accept_tol"]))
+            cap_accept_tol=float(opt["hsgp_cap_accept_tol"]), incompressible_plane_stress=incompressible_ps)
         fit_time = time.time() - t0
         model.save(post_path)
         # adaptive continuation may stop early: the posterior is then conditioned on fewer steps, and the teacher must
