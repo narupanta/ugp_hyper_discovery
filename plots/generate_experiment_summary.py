@@ -495,174 +495,182 @@ def clean_param_name(raw):
     return raw.replace('$', '').replace('{', '').replace('}', '').replace('_', '')
 
 
-def generate_confusion_matrix_plot(ranked_seeds, exp_dir, config):
-    """Plots active term selection and Sobol total-order sensitivity heatmap across seeds,
-    matching the format of confusion_matrix_parameters.pdf."""
+def param_tex(p):
+    """LaTeX label of a candidate parameter: C10 -> $C_{10}$, D2 -> $D_{2}$, mu1 -> $\\mu_{1}$, alpha1 -> $\\alpha_{1}$."""
+    for greek in ("mu", "alpha"):
+        if p.startswith(greek):
+            return rf"$\{greek}_{{{p[len(greek):]}}}$"
+    return f"${p[0]}_{{{p[1:]}}}$" if len(p) > 1 else f"${p}$"
+
+
+def heatmap_rows(config):
+    """Rows of the parameter heatmaps: GMR deviatoric terms, then the Ogden terms (only when the distillation library
+    contains them), then the volumetric terms, so the dashed line separates deviatoric from volumetric candidates."""
+    dist_model = str(config.get("distilled_material_model", "gmr")).lower()
+    gmr_rows = [p for p in ALL_CANDIDATE_PARAMS if p.startswith("C") or p == "E"]
+    ogden_rows = OGDEN_CANDIDATE_PARAMS if "ogden" in dist_model else []
+    if dist_model.startswith("ogden"):
+        gmr_rows = []
+    vol_rows = [] if dist_model.endswith("_dev") else ["D1", "D2", "D3"]
+    return gmr_rows + ogden_rows, vol_rows
+
+
+def load_seed_sobol(s_path):
+    """Mean total-order Sobol index of every distilled parameter of one seed (dev and vol sensitivity CSVs)."""
     import csv
-    plots_dir = os.path.join(exp_dir, "plots")
+    seed_sobol = {}
+    for comp in ("dev", "vol"):
+        for f_path in [os.path.join(s_path, "distilled", "output", f"{comp}_sensitivities", "total_sobol_indices_statistics_output_0.csv"),
+                       os.path.join(s_path, "distilled", f"{comp}_sensitivities", "total_sobol_indices_statistics_output_0.csv"),
+                       os.path.join(s_path, "output", f"{comp}_sensitivities", "total_sobol_indices_statistics_output_0.csv")]:
+            if os.path.exists(f_path):
+                with open(f_path, "r") as f:
+                    reader = list(csv.reader(f))
+                if len(reader) >= 2:
+                    for h, v in zip(reader[0][1:], reader[1][1:]):
+                        try:
+                            seed_sobol[clean_param_name(h).replace("\\", "")] = float(v)
+                        except ValueError:
+                            pass
+                break
+    return seed_sobol
+
+
+def _fmt_cell(v):
+    if abs(v) >= 0.1:
+        return f"{v:.2f}"
+    if abs(v) >= 0.001:
+        return f"{v:.3f}"
+    return "<0.001"
+
+
+def _draw_parameter_heatmap(sorted_seeds, config, values, intensities, out_name, cb_dev_label, cb_vol_label,
+                            true_column=None, cb_ticks=None):
+    """Shared drawing of the seed x parameter heatmaps. values / intensities: dict param -> list over seeds (None = term
+    pruned in that seed). true_column: dict param -> ground-truth string, drawn as an extra left column."""
+    plots_dir = os.path.join(config["_exp_dir"], "plots")
     os.makedirs(plots_dir, exist_ok=True)
-
-    true_params_info, true_active = get_true_model_info(config)
-
-    # Sort seeds for x-axis: sort by seed number for clean index progression, or use ranked_seeds
-    # generate_summary_tables_and_plots sorts seeds numerically by seed index:
-    sorted_seeds = sorted(ranked_seeds, key=lambda x: x["seed"])
-
-    # Load Sobol data for each seed
-    sobol_data = []
-    for s in sorted_seeds:
-        seed_sobol = {}
-        s_path = s["path"]
-        # Look for dev sensitivities
-        dev_candidates = [
-            os.path.join(s_path, "distilled", "output", "dev_sensitivities", "total_sobol_indices_statistics_output_0.csv"),
-            os.path.join(s_path, "distilled", "dev_sensitivities", "total_sobol_indices_statistics_output_0.csv"),
-            os.path.join(s_path, "output", "dev_sensitivities", "total_sobol_indices_statistics_output_0.csv"),
-        ]
-        for dev_f in dev_candidates:
-            if os.path.exists(dev_f):
-                with open(dev_f, 'r') as f:
-                    reader = list(csv.reader(f))
-                    if len(reader) >= 2:
-                        header = reader[0]
-                        mean_row = reader[1]
-                        for h, v in zip(header[1:], mean_row[1:]):
-                            p_name = clean_param_name(h)
-                            try:
-                                seed_sobol[p_name] = float(v)
-                            except ValueError:
-                                pass
-                break
-
-        # Look for vol sensitivities
-        vol_candidates = [
-            os.path.join(s_path, "distilled", "output", "vol_sensitivities", "total_sobol_indices_statistics_output_0.csv"),
-            os.path.join(s_path, "distilled", "vol_sensitivities", "total_sobol_indices_statistics_output_0.csv"),
-            os.path.join(s_path, "output", "vol_sensitivities", "total_sobol_indices_statistics_output_0.csv"),
-        ]
-        for vol_f in vol_candidates:
-            if os.path.exists(vol_f):
-                with open(vol_f, 'r') as f:
-                    reader = list(csv.reader(f))
-                    if len(reader) >= 2:
-                        header = reader[0]
-                        mean_row = reader[1]
-                        for h, v in zip(header[1:], mean_row[1:]):
-                            p_name = clean_param_name(h)
-                            try:
-                                seed_sobol[p_name] = float(v)
-                            except ValueError:
-                                pass
-                break
-
-        sobol_data.append(seed_sobol)
-
-    param_labels = [f"${p[0]}_{{{p[1:]}}}$" if len(p) > 1 else f"${p}$" for p in ALL_CANDIDATE_PARAMS]
-    dev_params = set([p for p in ALL_CANDIDATE_PARAMS if p.startswith("C") or p == "E"])
-    vol_params = set([p for p in ALL_CANDIDATE_PARAMS if p.startswith("D")])
-
-    # Figure dimensions scaled nicely with seed count
+    _, true_active = get_true_model_info(config)
+    dev_rows, vol_rows = heatmap_rows(config)
+    rows = dev_rows + vol_rows
     n_seeds = len(sorted_seeds)
-    fig_w = max(7.0, min(14.0, 0.45 * n_seeds + 4.5))
-    fig, ax = plt.subplots(figsize=(fig_w, 8.5), dpi=300)
+    off = 1 if true_column is not None else 0
+    n_cols = n_seeds + off
 
-    # RGBA Matrix
-    rgba_matrix = np.ones((len(ALL_CANDIDATE_PARAMS), n_seeds, 4))
-    rgba_matrix[:, :, :3] = 0.985  # light background for inactive cells
+    fig_w = max(7.0, min(15.0, 0.45 * n_cols + 4.5))
+    fig, ax = plt.subplots(figsize=(fig_w, max(5.0, 0.42 * len(rows) + 2.0)), dpi=300)
+    rgba = np.ones((len(rows), n_cols, 4))
+    rgba[:, :, :3] = 0.985
 
-    cmap_dev = plt.cm.Blues
-    cmap_vol = plt.cm.Oranges
+    def color(val, is_dev):
+        val = max(1e-5, min(1.0, val))
+        return (plt.cm.Blues if is_dev else plt.cm.Oranges)(0.12 + 0.46 * val ** 0.35)
 
-    def get_color_intensity(val, is_dev=True):
-        val_clamped = max(1e-5, min(1.0, val))
-        intensity = 0.12 + 0.46 * (val_clamped ** 0.35)
-        cmap = cmap_dev if is_dev else cmap_vol
-        return cmap(intensity)
+    for i, p in enumerate(rows):
+        is_dev = p in dev_rows
+        if true_column is not None:
+            t = true_column.get(p, "-")
+            rgba[i, 0, :3] = 0.93
+            ax.text(0, i, t if t != "-" else "·", ha="center", va="center", fontsize=7.5,
+                    fontweight="bold" if p in true_active else "normal", color="#111111" if t != "-" else "#bbbbbb")
+        for j in range(n_seeds):
+            v, c = values[p][j], intensities[p][j]
+            if v is None:
+                ax.text(j + off, i, "·", ha="center", va="center", color="#cccccc", fontsize=9)
+                continue
+            rgba[i, j + off] = color(c, is_dev)
+            ax.text(j + off, i, _fmt_cell(v), ha="center", va="center", fontsize=7.5,
+                    fontweight="bold" if p in true_active else "normal", color="#111111")
 
-    for j, s in enumerate(sorted_seeds):
-        terms = set(s["metrics"].get("model_structure", {}).keys())
-        seed_s = sobol_data[j]
-
-        for i, p in enumerate(ALL_CANDIDATE_PARAMS):
-            if p in terms:
-                sens = seed_s.get(p, 0.0)
-                is_dev = p in dev_params
-                color = get_color_intensity(sens, is_dev=is_dev)
-                rgba_matrix[i, j] = color
-
-                if sens >= 0.1:
-                    txt = f"{sens:.2f}"
-                elif sens >= 0.001:
-                    txt = f"{sens:.3f}"
-                else:
-                    txt = "<0.001"
-
-                text_color = "#111111"
-                ax.text(j, i, txt, ha="center", va="center", fontsize=7.5,
-                        fontweight="bold" if p in true_active else "normal",
-                        color=text_color)
-            else:
-                ax.text(j, i, "·", ha="center", va="center", color="#cccccc", fontsize=9)
-
-    ax.imshow(rgba_matrix, aspect='auto')
-
-    ax.set_yticks(np.arange(len(ALL_CANDIDATE_PARAMS)))
-    ax.set_yticklabels(param_labels, fontsize=12)
-    ax.set_xticks(np.arange(n_seeds))
-    ax.set_xticklabels([f"{s['seed']}" for s in sorted_seeds], fontsize=10.5)
-
-    ax.set_xlabel("Random Seed Index", fontsize=12.5, labelpad=8, fontweight='bold')
-    ax.set_ylabel("Candidate Constitutive Parameters", fontsize=12.5, labelpad=8, fontweight='bold')
-
-    # Highlight ground truth active parameters with circle
-    for tick_idx, p in enumerate(ALL_CANDIDATE_PARAMS):
+    ax.imshow(rgba, aspect="auto")
+    ax.set_yticks(np.arange(len(rows)))
+    ax.set_yticklabels([param_tex(p) for p in rows], fontsize=12)
+    ax.set_xticks(np.arange(n_cols))
+    ax.set_xticklabels((["True"] if off else []) + [f"{s['seed']}" for s in sorted_seeds], fontsize=10.5)
+    if off:
+        ax.get_xticklabels()[0].set_fontweight("bold")
+        ax.axvline(0.5, color="#555555", linewidth=1.5, alpha=0.7)
+    ax.set_xlabel("Random Seed Index", fontsize=12.5, labelpad=8, fontweight="bold")
+    ax.set_ylabel("Candidate Constitutive Parameters", fontsize=12.5, labelpad=8, fontweight="bold")
+    for k, p in enumerate(rows):
+        lab = ax.get_yticklabels()[k]
         if p in true_active:
-            ax.get_yticklabels()[tick_idx].set_color('#111111')
-            ax.get_yticklabels()[tick_idx].set_fontweight('bold')
-            ax.get_yticklabels()[tick_idx].set_bbox(dict(boxstyle="circle,pad=0.22", edgecolor="#111111", facecolor="none", linewidth=1.3))
+            lab.set_color("#111111"); lab.set_fontweight("bold")
+            lab.set_bbox(dict(boxstyle="circle,pad=0.22", edgecolor="#111111", facecolor="none", linewidth=1.3))
         else:
-            ax.get_yticklabels()[tick_idx].set_color('#333333')
+            lab.set_color("#333333")
+    ax.set_xticks(np.arange(-0.5, n_cols, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(rows), 1), minor=True)
+    ax.grid(which="minor", color="#d5d5d5", linestyle="-", linewidth=0.8)
+    ax.tick_params(which="minor", bottom=False, left=False)
+    ax.tick_params(which="major", length=0)
+    if dev_rows and vol_rows:
+        ax.axhline(len(dev_rows) - 0.5, color="#555555", linestyle="--", linewidth=1.5, alpha=0.7)
 
-    # Minor grid lines to separate cells
-    ax.set_xticks(np.arange(-0.5, n_seeds, 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, len(ALL_CANDIDATE_PARAMS), 1), minor=True)
-    ax.grid(which='minor', color='#d5d5d5', linestyle='-', linewidth=0.8)
-    ax.tick_params(which='minor', bottom=False, left=False)
-    ax.tick_params(which='major', length=0)
-
-    # Separator line between deviatoric and volumetric candidate terms
-    sep_idx = len(dev_params) - 0.5
-    ax.axhline(sep_idx, color='#555555', linestyle='--', linewidth=1.5, alpha=0.7)
-
-    # Custom Dual Colorbar / Legend
-    cax_dev = fig.add_axes([0.16, 0.045, 0.30, 0.028])
-    cax_vol = fig.add_axes([0.56, 0.045, 0.30, 0.028])
-
+    cb_ticks = cb_ticks or [0.0, 0.25, 0.5, 0.75, 1.0]
     norm = mcolors.Normalize(vmin=0, vmax=1)
-    cmap_dev_cb = mcolors.LinearSegmentedColormap.from_list('Blues_cb', [plt.cm.Blues(x) for x in np.linspace(0.0, 0.58, 256)])
-    sm_dev = plt.cm.ScalarMappable(cmap=cmap_dev_cb, norm=norm)
-    sm_dev.set_array([])
-    cb_dev = fig.colorbar(sm_dev, cax=cax_dev, orientation='horizontal')
-    cb_dev.set_label(r'Deviatoric Sensitivity $\bar{S}_\mathrm{T}$ ($C_{ij}$, $E$)', fontsize=10, fontweight='bold', color='#08519c', labelpad=5)
-    cb_dev.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
-    cb_dev.ax.tick_params(labelsize=8.5)
-
-    cmap_vol_cb = mcolors.LinearSegmentedColormap.from_list('Oranges_cb', [plt.cm.Oranges(x) for x in np.linspace(0.0, 0.58, 256)])
-    sm_vol = plt.cm.ScalarMappable(cmap=cmap_vol_cb, norm=norm)
-    sm_vol.set_array([])
-    cb_vol = fig.colorbar(sm_vol, cax=cax_vol, orientation='horizontal')
-    cb_vol.set_label(r'Volumetric Sensitivity $\bar{S}_\mathrm{T}$ ($D_i$ terms)', fontsize=10, fontweight='bold', color='#a63603', labelpad=5)
-    cb_vol.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
-    cb_vol.ax.tick_params(labelsize=8.5)
+    bars = [(cb_dev_label, plt.cm.Blues, "#08519c")] + ([(cb_vol_label, plt.cm.Oranges, "#a63603")] if vol_rows else [])
+    for k, (label, cmap, col) in enumerate(bars):
+        cax = fig.add_axes([0.16 + 0.40 * k, 0.045, 0.30, 0.028] if len(bars) == 2 else [0.33, 0.045, 0.36, 0.028])
+        cm = mcolors.LinearSegmentedColormap.from_list("cb", [cmap(0.12 + 0.46 * x ** 0.35) for x in np.linspace(0.0, 1.0, 256)])
+        sm = plt.cm.ScalarMappable(cmap=cm, norm=norm)
+        sm.set_array([])
+        cb = fig.colorbar(sm, cax=cax, orientation="horizontal")
+        cb.set_label(label, fontsize=10, fontweight="bold", color=col, labelpad=5)
+        cb.set_ticks(cb_ticks)
+        cb.ax.tick_params(labelsize=8.5)
 
     plt.subplots_adjust(bottom=0.18, top=0.97, left=0.11, right=0.97)
-
-    cm_pdf = os.path.join(plots_dir, "confusion_matrix_parameters.pdf")
-    cm_png = os.path.join(plots_dir, "confusion_matrix_parameters.png")
-    plt.savefig(cm_png, dpi=300, bbox_inches='tight')
-    plt.savefig(cm_pdf, bbox_inches='tight')
+    pdf_path = os.path.join(plots_dir, out_name)
+    plt.savefig(pdf_path.replace(".pdf", ".png"), dpi=300, bbox_inches="tight")
+    plt.savefig(pdf_path, bbox_inches="tight")
     plt.close(fig)
-    print(f"✅ Generated sensitivity-aware confusion matrix at {cm_pdf}")
+    print(f"✅ Generated {pdf_path}")
+
+
+def _seed_terms(s):
+    ms = s["metrics"].get("model_structure", {}) if isinstance(s.get("metrics"), dict) else {}
+    return {k.replace("\\", ""): v for k, v in ms.items()}
+
+
+def generate_confusion_matrix_plot(ranked_seeds, exp_dir, config):
+    """Seed x parameter heatmap of the active (unpruned) terms, coloured by the mean total-order Sobol index."""
+    sorted_seeds = sorted(ranked_seeds, key=lambda x: x["seed"])
+    dev_rows, vol_rows = heatmap_rows(config)
+    values = {p: [] for p in dev_rows + vol_rows}
+    for s in sorted_seeds:
+        terms, sob = _seed_terms(s), load_seed_sobol(s["path"])
+        for p in values:
+            values[p].append(sob.get(p, 0.0) if p in terms else None)
+    _draw_parameter_heatmap(sorted_seeds, dict(config, _exp_dir=exp_dir), values, values, "confusion_matrix_parameters.pdf",
+                            r"Deviatoric Sensitivity $\bar{S}_\mathrm{T}$", r"Volumetric Sensitivity $\bar{S}_\mathrm{T}$ ($D_i$ terms)")
+
+
+def generate_parameter_mean_matrix_plot(ranked_seeds, exp_dir, config):
+    """Seed x parameter heatmap of the posterior mean of every active (unpruned) term, with the ground truth as the
+    first column. Colour: |mean| relative to the largest |mean| (or true value) of its block (deviatoric / volumetric),
+    so spurious small terms stay pale."""
+    sorted_seeds = sorted(ranked_seeds, key=lambda x: x["seed"])
+    dev_rows, vol_rows = heatmap_rows(config)
+    true_params, _ = get_true_model_info(config)
+    if config.get("has_ground_truth", True) is False:
+        true_params = None
+    values = {p: [] for p in dev_rows + vol_rows}
+    for s in sorted_seeds:
+        terms = _seed_terms(s)
+        for p in values:
+            m = terms.get(p, {}).get("mean") if p in terms else None
+            values[p].append(None if m is None or not np.isfinite(m) else float(m))
+    intens = {}
+    for block in (dev_rows, vol_rows):
+        ref = [abs(v) for p in block for v in values[p] if v is not None]
+        if true_params:
+            ref += [abs(float(true_params[p])) for p in block if true_params.get(p, "-") != "-"]
+        scale = max(ref) if ref and max(ref) > 0 else 1.0
+        for p in block:
+            intens[p] = [None if v is None else abs(v) / scale for v in values[p]]
+    _draw_parameter_heatmap(sorted_seeds, dict(config, _exp_dir=exp_dir), values, intens, "parameter_mean_matrix.pdf",
+                            r"Deviatoric $|\bar{\theta}|$ / block max", r"Volumetric $|\bar{\theta}|$ / block max", true_column=true_params)
 
 
 def get_true_model_info(config):
@@ -674,36 +682,22 @@ def get_true_model_info(config):
     dev_p = mat_p.get("dev_params", config.get("dev_params", None))
     vol_p = mat_p.get("vol_params", config.get("vol_params", None))
 
-    if mat_model == "nh2":
-        true_params["C10"] = "0.5" if not (dev_p and len(dev_p) > 0) else f"{float(dev_p[0]):.4f}".rstrip('0').rstrip('.')
-        true_params["D1"] = "1.5" if not (vol_p and len(vol_p) > 0) else f"{float(vol_p[0]):.4f}".rstrip('0').rstrip('.')
-        true_active = {"C10", "D1"}
-    elif mat_model == "isihara":
-        true_params["C10"] = "0.5" if not (dev_p and len(dev_p) > 0) else f"{float(dev_p[0]):.4f}".rstrip('0').rstrip('.')
-        true_params["C01"] = "0.1" if not (dev_p and len(dev_p) > 1) else f"{float(dev_p[1]):.4f}".rstrip('0').rstrip('.')
-        true_params["C20"] = "0.05" if not (dev_p and len(dev_p) > 2) else f"{float(dev_p[2]):.4f}".rstrip('0').rstrip('.')
-        true_params["D1"] = "1.5" if not (vol_p and len(vol_p) > 0) else f"{float(vol_p[0]):.4f}".rstrip('0').rstrip('.')
-        true_active = {"C10", "C01", "C20", "D1"}
-    elif mat_model == "ogden":
+    if mat_model == "ogden":
         mu, al = mat_p.get("mu_params", []), mat_p.get("alpha_params", [])
         for k, (m, a) in enumerate(zip(mu, al)):
             true_params[f"mu{k + 1}"], true_params[f"alpha{k + 1}"] = f"{float(m):g}", f"{float(a):g}"
             true_active |= {f"mu{k + 1}", f"alpha{k + 1}"}
-        if vol_p and len(vol_p) > 0 and vol_p[0] != 0:
-            true_params["D1"] = f"{float(vol_p[0]):g}"
-            true_active.add("D1")
-    elif mat_model == "gentthomas":
-        true_params["C10"] = "0.5" if not (dev_p and len(dev_p) > 0) else f"{float(dev_p[0]):.4f}".rstrip('0').rstrip('.')
-        true_params["C01"] = "0.1" if not (dev_p and len(dev_p) > 1) else f"{float(dev_p[1]):.4f}".rstrip('0').rstrip('.')
-        true_params["D1"] = "1.5" if not (vol_p and len(vol_p) > 0) else f"{float(vol_p[0]):.4f}".rstrip('0').rstrip('.')
-        true_active = {"C10", "C01", "D1"}
-    else:
-        if dev_p and len(dev_p) > 0 and dev_p[0] != 0:
-            true_params["C10"] = f"{float(dev_p[0]):.4f}".rstrip('0').rstrip('.')
-            true_active.add("C10")
-        if vol_p and len(vol_p) > 0 and vol_p[0] != 0:
-            true_params["D1"] = f"{float(vol_p[0]):.4f}".rstrip('0').rstrip('.')
-            true_active.add("D1")
+    elif dev_p is not None:
+        # GMR-family truths (nh2, isihara, gentthomas, ...): dev_params follow C10, C01, C20, ..., C03, E
+        for name, v in zip(["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E"], dev_p):
+            if float(v) != 0.0:
+                true_params[name] = f"{float(v):g}"
+                true_active.add(name)
+    if vol_p is not None:
+        for name, v in zip(["D1", "D2", "D3"], vol_p):
+            if float(v) != 0.0:
+                true_params[name] = f"{float(v):g}"
+                true_active.add(name)
 
     return true_params, true_active
 
@@ -1222,6 +1216,7 @@ def main():
     # Multi-seed plots
     generate_accuracy_comparison_plot(ranked_seeds, exp_dir)
     generate_confusion_matrix_plot(ranked_seeds, exp_dir, config)
+    generate_parameter_mean_matrix_plot(ranked_seeds, exp_dir, config)
 
     # Generate Markdown summary table
     format_summary_markdown(ranked_seeds, exp_dir, config, include_conformal=args.conformal)

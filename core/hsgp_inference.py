@@ -133,6 +133,8 @@ def constrained_transform(model, cons: _Constraints, hyper, lin_scale: float, li
     Mv = _projected_sqrt(cons.A_vol, se_spectral_density(model.vol_box, hyper["vol_sig"], hyper["vol_ls"]))
     if lin_only:
         Md, Mv = 0.0 * Md, 0.0 * Mv
+    if getattr(model, "incompressible_plane_stress", False):   # J = 1: no volumetric GP
+        Mv = 0.0 * Mv
     return jax.scipy.linalg.block_diag(lin_scale * jnp.eye(model.n_lin), Md, Mv)
 
 
@@ -275,10 +277,16 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         lo_d, hi_d = bounds["dev"]
         lo_v, hi_v = bounds["vol"]
         cap = sig_centre + np.log(sigma_cap)
-        return dict(dev_sig=jnp.exp(jnp.minimum(eta["log_sig_dev"], cap)), vol_sig=jnp.exp(jnp.minimum(eta["log_sig_vol"], cap)),
-                    dev_ls=jnp.exp(lo_d + (hi_d - lo_d) * jax.nn.sigmoid(eta["raw_ls_dev"])),
-                    vol_ls=jnp.exp(lo_v + (hi_v - lo_v) * jax.nn.sigmoid(eta["raw_ls_vol"])),
-                    su_x=SIGMA_U_FLOOR + jnp.exp(eta["log_su"][0]), su_y=SIGMA_U_FLOOR + jnp.exp(eta["log_su"][1]))
+        h = dict(dev_sig=jnp.exp(jnp.minimum(eta["log_sig_dev"], cap)), vol_sig=jnp.exp(jnp.minimum(eta["log_sig_vol"], cap)),
+                 dev_ls=jnp.exp(lo_d + (hi_d - lo_d) * jax.nn.sigmoid(eta["raw_ls_dev"])),
+                 vol_ls=jnp.exp(lo_v + (hi_v - lo_v) * jax.nn.sigmoid(eta["raw_ls_vol"])),
+                 su_x=SIGMA_U_FLOOR + jnp.exp(eta["log_su"][0]), su_y=SIGMA_U_FLOOR + jnp.exp(eta["log_su"][1]))
+        if incompressible_plane_stress:
+            # J = 1: the volumetric basis has no force contribution, so the evidence is flat in its hyperparameters
+            # (they would only drift through the restarts). Fixed values here; constrained_transform switches the
+            # volumetric GP off (theta_vol = 0 exactly), and vol_sig is reported as 0.
+            h["vol_sig"], h["vol_ls"] = jnp.exp(jnp.asarray(sig_centre)), jnp.asarray(centre_v)
+        return h
 
     eta = dict(log_sig_dev=jnp.asarray(sig_centre), log_sig_vol=jnp.asarray(sig_centre),
                raw_ls_dev=to_raw(jnp.log(centre_d), *bounds["dev"]), raw_ls_vol=to_raw(jnp.log(centre_v), *bounds["vol"]),
@@ -301,8 +309,9 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             lp += -0.5 * (jnp.sum((jnp.minimum(jnp.log(h["dev_ls"]) - jnp.log(stats["ls_floor_dev"]), 0.0) / 0.1) ** 2)
                           + jnp.sum((jnp.minimum(jnp.log(h["vol_ls"]) - jnp.log(stats["ls_floor_vol"]), 0.0) / 0.1) ** 2))
         if amplitude_prior_scale > 0:
-            lp += -0.5 * (((jnp.log(h["dev_sig"]) - sig_centre) / amplitude_prior_scale) ** 2
-                          + ((jnp.log(h["vol_sig"]) - sig_centre) / amplitude_prior_scale) ** 2)
+            lp += -0.5 * ((jnp.log(h["dev_sig"]) - sig_centre) / amplitude_prior_scale) ** 2
+            if not incompressible_plane_stress:
+                lp += -0.5 * ((jnp.log(h["vol_sig"]) - sig_centre) / amplitude_prior_scale) ** 2
         if lengthscale_prior_scale > 0:
             lp += -0.5 * (jnp.sum(((jnp.log(h["dev_ls"]) - jnp.log(centre_d)) / lengthscale_prior_scale) ** 2)
                           + jnp.sum(((jnp.log(h["vol_ls"]) - jnp.log(centre_v)) / lengthscale_prior_scale) ** 2))
@@ -573,7 +582,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             rec = dict(iteration=it, continuation_stage=si, load_steps=[labels[t] for t in active], stage="linear" if lin_only else "full", log_evidence=float(log_z), force_change=change, eiv_damping=damping,
                        relaxation=relax, mu=float(new_mean[0]), kappa=float(new_mean[1]),
                        sigma_u_x=float(h["su_x"]), sigma_u_y=float(h["su_y"]),
-                       dev_sig=float(h["dev_sig"]), vol_sig=float(h["vol_sig"]),
+                       dev_sig=float(h["dev_sig"]), vol_sig=0.0 if incompressible_plane_stress else float(h["vol_sig"]),
                        dev_ls=np.asarray(h["dev_ls"]).tolist(), vol_ls=np.asarray(h["vol_ls"]).tolist(), time=time.time() - t0)
             history.append(rec)
             if verbose:
@@ -697,6 +706,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     valid = sorted(ad["D"]) if adaptive else all_idx
     h = unpack(eta)
     hyper = {k: np.asarray(v) for k, v in h.items() if k not in ("su_x", "su_y")}
+    if incompressible_plane_stress:
+        hyper["vol_sig"] = np.asarray(0.0)          # volumetric GP switched off (theta_vol = 0)
     info = dict(prior_mean=prior_mean, eiv_damping=float(eiv_damping), eiv_damping_decay=float(eiv_damping_decay), envelope=model.envelope, likelihood=likelihood, sigma_u_known=sigma_u_known,
                 reaction_weight=reaction_weight, warp=warp, continuation=continuation, continuation_stages=[[labels[t] for t in a] for a in stages],
                 adaptive=adaptive, valid_load_steps=[labels[t] for t in valid], truncated=valid != all_idx,
