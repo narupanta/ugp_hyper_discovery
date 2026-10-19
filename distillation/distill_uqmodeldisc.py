@@ -346,14 +346,13 @@ OGDEN_PARAM_NAMES = ("$\\mu_{1}$", "$\\alpha_{1}$", "$\\mu_{2}$", "$\\alpha_{2}$
 class PyTorchGMRDevModel(BasePyTorchMaterialModel):
     """
     Deviatoric candidate library. library = "gmr": polynomial terms in (I1_bar - 3, I2_bar - 3) (+ E log(I2_bar/3));
-    "ogden": three Ogden terms mu_k / alpha_k (sum_i lam_bar_i^alpha_k - 3) (parameters mu_1, alpha_1, ..., alpha_3);
-    "gmr_ogden": both, polynomial terms first. All flow outputs are positive (exponential output of the flow).
-    Ogden terms: the flow gives a positive magnitude mu~_k and a positive a_k, mapped to a real exponent
-    alpha_k = ln a_k (a_k = exp(z) of the flow's unconstrained z, so alpha_k = z takes either sign; a pruned a_k = 0
-    gives alpha_k = 0, a vanishing term). The term uses mu_k = sign(alpha_k) mu~_k, so mu_k alpha_k > 0 (positive
-    shear contribution mu_k alpha_k / 2, the stability condition of each term) for either sign of the exponent.
-    Saved samples hold the physical (mu_k, alpha_k) (physical_samples). The Ogden terms are interchangeable (no
-    ordering is imposed).
+    "ogden": three Ogden terms 2 mu_k / alpha_k^2 (sum_i lam_bar_i^alpha_k - 3) (standard convention, core/ogden.py;
+    parameters mu_1, alpha_1, ..., alpha_3); "gmr_ogden": both, polynomial terms first. All flow outputs are positive
+    (exponential output of the flow): the coefficients and mu_k > 0 (mu_k is the term's shear modulus contribution, so
+    every term is stable). The exponent is real: alpha_k = ln a_k from the flow's positive output a_k (a_k = exp(z) of
+    the flow's unconstrained z, so alpha_k = z takes either sign; a pruned a_k = 0 gives alpha_k = 0, the finite limit
+    mu_k sum_i ln^2 lam_bar_i). Saved samples hold the physical (mu_k, alpha_k) (physical_samples). The Ogden terms are
+    interchangeable (no ordering is imposed).
     """
     def __init__(self, num_points, device, include_log_terms=False, distill_target="sef", library="gmr"):
         super().__init__()
@@ -396,19 +395,16 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
     def parameter_scales(self, val): self._parameter_scales = val
     @staticmethod
     def physical_samples(samples, names):
-        """Flow samples (mu~_k > 0, a_k >= 0) -> physical (mu_k = sign(alpha_k) mu~_k, alpha_k = ln a_k; a_k = 0 -> 0),
-        columns by name (an Ogden exponent without its mu column is converted too)."""
+        """Flow samples (mu_k > 0, a_k >= 0) -> physical (mu_k, alpha_k = ln a_k; a_k = 0 -> 0), columns by name."""
         out = np.array(samples, dtype=float, copy=True)
         names = list(names)
         for k in range(1, 4):
-            mu_n, al_n = f"$\\mu_{{{k}}}$", f"$\\alpha_{{{k}}}$"
+            al_n = f"$\\alpha_{{{k}}}$"
             if al_n not in names:
                 continue
             a = out[:, names.index(al_n)]
             alpha = np.where(a > 0, np.log(np.where(a > 0, a, 1.0)), 0.0)
             out[:, names.index(al_n)] = alpha
-            if mu_n in names:
-                out[:, names.index(mu_n)] *= np.sign(alpha)
         return out
 
     def __call__(self, inputs, test_cases, parameters, validate_args=False):
@@ -419,7 +415,7 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
             og = full_parameters[self._num_poly:]
             a = og[1::2]
             alphas = torch.where(a > 0, torch.log(torch.where(a > 0, a, torch.ones_like(a))), torch.zeros_like(a))
-            W_ogden = ogden_dev_energy_torch(inputs, torch.sign(alphas) * og[0::2], alphas)   # mu = sign(alpha) mu~
+            W_ogden = ogden_dev_energy_torch(inputs, og[0::2], alphas)
             if not self.use_poly:
                 return W_ogden.unsqueeze(-1)
             full_parameters = full_parameters[:self._num_poly]

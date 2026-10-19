@@ -159,6 +159,8 @@ def main():
         target_load=float(target_load), asym_factor=float(asym_factor), n_steps=int(num_steps),
         prescribe_right=bool(prescribe_right), clamp_top_x=bool(clamp_top_x_val),
     )
+    if material_model_name == "ogden":   # energy convention 2 mu/alpha^2 (core/ogden.py); older mu/alpha datasets differ
+        config["ogden_convention"] = "2mu_over_alpha2"
     clean_path = clean_dataset_path(config, root=args.clean_dir)
     spec = make_dataset_spec(clean_path, args.seed, disp_noise, load_noise)
 
