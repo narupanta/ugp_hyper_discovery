@@ -418,11 +418,11 @@ if __name__ == "__main__" :
                 w_aniso += aniso_p[3] * I6_m1**2 + aniso_p[4] * I6_m1**3 + aniso_p[5] * I6_m1**4
 
         w_ogden = 0.0
-    if p.shape[-1] >= 25:          # Ogden block of the full vector (core/material_library.py)
-        from core.ogden import ogden_dev_energy_jax
-        w_ogden = ogden_dev_energy_jax(F_3d, p[19:25][0::2], p[19:25][1::2])
+        if p.shape[-1] >= 25:          # Ogden block of the full vector (core/material_library.py)
+            from core.ogden import ogden_dev_energy_jax
+            w_ogden = ogden_dev_energy_jax(F_3d, p[19:25][0::2], p[19:25][1::2])
 
-    return w_dev + w_vol + w_aniso + w_ogden
+        return w_dev + w_vol + w_aniso + w_ogden
 
     def p_3d_distilled(F_3d, p, a0=None, a1=None):
         return jax.grad(eval_psi_3d, argnums=0)(F_3d, p, a0, a1)
