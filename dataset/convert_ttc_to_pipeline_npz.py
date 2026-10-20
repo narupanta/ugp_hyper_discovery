@@ -1,6 +1,12 @@
 """
 dataset/convert_ttc_to_pipeline_npz.py: Convert experimental TTc full-field DIC dataset
 into the standardized pipeline .npz archive format for unsupervised GP discovery and FEM simulation.
+
+Only measured quantities (nodal displacements, the in-plane F from them, reactions) and the kinematic assumption are
+stored; the out-of-plane stretch is never taken from an assumed material:
+  --assumption incompressible_plane_stress: stress_mode plane_stress, plane_stress_mode incompressible,
+                                            lambda3 = 1 / det(F_2D) (J = 1; the comparison with the literature fit)
+  --assumption plane_strain:                stress_mode plane_strain, F33 = 1 (compressible; volumetric part active)
 """
 
 import os
@@ -14,8 +20,6 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from core.utils import deformation_gradient_element
-from core.fem_engine import make_plane_stress_piola
-from core.material_models import get_material
 
 
 def parse_args():
@@ -34,18 +38,11 @@ def parse_args():
         help="List of load step numbers to include (e.g., 6000 or 1000 3000 6000)"
     )
     parser.add_argument(
-        "--plane_stress_mode",
+        "--assumption",
         type=str,
-        default="compressible",
-        choices=["compressible", "incompressible"],
-        help="Plane stress formulation: 'compressible' (solves P_33=0) or 'incompressible' (lambda3 = 1 / det(F_2D))"
-    )
-    parser.add_argument(
-        "--compressible_model",
-        type=str,
-        default="gentthomas",
-        choices=["gentthomas", "neohookean"],
-        help="Material model for solving P_33=0 in compressible plane stress"
+        required=True,
+        choices=["incompressible_plane_stress", "plane_strain"],
+        help="Kinematic assumption: incompressible plane stress (lambda3 = 1/det F_2D) or plane strain (F33 = 1)"
     )
     parser.add_argument(
         "--out_dir",
@@ -57,7 +54,7 @@ def parse_args():
         "--out_name",
         type=str,
         default="",
-        help="Output filename (defaults to ttc_step_<steps>.npz)"
+        help="Output filename (defaults to ttc_<n>_steps_<assumption>.npz)"
     )
     parser.add_argument(
         "--mesh_out",
@@ -73,8 +70,7 @@ def convert_dataset(
     steps: list,
     out_path: str,
     mesh_out: str,
-    plane_stress_mode: str = "compressible",
-    compressible_model: str = "gentthomas"
+    assumption: str,
 ):
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     if mesh_out:
@@ -82,23 +78,7 @@ def convert_dataset(
 
     print(f"[CONVERT] Converting TTc experimental data from {exp_dir}")
     print(f"[CONVERT] Target load steps: {steps}")
-    print(f"[CONVERT] Plane stress mode: {plane_stress_mode} (model: {compressible_model if plane_stress_mode == 'compressible' else 'N/A'})")
-
-    if plane_stress_mode == "compressible":
-        if compressible_model == "gentthomas":
-            mat_model = get_material(
-                "gentthomas",
-                dev_params=[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-                vol_params=[1.5, 0.0, 0.0]
-            )
-        elif compressible_model == "neohookean":
-            mat_model = get_material("neohookean", c1=0.5, c2=1.5)
-        else:
-            raise ValueError(f"Unknown compressible model: {compressible_model}")
-        _, solve_lambda3_fn = make_plane_stress_piola(mat_model, max_iter=15)
-        solve_lambda3_vmap = jax.vmap(solve_lambda3_fn)
-    else:
-        solve_lambda3_vmap = None
+    print(f"[CONVERT] Kinematic assumption: {assumption}")
 
     # Read reference mesh from first specified step
     ref_step_dir = os.path.join(exp_dir, str(steps[0]))
@@ -158,6 +138,7 @@ def convert_dataset(
     u_list = []
     load_list = []
     reaction_forces_list = []
+    reaction_left_list = []
     F_list = []
     F_3d_list = []
     lam3_list = []
@@ -181,6 +162,7 @@ def convert_dataset(
         rx_right = float(forces[1])
         load_list.append([rx_right, 0.0])
         reaction_forces_list.append([rx_right, 0.0])
+        reaction_left_list.append(rx_left)
 
         # Deformation gradient computation
         disp_elems = jnp.array(u_step[cells])  # (n_elems, 3, 2)
@@ -189,12 +171,10 @@ def convert_dataset(
         F_list.append(f_2x2_np)
 
         det_f2d = np.linalg.det(f_2x2_np)
-        if plane_stress_mode == "compressible":
-            lam3_jax = solve_lambda3_vmap(f_2x2)
-            lam3 = np.array(lam3_jax, dtype=np.float64)
-        else:
-            det_f2d_safe = np.clip(det_f2d, 1e-6, 1e6)
-            lam3 = 1.0 / det_f2d_safe
+        if assumption == "incompressible_plane_stress":
+            lam3 = 1.0 / np.clip(det_f2d, 1e-6, 1e6)
+        else:                                            # plane strain
+            lam3 = np.ones_like(det_f2d)
         lam3_list.append(lam3)
 
         # Construct 3x3 deformation gradient
@@ -238,8 +218,10 @@ def convert_dataset(
         load_noise_std=load_noise_std,
         load_noise_std_steps=load_noise_std_steps,
         control_mode=np.array("displacement"),
-        stress_mode=np.array("plane_stress"),
-        plane_stress_mode=np.array(plane_stress_mode),
+        stress_mode=np.array("plane_stress" if assumption == "incompressible_plane_stress" else "plane_strain"),
+        plane_stress_mode=np.array("incompressible" if assumption == "incompressible_plane_stress" else ""),
+        assumption=np.array(assumption),
+        reaction_left=np.array(reaction_left_list, dtype=np.float64),
         has_ground_truth=np.array(False),
         steps=np.array(steps),
         bcx=bcx,
@@ -263,10 +245,9 @@ def convert_dataset(
 def main():
     args = parse_args()
     if not args.out_name:
-        if len(args.steps) == 1:
-            out_name = f"ttc_step_{args.steps[0]}.npz"
-        else:
-            out_name = f"ttc_{len(args.steps)}_steps.npz"
+        tag = {"incompressible_plane_stress": "ps_incomp", "plane_strain": "pstrain"}[args.assumption]
+        n = f"step_{args.steps[0]}" if len(args.steps) == 1 else f"{len(args.steps)}_steps"
+        out_name = f"ttc_{n}_{tag}.npz"
     else:
         out_name = args.out_name
     out_path = os.path.join(args.out_dir, out_name)
@@ -275,8 +256,7 @@ def main():
         args.steps,
         out_path,
         args.mesh_out,
-        plane_stress_mode=args.plane_stress_mode,
-        compressible_model=args.compressible_model
+        assumption=args.assumption,
     )
 
 
