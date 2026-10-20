@@ -1282,6 +1282,17 @@ def main():
             print(f"Error during custom parameter selection logic: {e}")
             print("Falling back to UQModelDisc default selection.")
 
+        if getattr(model, "use_ogden", False):
+            # an Ogden term is kept only as a pair: a pruned exponent (alpha = 0) would leave mu sum ln^2 lam_bar, and a
+            # pruned mu leaves a free exponent without effect
+            names_now, active_idx = list(model.parameter_names), set(model.get_active_parameter_indices())
+            for k in range(1, 4):
+                mu_n, al_n = f"$\\mu_{{{k}}}$", f"$\\alpha_{{{k}}}$"
+                if mu_n in names_now and al_n in names_now:
+                    pair = [names_now.index(mu_n), names_now.index(al_n)]
+                    if sum(i in active_idx for i in pair) == 1:
+                        model.deactivate_parameters(pair)
+                        print(f"Ogden term {k}: only one of (mu_{k}, alpha_{k}) is sensitive; pruning the whole term.")
         active_names = model.get_active_parameter_names()
         print(f"Selected sensitive parameters ({len(active_names)}): {active_names}")
         if len(active_names) == 0:
