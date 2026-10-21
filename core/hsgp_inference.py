@@ -150,6 +150,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              step_labels=None, eiv_damping: float = 0.0, eiv_damping_decay: float = 0.1,
              adaptive: bool = False, hyper_iters_per_stage: int = 0, ls_floor_fraction: float = 0.0,
              tol_intermediate: Optional[float] = None, hyper_delay: int = 0, cap_accept_tol: float = 0.0,
+             sigma_f_known: Optional[float] = None,
              hyper_steps: int = 60, verbose: bool = True, log_fn=print):
     """
     f3x3_steps: (T, C, 3, 3) observed deformation gradients of the training steps; R_obs, sigma_R: (T, 2).
@@ -171,9 +172,25 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     (mean-field) update sigma_f,d^2 = (||B_f,d m||^2 + tr(B_f,d S B_f,d^T)) / N_d, i.e. from the EXPECTED residual under the
     posterior (the ELBO optimum), and the reaction log-likelihood multiplied by reaction_weight (the old reaction_loss_weight).
     Its evidence has no maximum (theta = 0 makes the free residual exactly zero), so sigma_f is not part of MAP-II.
+    likelihood: 'residual_exact': the 'residual' likelihood (same fixed force noise, needs sigma_u_known) with the exact
+    Bayesian update. The model is linear in theta and the statistics do not depend on it, so for given hyperparameters
+    the posterior is exactly Gaussian and closed form: all training steps in one stage (no continuation), and each stage
+    (linear-elastic, then GP) is a single solve: hyperparameters optimised to convergence on the exact evidence, then
+    the closed-form posterior (no relaxation, no stability line search, no cap on the hyperparameter step). The
+    stability of the result is reported, not enforced. With prior_mean 'none' the linear-elastic stage is skipped (its
+    (mu, kappa) would be discarded by the zero-mean GP anyway).
+    Without sigma_u_known and sigma_f_known, residual_exact infers the per-direction force-residual noise sigma_f by EM:
+    sigma_f,d^2 = (||B_f,d m||^2 + tr(B_f,d S B_f,d^T)) / N_d from the exact posterior (m, S), alternated with the exact
+    posterior until both are stationary (the evidence itself is unbounded as sigma_f -> 0, see 'residual_learned').
+    Caveat: with the amplitudes on the evidence this can collapse (synthetic Isihara: sigma_f -> floor, deviatoric
+    amplitude -> 0), since a linear model of exact-zero targets can always shrink its residual; the EIV likelihood
+    has non-zero targets (-eps_bar) and a scale-invariant eps, which is what makes its noise identifiable.
+    sigma_f_known (residual likelihoods): iid noise std of the free-node force residual, set directly (force units);
+    replaces the force-equivalent noise from sigma_u_known, so no reaction-only linear-elastic material is fitted.
     warp: GP inputs log(I_bar - 2), log J (see hsgp_model); boxes, spans and lengthscales live in the warped space.
     The linear-elastic stage runs until its relative force change < lin_tol (at most lin_max iterations), then the GP
-    stage runs at most max_outer iterations. Robustness guards: amplitudes capped at sigma_cap x the prior centre, and
+    stage runs at most max_outer iterations. Robustness guards: amplitudes capped at sigma_cap x the prior centre
+    (sigma_cap <= 0: no cap), and
     each hyperparameter moves at most max_hyper_step (log units) per outer iteration.
     continuation: load-step continuation for large deformations. The steps (in the given order, smallest first) are fitted
     as cumulative sets [0, 1], [0, 1, 2], ..., [0..T-1], each stage warm-started from the previous posterior, so every
@@ -221,6 +238,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     linearisation point and the hyperparameters); default tol. The stage on all training steps always uses tol.
     Returns (HSGPHyperelasticity with the posterior, history list of dicts).
     """
+    # residual_exact without a given noise: sigma_f inferred per direction by EM (expected residual), exact posterior
+    exact_learn = likelihood == "residual_exact" and not (sigma_u_known or sigma_f_known)
     t0 = time.time()
     f3x3_steps = jnp.asarray(f3x3_steps, dtype=jnp.float64)
     cells_j, dNdX, dA = jnp.asarray(cells), jnp.asarray(dNdX), jnp.asarray(dA)
@@ -276,7 +295,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     def unpack(eta):
         lo_d, hi_d = bounds["dev"]
         lo_v, hi_v = bounds["vol"]
-        cap = sig_centre + np.log(sigma_cap)
+        cap = sig_centre + np.log(sigma_cap) if sigma_cap and sigma_cap > 0 else np.inf   # sigma_cap <= 0: no cap
         h = dict(dev_sig=jnp.exp(jnp.minimum(eta["log_sig_dev"], cap)), vol_sig=jnp.exp(jnp.minimum(eta["log_sig_vol"], cap)),
                  dev_ls=jnp.exp(lo_d + (hi_d - lo_d) * jax.nn.sigmoid(eta["raw_ls_dev"])),
                  vol_ls=jnp.exp(lo_v + (hi_v - lo_v) * jax.nn.sigmoid(eta["raw_ls_vol"])),
@@ -332,15 +351,19 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
 
     def _step_stats_res(theta_noise, f_t, R_t, w, damping):
         """Residual likelihood: free forces B_f theta ~ N(0, diag sigma_f^2), reactions B_R theta ~ N(R_obs, sigma_R^2)."""
-        psi = lambda f: model.basis(f) @ theta_noise
-        _, K = assemble_internal_force_and_tangent(psi, f_t, cells_j, n_nodes, dNdX, dA, eiv)
-        w_f = 1.0 / (sigma_u_known ** 2 * jnp.sum(K[free][:, free] ** 2, axis=1))         # force-equivalent noise
+        if sigma_f_known:                                                                  # force noise given directly
+            w_f = jnp.full(free.shape[0], 1.0 / sigma_f_known ** 2)
+        else:
+            psi = lambda f: model.basis(f) @ theta_noise
+            _, K = assemble_internal_force_and_tangent(psi, f_t, cells_j, n_nodes, dNdX, dA, eiv)
+            w_f = 1.0 / (sigma_u_known ** 2 * jnp.sum(K[free][:, free] ** 2, axis=1))     # force-equivalent noise
         B = force_fn(f_t)
         Bf = B[free]
         B_R_t = jnp.stack([B[rx].sum(0), B[ry].sum(0)])
         zero = jnp.zeros(P)
+        wr = reaction_weight * w                                                            # tempered reactions
         return dict(Gx=Bf.T @ (w_f[:, None] * Bf), Gy=jnp.zeros((P, P)), cx=zero, cy=zero, sx=0.0, sy=0.0,
-                    GR=B_R_t.T @ (w[:, None] * B_R_t), bR=B_R_t.T @ (w * R_t), logdetW_f=jnp.sum(jnp.log(w_f)))
+                    GR=B_R_t.T @ (wr[:, None] * B_R_t), bR=B_R_t.T @ (wr * R_t), logdetW_f=jnp.sum(jnp.log(w_f)))
 
     def _step_stats_res_learned(theta_noise, f_t, R_t, w, damping):
         """Residual likelihood with learned per-direction force noise: unweighted free Gram matrices per direction."""
@@ -356,7 +379,9 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         """(Re)build the jitted functions that close over the basis (it changes when the envelope is set). jax.jit
         caches compiled code per function object, so fresh wrappers are needed to force a re-trace with the new basis."""
         fn = jax.jit(lambda f: force_fn(f))
-        stats_fn = {"residual": _step_stats_res, "residual_learned": _step_stats_res_learned}.get(likelihood, _step_stats)
+        stats_fn = {"residual": _step_stats_res,
+                    "residual_exact": _step_stats_res_learned if exact_learn else _step_stats_res,
+                    "residual_learned": _step_stats_res_learned}.get(likelihood, _step_stats)
         return [fn(f3x3_steps[t]) for t in range(T)], jax.jit(lambda *a: stats_fn(*a))
 
     B_steps, step_stats = compile_basis()
@@ -377,15 +402,23 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
 
     stability_margin = make_stability_check()
 
+    stats_cache = {}
+
     def linearise(theta_mean, damping=0.0):
         """Sufficient statistics of the Gauss-Newton-linearised EIV model at theta_mean (summed over load steps), with
         EIV damping delta = damping; for the residual likelihood, of the exact linear model with the force noise from the
         tangent at theta_noise."""
         th = theta_noise if residual else theta_mean
         d = jnp.asarray(damping, dtype=jnp.float64)
-        out = [step_stats(th, f3x3_steps[t], R_obs[t], 1.0 / sigma_R[t] ** 2, d) for t in active]
-        stats = {k: sum(o[k] for o in out) for k in out[0]}
-        w_all = (reaction_weight if learned_noise else 1.0) / sigma_R[np.asarray(active)] ** 2
+        key = tuple(active)
+        if residual and key in stats_cache:     # residual statistics do not depend on theta_mean
+            stats = dict(stats_cache[key])
+        else:
+            out = [step_stats(th, f3x3_steps[t], R_obs[t], 1.0 / sigma_R[t] ** 2, d) for t in active]
+            stats = {k: sum(o[k] for o in out) for k in out[0]}
+            if residual:
+                stats_cache[key] = dict(stats)
+        w_all = (reaction_weight if (learned_noise or residual) else 1.0) / sigma_R[np.asarray(active)] ** 2
         stats.update(yWy_R=jnp.sum(w_all * R_obs[np.asarray(active)] ** 2), logdetW_R=jnp.sum(jnp.log(w_all)),
                      theta_fix=theta_fix, ls_floor_dev=ls_floor[0], ls_floor_vol=ls_floor[1])
         # square-root factors of the Gram blocks (G = R^T R, negative round-off eigenvalues clipped), so that the
@@ -395,12 +428,19 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             stats["R" + g[1:]] = jnp.sqrt(jnp.maximum(d, 0.0))[:, None] * U.T
         return stats
 
-    if likelihood not in ("eiv", "residual", "residual_learned"):
-        raise ValueError(f"likelihood must be 'eiv', 'residual' or 'residual_learned', got {likelihood!r}")
-    learned_noise = likelihood == "residual_learned"
-    if likelihood == "residual" and not sigma_u_known:
-        raise ValueError("likelihood='residual' needs sigma_u_known (displacement noise std) to set the force noise.")
-    residual = likelihood == "residual"
+    if likelihood not in ("eiv", "residual", "residual_learned", "residual_exact"):
+        raise ValueError(f"likelihood must be 'eiv', 'residual', 'residual_learned' or 'residual_exact', got {likelihood!r}")
+    learned_noise = likelihood == "residual_learned" or exact_learn
+    if likelihood == "residual" and not (sigma_u_known or sigma_f_known):
+        raise ValueError(f"likelihood={likelihood!r} needs sigma_u_known (displacement noise std) or sigma_f_known "
+                         f"(force-residual noise std) to set the force noise.")
+    residual = likelihood in ("residual", "residual_exact") and not exact_learn   # fixed force-noise weights
+    exact = likelihood == "residual_exact"
+    if exact:   # closed-form posterior: one stage, full steps, no step control (see docstring)
+        continuation, adaptive, continuation_stages = False, False, None
+        stability_search, max_hyper_step, hyper_delay, hyper_iters_per_stage = False, np.inf, 0, 0
+        hyper_steps = max(hyper_steps, 300)    # the single solve needs fully optimised hyperparameters
+    single_solve = exact and not exact_learn   # learned sigma_f: alternate exact posterior and EM noise update
 
     if prior_mean not in ("linear_elastic", "none", "linear_elastic_fixed"):
         raise ValueError(f"prior_mean must be 'linear_elastic', 'none' or 'linear_elastic_fixed', got {prior_mean!r}")
@@ -472,7 +512,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     ls_floor = stage_ls_floor(list(range(T)))
     factor, relax, prev_change, eta_prev = jnp.zeros((P, 1)), 1.0, np.inf, eta
     theta_noise = None
-    if residual:
+    if residual and not sigma_f_known:
         # force-noise material: linear-elastic (mu, kappa) from the reactions alone, R_t ~ B_R,t[:, :2] (mu, kappa)
         X = jnp.concatenate([jnp.stack([B[rx].sum(0), B[ry].sum(0)])[:, :2] for B in B_steps])          # (2T, 2)
         w = (1.0 / sigma_R ** 2).reshape(-1)
@@ -520,6 +560,9 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         stages = [adaptive_proposal()] if T > 2 else [list(range(T))]
     all_idx = list(range(T))
     it, aborted, stage_status, lin_done, si, gp_done = -1, False, [], False, -1, False
+    if exact and prior_mean == "none":
+        lin_done = True                         # zero-mean GP: the linear-elastic (mu, kappa) would be discarded
+        log_fn("[HSGP] exact update with a zero-mean prior: linear-elastic stage skipped")
     while si + 1 < len(stages):
         si += 1
         active = stages[si]
@@ -576,7 +619,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 eta = dict(eta, log_su=jnp.log(jnp.maximum(jnp.stack(su_new) - SIGMA_U_FLOOR, 1e-300)))
             change = force_change(new_mean, theta_mean)
             # Gauss-Newton relaxation: halve the step when the update grows (oscillation), recover slowly otherwise
-            relax = 1.0 if lin_only else (max(relax * 0.5, 0.125) if change > prev_change else min(relax * 1.5, 1.0))
+            relax = 1.0 if (lin_only or exact) else (max(relax * 0.5, 0.125) if change > prev_change else min(relax * 1.5, 1.0))
             prev_change = np.inf if lin_only else change
             h = unpack(eta)
             rec = dict(iteration=it, continuation_stage=si, load_steps=[labels[t] for t in active], stage="linear" if lin_only else "full", log_evidence=float(log_z), force_change=change, eiv_damping=damping,
@@ -586,8 +629,14 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                        dev_ls=np.asarray(h["dev_ls"]).tolist(), vol_ls=np.asarray(h["vol_ls"]).tolist(), time=time.time() - t0)
             history.append(rec)
             if verbose:
+                if exact_learn:
+                    noise_txt = f"sigma_f {rec['sigma_u_x']:.2e},{rec['sigma_u_y']:.2e} (EM)"
+                elif residual:   # the noise is given, not inferred
+                    noise_txt = f"sigma_f {sigma_f_known:.2e} (given)" if sigma_f_known else f"sigma_u {sigma_u_known:.2e} (given)"
+                else:
+                    noise_txt = f"sigma_u {rec['sigma_u_x']:.2e},{rec['sigma_u_y']:.2e}"
                 log_fn(f"[HSGP] s{si} it {it:2d} ({rec['stage']:6s}) logZ {rec['log_evidence']:12.2f} | dF/F {change:.2e} (relax {relax:.2f}) | "
-                       f"mu {rec['mu']:.3f} kappa {rec['kappa']:.3f} | sigma_u {rec['sigma_u_x']:.2e},{rec['sigma_u_y']:.2e} | "
+                       f"mu {rec['mu']:.3f} kappa {rec['kappa']:.3f} | {noise_txt} | "
                        f"sig dev/vol {rec['dev_sig']:.3g}/{rec['vol_sig']:.3g} | l dev {np.round(rec['dev_ls'], 3)} vol {np.round(rec['vol_ls'], 3)} "
                        f"{f'| damping {damping:.0e} ' if damping > 0 else ''}({rec['time']:.0f}s)")
             # stability line search: only blocks moves from a stable mean into instability. A mean that is already
@@ -622,9 +671,9 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             theta_mean = theta_mean + relax * (new_mean - theta_mean)
             if stage_lin:
                 n_lin += 1
-                if change < lin_tol or n_lin >= lin_max:
+                if change < lin_tol or n_lin >= lin_max or single_solve:   # exact: one closed-form solve
                     stage_lin, lin_done = False, True
-                    log_fn(f"[HSGP] linear-elastic stage {'converged' if change < lin_tol else 'stopped (lin_max)'} after {n_lin} "
+                    log_fn(f"[HSGP] linear-elastic stage {'solved (exact)' if single_solve else 'converged' if change < lin_tol else 'stopped (lin_max)'} after {n_lin} "
                            f"iterations: mu {float(theta_mean[0]):.4g}, kappa {float(theta_mean[1]):.4g}")
                     if prior_mean == "linear_elastic_fixed":
                         theta_fix = jnp.zeros(P).at[0].set(theta_mean[0]).at[1].set(theta_mean[1])
@@ -633,12 +682,13 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                         mu_e, kappa_e = float(theta_mean[0]), float(theta_mean[1])
                         model.envelope = dict(mu=mu_e, kappa=kappa_e, scale=float(energy_scale))
                         B_steps, step_stats = compile_basis()
+                        stats_cache.clear()                              # the basis changed
                         stability_margin = make_stability_check()
                         log_fn(f"[HSGP] envelope set: mu {mu_e:.4g}, kappa {kappa_e:.4g}, scale {energy_scale:.4g}")
                     ad["snapshot"] = dict(theta=theta_mean, eta=eta, factor=factor, D=[])   # rollback point before any GP stage
                 continue
             n_full += 1
-            if change < stage_tol and damping == 0.0:
+            if (change < stage_tol or single_solve) and damping == 0.0:   # exact: one closed-form solve
                 if not stability_search or stability_margin(new_mean) >= min(stability_margin(theta_mean), 0.0):
                     theta_mean = new_mean
                 converged = True
@@ -708,7 +758,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     hyper = {k: np.asarray(v) for k, v in h.items() if k not in ("su_x", "su_y")}
     if incompressible_plane_stress:
         hyper["vol_sig"] = np.asarray(0.0)          # volumetric GP switched off (theta_vol = 0)
-    info = dict(prior_mean=prior_mean, eiv_damping=float(eiv_damping), eiv_damping_decay=float(eiv_damping_decay), envelope=model.envelope, likelihood=likelihood, sigma_u_known=sigma_u_known,
+    info = dict(prior_mean=prior_mean, eiv_damping=float(eiv_damping), eiv_damping_decay=float(eiv_damping_decay), envelope=model.envelope, likelihood=likelihood, sigma_u_known=sigma_u_known, sigma_f_known=sigma_f_known,
                 reaction_weight=reaction_weight, warp=warp, continuation=continuation, continuation_stages=[[labels[t] for t in a] for a in stages],
                 adaptive=adaptive, valid_load_steps=[labels[t] for t in valid], truncated=valid != all_idx,
                 adaptive_stop_reason=ad["stop_reason"] or ad["range_note"], skipped_load_steps=[labels[t] for t in ad["skipped"]], hyper_iters_per_stage=hyper_iters_per_stage,
@@ -721,7 +771,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 lengthscale_prior_centre=dict(dev=centre_d.tolist(), vol=centre_v.tolist()),
                 amplitude_prior_centre=float(np.exp(sig_centre)), fit_time=time.time() - t0)
     model = HSGPHyperelasticity(dev_box, vol_box, theta_mean, factor, hyper=hyper,
-                                noise=dict(sigma_u_x=float(h["su_x"]), sigma_u_y=float(h["su_y"])), info=info,
+                                noise=(dict(sigma_u_x=float(sigma_u_known), sigma_u_y=float(sigma_u_known)) if residual   # the given noise
+                                       else dict(sigma_u_x=float(h["su_x"]), sigma_u_y=float(h["su_y"]))), info=info,
                                 envelope=model.envelope, warp=warp,
                                 incompressible_plane_stress=incompressible_plane_stress)
     return model, history

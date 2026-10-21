@@ -8,7 +8,9 @@ Writes the same layout as extraction/train_unsupervised.py into --batch_dir:
 otherwise); scripts/run_hsgp_pipeline.sh calls the two phases one after the other.
 
 HSGP settings are read from the recipe (keys below) and can be overridden on the command line:
-    hsgp_likelihood: eiv            # eiv | residual | residual_learned
+    hsgp_likelihood: eiv            # eiv | residual | residual_learned | residual_exact (needs disp_noise or hsgp_force_noise)
+    hsgp_force_noise: 0.0           # residual likelihoods: free-node force-residual noise std (force units);
+                                    # 0 = from disp_noise, < 0 = inferred by EM (residual_exact)
     hsgp_prior_mean: none           # none | linear_elastic | linear_elastic_fixed (mean frozen at the linear-elastic fit)
     hsgp_envelope: 1                # amplitude envelope s_dev, s_vol from the linear-elastic stage
     hsgp_warp: 1                    # GP inputs log(I_bar - 2), log J
@@ -19,8 +21,9 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_max_outer: 60              # GP-stage iteration cap per continuation stage
     hsgp_amplitude_prior_scale: 1.0 # log-normal hyperprior widths (log units)
     hsgp_lengthscale_prior_scale: 1.0
-    hsgp_reaction_weight: 1.0       # residual_learned only
-    hsgp_sigma_cap: 10.0            # GP amplitudes capped at this multiple of their prior centre
+    hsgp_reaction_weight: 1.0       # residual likelihoods only (residual, residual_exact, residual_learned): reaction
+                                    # log-likelihood x weight (= sigma_R / sqrt(weight)); the EIV likelihood is unweighted
+    hsgp_sigma_cap: 10.0            # GP amplitudes capped at this multiple of their prior centre; <= 0: no cap
     hsgp_stability_search: 1        # Gauss-Newton updates must keep the mean tangent positive definite
     hsgp_hyper_restarts: 1          # multi-start hyperparameter optimisation (prior centre, lengthscales x0.5, x2)
     hsgp_eiv_damping: 0.0           # initial relative damping of the EIV correction (K^2 + mu^2)^-1 K f; 0 = Newton K^-1 f
@@ -65,7 +68,8 @@ HSGP_DEFAULTS = dict(hsgp_likelihood="eiv", hsgp_prior_mean="none", hsgp_envelop
                      hsgp_amplitude_prior_scale=1.0, hsgp_lengthscale_prior_scale=1.0, hsgp_reaction_weight=1.0,
                      hsgp_sigma_cap=10.0, hsgp_stability_search=1, hsgp_hyper_restarts=1,
                      hsgp_eiv_damping=0.0, hsgp_eiv_damping_decay=0.1, hsgp_adaptive=0, hsgp_hyper_iters_per_stage=0,
-                     hsgp_ls_floor_fraction=0.0, hsgp_tol_intermediate=0.0, hsgp_hyper_delay=0, hsgp_cap_accept_tol=0.0)
+                     hsgp_ls_floor_fraction=0.0, hsgp_tol_intermediate=0.0, hsgp_hyper_delay=0, hsgp_cap_accept_tol=0.0,
+                     hsgp_force_noise=0.0)
 
 
 def parse_args():
@@ -103,7 +107,7 @@ def external_work_density(prep, node_type, last_step):
 
 def plot_reactions(model, F_steps, prep, train_steps, save_path, has_truth):
     """Reaction forces per load step: epistemic band vs true reactions (synthetic), predictive band vs measured."""
-    corr = model.info.get("likelihood", "eiv") not in ("residual", "residual_learned")
+    corr = model.info.get("likelihood", "eiv") not in ("residual", "residual_learned", "residual_exact")
     mean, cov = eiv_reaction_prediction(model, F_steps, prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"], correction=corr)
     sd_epi = np.sqrt(np.stack([cov[:, 0, 0], cov[:, 1, 1]], axis=1))
     sig_R = np.maximum(np.asarray(prep["load_noise_std_steps"]), 1e-3)
@@ -206,7 +210,8 @@ def main():
             num_basis_dev=opt["hsgp_num_basis_dev"], num_basis_vol=opt["hsgp_num_basis_vol"], box_factor=opt["hsgp_box_factor"],
             amplitude_prior_scale=opt["hsgp_amplitude_prior_scale"], lengthscale_prior_scale=opt["hsgp_lengthscale_prior_scale"],
             prior_mean=opt["hsgp_prior_mean"], envelope=bool(opt["hsgp_envelope"]), likelihood=opt["hsgp_likelihood"],
-            sigma_u_known=disp_noise, reaction_weight=opt["hsgp_reaction_weight"], warp=bool(opt["hsgp_warp"]),
+            sigma_u_known=None if float(opt["hsgp_force_noise"]) < 0 else disp_noise,    # < 0: sigma_f inferred (EM)
+            reaction_weight=opt["hsgp_reaction_weight"], warp=bool(opt["hsgp_warp"]),
             continuation=bool(opt["hsgp_continuation"]), max_outer=opt["hsgp_max_outer"], step_labels=train_steps,
             sigma_cap=opt["hsgp_sigma_cap"], stability_search=bool(opt["hsgp_stability_search"]),
             hyper_restarts=bool(opt["hsgp_hyper_restarts"]), continuation_stages=rec.get("hsgp_continuation_stages"),
@@ -214,7 +219,8 @@ def main():
             adaptive=bool(opt["hsgp_adaptive"]), hyper_iters_per_stage=int(opt["hsgp_hyper_iters_per_stage"]),
             ls_floor_fraction=float(opt["hsgp_ls_floor_fraction"]),
             tol_intermediate=float(opt["hsgp_tol_intermediate"]) or None, hyper_delay=int(opt["hsgp_hyper_delay"]),
-            cap_accept_tol=float(opt["hsgp_cap_accept_tol"]), incompressible_plane_stress=incompressible_ps)
+            cap_accept_tol=float(opt["hsgp_cap_accept_tol"]), incompressible_plane_stress=incompressible_ps,
+            sigma_f_known=float(opt["hsgp_force_noise"]) if float(opt["hsgp_force_noise"]) > 0 else None)
         fit_time = time.time() - t0
         model.save(post_path)
         # adaptive continuation may stop early: the posterior is then conditioned on fewer steps, and the teacher must
@@ -257,10 +263,18 @@ def main():
     if has_truth:   # synthetic benchmark: energy and stress against the true material
         from plots.training import (plot_training_r2, plot_training_r2_piola, plot_combined_validation,
                                     plot_energy_decomposition_validation)
+        import gc
+
+        def release():   # compiled functions keep their (large, closed-over) sample arrays alive: free between plots
+            jax.clear_caches()
+            gc.collect()
         r2_res = plot_training_r2(model, mat, F_all, save_path, train_steps=train_steps, val_steps=val_steps, test_steps=test_steps)
+        release()
         plot_training_r2_piola(model, mat, F_all, save_path, train_steps=train_steps, val_steps=val_steps,
                                test_steps=test_steps, n_pws_samples=64)
+        release()
         plot_combined_validation(model, mat, save_path, 0, I_obs=I_obs)
+        release()
         plot_energy_decomposition_validation(model, mat, save_path, I_obs=I_obs)
         metrics.update(r2=r2_res[0], rmse=r2_res[1], ec=r2_res[2],
                        r2_train=r2_res.train_metrics.get("r2"), ec_train=r2_res.train_metrics.get("ec"),

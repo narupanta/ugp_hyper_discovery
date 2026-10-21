@@ -20,6 +20,41 @@ def _safe_torch_sqrt(x):
     return _orig_torch_sqrt(torch.clamp(x, min=1e-12))
 uq_distill.torch.sqrt = _safe_torch_sqrt
 
+# Checkpointed parameter samples (--checkpoints): every training run of distill_parameter_distribution_from_gp creates its
+# flow through create_parameter_distribution; the wrapped flow counts its draws (num_iters_lipschitz + 1 per Wasserstein
+# iteration) and, after k completed iterations (first draw of iteration k + 1), stores extra samples drawn under a
+# forked RNG, so the training trajectory is identical to a run without checkpoints. One record per training run.
+CHECKPOINTS = dict(iters=set(), draws_per_iter=11, n_samples=5000, model=None, runs=[])
+_orig_create_distribution = uq_distill.create_parameter_distribution
+
+
+def _create_distribution_with_checkpoints(*a, **k):
+    dist = _orig_create_distribution(*a, **k)
+    if not CHECKPOINTS["iters"]:
+        return dist
+    record = dict(calls=0, samples={})
+    CHECKPOINTS["runs"].append(record)
+    forward = dist.forward
+
+    def counting_forward(num_samples):
+        c = record["calls"]
+        record["calls"] += 1
+        it_done, rem = divmod(c, CHECKPOINTS["draws_per_iter"])
+        if rem == 0 and it_done in CHECKPOINTS["iters"]:
+            devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
+            with torch.no_grad(), torch.random.fork_rng(devices=devices):
+                raw = forward(CHECKPOINTS["n_samples"])
+            model = CHECKPOINTS["model"]
+            pop = model._parameter_population_matrix
+            full = torch.matmul(raw, pop.T.to(raw.dtype)) if raw.shape[1] < pop.shape[0] else raw
+            record["samples"][it_done] = full.detach().cpu().numpy()
+        return forward(num_samples)
+    dist.forward = counting_forward
+    return dist
+
+
+uq_distill.create_parameter_distribution = _create_distribution_with_checkpoints
+
 from uqmodeldisc.parameterdistillation.distillation import (
     distill_parameter_distribution_from_gp,
     save_normalizing_flow_parameter_distribution,
@@ -693,6 +728,9 @@ def main():
     parser.add_argument("--load_existing_sensitivities", action="store_true", help="Skip Sobol resampling and directly load existing sensitivity CSVs from out_dir")
     parser.add_argument("--sampling_mode", type=str, default=None, choices=["cached_L", "mvn", "pathwise"], help="GP functional draw sampling mode: cached_L (fastest, precomputed Cholesky factor L), mvn (torch.distributions.MultivariateNormal), or pathwise")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for PyTorch and Numpy")
+    parser.add_argument("--checkpoints", type=int, nargs="*", default=[],
+                        help="Wasserstein iterations at which the final distillation stage also saves parameter samples "
+                             "(<component>_flow_samples_it<k>.npy, same layout as <component>_flow_samples.npy)")
     args = parser.parse_args()
 
     # Resolve sampling mode: CLI argument > recipe config.yaml/json > default ('cached_L')
@@ -733,7 +771,9 @@ def main():
     print(f"Using device: {device}")
 
     torch.set_default_dtype(torch.float64)
-    comp_seed_offset = (hash(args.component) % 10000) if args.component else 0
+    # stable per-component offset (Python's str hash() is randomised per process, which made every run unseeded)
+    import zlib
+    comp_seed_offset = (zlib.crc32(args.component.encode()) % 10000) if args.component else 0
     effective_seed = (args.seed + comp_seed_offset) & 0x7fffffff
 
     def set_all_seeds(s: int):
@@ -940,6 +980,7 @@ def main():
         print(f"Disabled parameters {list(global_disabled)}. Reduced active parameters ({model.num_parameters}): {model.parameter_names}")
 
     output_selector = EnergyOutputSelector(num_outputs=mean_psi.shape[0])
+    CHECKPOINTS.update(iters={int(k) for k in args.checkpoints if 0 < int(k) < args.n_iterations}, model=model)
 
     from uqmodeldisc.settings import Settings
     settings = Settings()
@@ -1372,6 +1413,19 @@ def main():
         samples_path = os.path.join(settings.PROJECT_DIR, pfx("flow_samples.npy"))
         np.save(samples_path, samples_np)
         print(f"Saved distilled PyTorch parameter samples (shape: {samples_np.shape}) to {samples_path}")
+        if args.checkpoints:   # samples of the final training stage after k Wasserstein iterations (k >= n_iterations: final)
+            run = next((r for r in reversed(CHECKPOINTS["runs"]) if r["calls"] > 0), None)
+            for k in sorted(set(int(k) for k in args.checkpoints)):
+                if k >= args.n_iterations:
+                    arr = samples_np
+                elif run is not None and k in run["samples"]:
+                    arr = run["samples"][k]
+                    if hasattr(model, "physical_samples"):
+                        arr = model.physical_samples(arr, full_param_names)
+                else:
+                    print(f"Checkpoint {k}: no samples recorded"); continue
+                np.save(os.path.join(settings.PROJECT_DIR, pfx(f"flow_samples_it{k}.npy")), arr)
+            print(f"Saved checkpoint samples at iterations {sorted(set(int(k) for k in args.checkpoints))}")
 
     # Plot parameter distributions
     try:
