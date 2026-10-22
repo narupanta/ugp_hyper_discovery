@@ -3,7 +3,8 @@
 Coverage study of the distilled material parameters over noise realisations and normalizing-flow initialisations.
 
 For an HSGP experiment (synthetic, with a ground truth) with extractions <exp>/<s>/extracted for the noise seeds s:
-  for each noise seed s and initialisation m = 0..M-1, the distillation (dev, and vol unless deviatoric-only) is run with
+  for each noise seed s and initialisation m = 0..M-1 (in this order: seed 1 init 0, seed 1 init 1, ..., last seed
+  last init; dev and vol of a pair run at the same time), the distillation (dev, and vol unless deviatoric-only) is run with
   seed s + 1000 m into <exp>/coverage_study/seed<s>/init<m>/ (m = 0 uses the same seed as the standard pipeline run);
   optional --checkpoints save the parameter samples of the final distillation stage after k Wasserstein iterations
   (the training trajectory is unchanged by the checkpoints).
@@ -21,6 +22,7 @@ Usage:
 """
 import argparse
 import csv
+import glob
 import json
 import os
 import subprocess
@@ -45,7 +47,8 @@ def parse_args():
     p.add_argument("--n_iterations", type=int, default=None, help="Wasserstein iterations (default: recipe value)")
     p.add_argument("--checkpoints", type=int, nargs="*", default=[], help="also evaluate after these iterations")
     p.add_argument("--level", type=float, default=0.95, help="nominal level of the central interval")
-    p.add_argument("--jobs", type=int, default=2, help="distillation processes run in parallel")
+    p.add_argument("--jobs", type=int, default=2, help="(unused: dev and vol of one seed/init run together, the "
+                                                         "seed/init pairs one after another)")
     p.add_argument("--extract", action="store_true", help="run missing HSGP extractions (scripts/run_hsgp_pipeline.sh)")
     p.add_argument("--evaluate_only", action="store_true", help="only evaluate existing runs")
     p.add_argument("--force", action="store_true", help="rerun distillations that already have results")
@@ -145,24 +148,36 @@ def main():
         subprocess.run(["bash", "scripts/run_hsgp_pipeline.sh", exp, "--seeds", " ".join(map(str, missing))],
                        cwd=ROOT, check=True)
 
-    # --- distillations: the first job of a seed runs alone (it may create the shared GP export)
+    # --- distillations, in order: seed s / init m with its dev and vol distillation run together, then the next init,
+    # then the next seed. The first pair of a seed runs dev before vol when the shared GP export does not exist yet
+    # (both would otherwise create it at the same time).
     if not args.evaluate_only:
-        first, rest = [], []
+        pairs = []
         for s in seeds:
             for m in inits:
                 run_dir = os.path.join(study, f"seed{s}", f"init{m}")
+                jobs = []
                 for comp in (["dev"] if dev_only else ["dev", "vol"]):
                     if not args.force and os.path.exists(samples_path(run_dir, comp, None, n_iter)) and all(
                             os.path.exists(samples_path(run_dir, comp, k, n_iter)) for k in checkpoints):
                         continue
-                    job = (distill_cmd(cfg, os.path.join(exp, str(s), "extracted"), run_dir, comp, s + 1000 * m,
-                                       n_iter, checkpoints),
-                           os.path.join(run_dir, f"{comp}_study.log"), f"seed {s} init {m} {comp}")
-                    (first if (m == inits[0] and comp == "dev") else rest).append(job)
-        print(f"{len(first) + len(rest)} distillation runs to do", flush=True)
-        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-            list(pool.map(run_job, first))
-            list(pool.map(run_job, rest))
+                    jobs.append((distill_cmd(cfg, os.path.join(exp, str(s), "extracted"), run_dir, comp, s + 1000 * m,
+                                             n_iter, checkpoints),
+                                 os.path.join(run_dir, f"{comp}_study.log"), f"seed {s} init {m} {comp}"))
+                if jobs:
+                    pairs.append((s, m, jobs))
+        print(f"{sum(len(j) for _, _, j in pairs)} distillation runs to do ({len(pairs)} seed/init pairs)", flush=True)
+        for i, (s, m, jobs) in enumerate(pairs, 1):
+            print(f"[{i}/{len(pairs)}] seed {s} init {m}: {' + '.join(j[2].split()[-1] for j in jobs)}", flush=True)
+            extract_dir = os.path.join(exp, str(s), "extracted")
+            has_export = any(os.path.exists(os.path.join(d, f)) for d in glob.glob(os.path.join(extract_dir, "pytorch_export_*"))
+                             for f in ("mean_dev.npy", "mean_psi.npy"))
+            if not has_export and len(jobs) > 1:
+                for job in jobs:                       # creates the export first
+                    run_job(job)
+            else:
+                with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+                    list(pool.map(run_job, jobs))
 
     # --- evaluation
     rows, summary = [], {"experiment": exp, "noise_seeds": seeds, "n_inits": len(inits), "level": args.level,

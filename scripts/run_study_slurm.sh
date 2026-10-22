@@ -12,7 +12,8 @@
 
 # scripts/run_study.sh on the cluster (same container as run_hsgp_slurm.sh); all arguments are passed through.
 #   normal:    sbatch scripts/run_study_slurm.sh --mode normal --recipe configs/recipes_v2/<recipe>.yaml --seeds "1 2 3"
-#   coverage:  sbatch scripts/run_study_slurm.sh --mode coverage --cov_experiment_dir results/<exp>
+#   coverage:  sbatch scripts/run_study_slurm.sh --mode coverage --cov_from_sweep d4e-05_l2e-02   # after threshold
+#              (or --cov_experiment_dir results/<exp>, or --cov_disp_noise 4e-5 --cov_load_noise 0.02 for a new one)
 #   threshold: one array task per grid point, then the summary
 #     sbatch scripts/run_study_slurm.sh --mode threshold --list_grid                  # (or locally) shows the indices
 #     JOB=$(sbatch --parsable --array=0-11 scripts/run_study_slurm.sh --mode threshold)

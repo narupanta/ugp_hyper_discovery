@@ -7,6 +7,10 @@
 #                    (validation/noise_threshold_sweep.py)
 #   MODE=coverage    coverage of the distilled material parameters over noise seeds x normalizing-flow
 #                    initialisations (validation/distillation_coverage_study.py); runs the extractions first if needed
+#
+# Typical workflow: 1) threshold  2) pick a grid point (e.g. d4e-05_l2e-02, see SWEEP_DIR/sweep_summary.md)
+#                   3) coverage with COV_FROM_SWEEP=<that tag>: continues in that grid point's experiment folder,
+#                      adds the missing extractions up to COV_N_NOISE_SEEDS seeds (same config), then distils
 #   MODE=normal      the standard pipeline for one recipe: HSGP extraction [+ distillation, FEM validation, plots]
 #                    (scripts/run_hsgp_pipeline.sh)
 #
@@ -39,8 +43,12 @@ SWEEP_DIR="results/noise_sweep_isihara_cv"
 THR_HSGP_ARGS=""                                  # extra '--hsgp_<option> <value>' for every grid point
 
 # --- 2. coverage: distilled-parameter coverage ----------------------------------
-COV_RECIPE="configs/recipes_v2/isihara_hsgp_residual_cv.yaml"
-COV_EXPERIMENT_DIR=""                             # existing experiment; empty: create one from COV_RECIPE
+COV_FROM_SWEEP=""                                 # grid point of the threshold sweep (tag, e.g. d4e-05_l2e-02):
+                                                  # its experiment folder in SWEEP_DIR is continued
+COV_EXPERIMENT_DIR=""                             # or an existing experiment directory
+COV_RECIPE="configs/recipes_v2/isihara_hsgp_residual_cv.yaml"   # used when neither of the two above is given
+COV_DISP_NOISE=""                                 # with COV_RECIPE: override disp_noise ("" = recipe value)
+COV_LOAD_NOISE=""                                 # with COV_RECIPE: override load_noise (reactions follow it)
 COV_N_NOISE_SEEDS="10"
 COV_N_INITS="5"
 COV_N_ITERATIONS=""                               # Wasserstein iterations ("" = recipe value)
@@ -83,11 +91,32 @@ threshold)
     python3 validation/noise_threshold_sweep.py "${ARGS[@]}" "${PASS[@]}"
     ;;
 coverage)
+    if [ -n "$COV_FROM_SWEEP" ]; then
+        STATE="$SWEEP_DIR/state/$COV_FROM_SWEEP.json"
+        [ -f "$STATE" ] || { echo "No grid point $COV_FROM_SWEEP in $SWEEP_DIR/state (see --list_grid)"; exit 1; }
+        COV_EXPERIMENT_DIR=$(python3 -c "import json; print(json.load(open('$STATE'))['experiment_dir'])")
+        echo "Coverage study continues the threshold grid point $COV_FROM_SWEEP: $COV_EXPERIMENT_DIR"
+    fi
     if [ -z "$COV_EXPERIMENT_DIR" ]; then
         SEEDS_LIST=$(seq -s ' ' 1 "$COV_N_NOISE_SEEDS")
-        echo "No experiment directory given: running the extractions of $COV_RECIPE for noise seeds $SEEDS_LIST"
+        REC="$COV_RECIPE"
+        if [ -n "$COV_DISP_NOISE$COV_LOAD_NOISE" ]; then      # recipe copy with the chosen noise levels
+            mkdir -p results/coverage_recipes
+            REC="results/coverage_recipes/$(basename "${COV_RECIPE%.yaml}")_d${COV_DISP_NOISE:-rec}_l${COV_LOAD_NOISE:-rec}.yaml"
+            python3 - "$COV_RECIPE" "$REC" "$COV_DISP_NOISE" "$COV_LOAD_NOISE" <<'PY'
+import sys, yaml
+src, dst, d, l = sys.argv[1:5]
+r = yaml.safe_load(open(src))
+if d:
+    r["disp_noise"] = float(d)
+if l:
+    r["load_noise"] = float(l); r["reaction_noise_rel"] = float(l)
+yaml.safe_dump(r, open(dst, "w"), sort_keys=False)
+PY
+        fi
+        echo "No experiment directory given: running the extractions of $REC for noise seeds $SEEDS_LIST"
         LOG=$(mktemp)
-        bash scripts/run_hsgp_pipeline.sh "$COV_RECIPE" --seeds "$SEEDS_LIST" 2>&1 | tee "$LOG"
+        bash scripts/run_hsgp_pipeline.sh "$REC" --seeds "$SEEDS_LIST" 2>&1 | tee "$LOG"
         COV_EXPERIMENT_DIR=$(grep -oE "Created experiment directory: [^ ]+" "$LOG" | head -1 | awk '{print $4}')
         rm -f "$LOG"
         [ -n "$COV_EXPERIMENT_DIR" ] || { echo "Could not determine the experiment directory"; exit 1; }
