@@ -17,6 +17,7 @@
 # Usage:
 #   bash scripts/run_study.sh                                   # uses MODE and the settings below
 #   bash scripts/run_study.sh --mode normal --recipe configs/recipes_v2/isihara_hsgp_residual_cv.yaml --seeds "1 2"
+#   bash scripts/run_study.sh --mode threshold --recipe configs/recipes_v2/nh2_hsgp_residual_cv.yaml
 #   bash scripts/run_study.sh --mode threshold --grid_index 3   # one grid point (Slurm arrays set it automatically)
 #   bash scripts/run_study.sh --mode threshold --collect_only   # summary of a sweep
 #   bash scripts/run_study.sh --mode coverage --experiment_dir results/<exp> --evaluate_only
@@ -29,9 +30,11 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONUNBUFFERED=1
 
 MODE="normal"                     # threshold | coverage | normal
+RECIPE="configs/recipes_v2/isihara_hsgp_residual_cv.yaml"   # the study recipe (material, noise grid, settings), all
+                                                            # modes; e.g. nh2_hsgp_residual_cv / gentthomas_hsgp_residual_cv
 
 # --- 1. threshold: noise-threshold sweep ---------------------------------------
-THR_RECIPE="configs/recipes_v2/isihara_hsgp_residual_cv.yaml"
+THR_RECIPE=""                                     # "" = RECIPE
 # The grid is read from THR_RECIPE (sweep_disp_noise, sweep_load_noise, sweep_seeds, sweep_force_noise_rule);
 # anything set here (or on the command line) overrides the recipe. Leave empty to use the recipe.
 NOISE_LEVELS=""                                   # displacement noise std, e.g. "1e-5 4e-5 7e-5 1e-4"
@@ -41,14 +44,14 @@ FORCE_NOISE_RULE=""                               # cv | evidence | scaled | fix
 CV_TOL="2"                                        # cv: smallest s within this many nats of the best ("" = best)
 R2_MIN="0.99"                                     # a grid point "works" if mean val energy R^2 >= R2_MIN ...
 EC_MIN="90"                                       # ... and mean val energy coverage >= EC_MIN (%)
-SWEEP_DIR="results/noise_sweep_isihara_cv"
+SWEEP_DIR=""                                      # "" = results/noise_sweep_<recipe name>
 THR_HSGP_ARGS=""                                  # extra '--hsgp_<option> <value>' for every grid point
 
 # --- 2. coverage: distilled-parameter coverage ----------------------------------
 COV_FROM_SWEEP=""                                 # grid point of the threshold sweep (tag, e.g. d4e-05_l2e-02):
                                                   # its experiment folder in SWEEP_DIR is continued
 COV_EXPERIMENT_DIR=""                             # or an existing experiment directory
-COV_RECIPE="configs/recipes_v2/isihara_hsgp_residual_cv.yaml"   # used when neither of the two above is given
+COV_RECIPE=""                                     # "" = RECIPE; used when neither of the two above is given
 COV_DISP_NOISE=""                                 # with COV_RECIPE: override disp_noise ("" = recipe value)
 COV_LOAD_NOISE=""                                 # with COV_RECIPE: override load_noise (reactions follow it)
 COV_N_NOISE_SEEDS="10"
@@ -58,8 +61,7 @@ COV_CHECKPOINTS=""                                # e.g. "2000 4000 6000 8000 10
 COV_JOBS="2"                                      # distillations in parallel
 COV_LEVEL="0.95"
 
-# --- 3. normal: standard pipeline ---------------------------------------------------
-RECIPE="configs/recipes_v2/isihara_hsgp_residual_cv.yaml"   # or an existing experiment directory
+# --- 3. normal: standard pipeline (RECIPE, or an existing experiment directory) ---------
 SEEDS="1"
 DOWNSTREAM="1"                                    # 1: also distillation, FEM validation and validation plots
 NORMAL_HSGP_ARGS=""
@@ -76,7 +78,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 cd "$(dirname "$0")/.."
-echo "=== study: $MODE ($(date))"
+THR_RECIPE="${THR_RECIPE:-$RECIPE}"
+COV_RECIPE="${COV_RECIPE:-$RECIPE}"
+SWEEP_DIR="${SWEEP_DIR:-results/noise_sweep_$(basename "${THR_RECIPE%.yaml}")}"
+echo "=== study: $MODE ($(date)) | recipe: $([ "$MODE" = coverage ] && echo "$COV_RECIPE" || echo "${THR_RECIPE}") | sweep dir: $SWEEP_DIR"
 
 case "$MODE" in
 threshold)

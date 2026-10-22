@@ -19,6 +19,8 @@
 #     JOB=$(sbatch --parsable --array=0-11 scripts/run_study_slurm.sh --mode threshold)
 #     sbatch --dependency=afterany:$JOB scripts/run_study_slurm.sh --mode threshold --collect_only
 # The settings of each mode are at the top of scripts/run_study.sh (or override them here, e.g. --sweep_dir ...).
+# Another material: add --recipe configs/recipes_v2/nh2_hsgp_residual_cv.yaml (or gentthomas_...) to any of these;
+# the sweep folder follows the recipe name (results/noise_sweep_<recipe>), so --cov_from_sweep needs the same --recipe.
 
 echo "Launching study via Singularity: scripts/run_study.sh $*"
 singularity exec --nv -B /home/npantapalin/work/projects/ugp_hyper_discovery:/home/mmdiscovery/shared --pwd /home/mmdiscovery/shared /home/npantapalin/work/container/ugp_hyper_discovery.sif bash scripts/run_study.sh "$@"
