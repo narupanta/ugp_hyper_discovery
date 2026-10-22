@@ -9,6 +9,18 @@ otherwise); scripts/run_hsgp_pipeline.sh calls the two phases one after the othe
 
 HSGP settings are read from the recipe (keys below) and can be overridden on the command line:
     hsgp_likelihood: eiv            # eiv | residual | residual_learned | residual_exact (needs disp_noise or hsgp_force_noise)
+                                    # | nigp (exact residual warm-up, then K Sigma_u K^T input noise; needs disp_noise)
+    hsgp_nigp_warmup: residual      # nigp warm-up: residual (exact residual Gaussian) | linear (linear-elastic stage only)
+    hsgp_eiv_warmup: none           # eiv: none | residual_exact (first GP iteration = exact residual Gaussian with
+                                    # hsgp_force_noise / disp_noise; its mean and hyperparameters start the EIV iterations)
+    hsgp_force_noise_rel: 0.0       # residual likelihoods: per-step sigma_f,t = value x |R_t| (0: off)
+    hsgp_force_noise_cv: 0          # residual_exact: 1 = choose that value by cross-validation over the training steps
+    hsgp_cv_folds: 2                # interleaved folds of the training steps for the cross-validation
+    hsgp_cv_tol: 0.0                # > 0: smallest s within this many nats of the best CV score (plateau rule)
+    hsgp_reaction_weight_rule: fixed  # fixed (hsgp_reaction_weight) | euclid (N_free / N_BC, EUCLID balancing)
+    hsgp_force_noise_from_reaction: 0 # residual likelihoods: 1 = sigma_f,t,d = (N_BC / N_free) sigma_R,t,d
+    hsgp_force_noise_evidence: 0    # residual_exact: 1 = choose that value by the evidence of the reaction-weighted
+                                    # likelihood (set hsgp_reaction_weight >= 10, e.g. 10)
     hsgp_force_noise: 0.0           # residual likelihoods: free-node force-residual noise std (force units);
                                     # 0 = from disp_noise, < 0 = inferred by EM (residual_exact)
     hsgp_prior_mean: none           # none | linear_elastic | linear_elastic_fixed (mean frozen at the linear-elastic fit)
@@ -31,7 +43,8 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_adaptive: 0                # 1: adaptive continuation with rollback (coarse full range first, bisect on failure)
     hsgp_hyper_iters_per_stage: 0   # >0: optimise hyperparameters only in the first k GP iterations of each stage
     hsgp_ls_floor_fraction: 0.0     # >0: soft lengthscale floor = fraction x span of the stage's data (GP input space)
-    hsgp_tol_intermediate: 0.0      # >0: convergence tolerance of intermediate continuation stages (final stage: 1e-5)
+    hsgp_tol: 1e-5                  # convergence tolerance (relative force change) of the final stage
+    hsgp_tol_intermediate: 0.0      # >0: convergence tolerance of intermediate continuation stages (default: hsgp_tol)
     hsgp_hyper_delay: 0             # >0: hyperparameters fixed in the first k GP iterations of each later stage
     hsgp_cap_accept_tol: 0.0        # >0 (adaptive): a stage at the iteration cap with force change below this counts as converged
     hsgp_continuation_stages:       # optional explicit ladder of cumulative load-step sets (recipe only), e.g.
@@ -68,8 +81,10 @@ HSGP_DEFAULTS = dict(hsgp_likelihood="eiv", hsgp_prior_mean="none", hsgp_envelop
                      hsgp_amplitude_prior_scale=1.0, hsgp_lengthscale_prior_scale=1.0, hsgp_reaction_weight=1.0,
                      hsgp_sigma_cap=10.0, hsgp_stability_search=1, hsgp_hyper_restarts=1,
                      hsgp_eiv_damping=0.0, hsgp_eiv_damping_decay=0.1, hsgp_adaptive=0, hsgp_hyper_iters_per_stage=0,
-                     hsgp_ls_floor_fraction=0.0, hsgp_tol_intermediate=0.0, hsgp_hyper_delay=0, hsgp_cap_accept_tol=0.0,
-                     hsgp_force_noise=0.0)
+                     hsgp_ls_floor_fraction=0.0, hsgp_tol_intermediate=0.0, hsgp_hyper_delay=0, hsgp_cap_accept_tol=0.0, hsgp_tol=1e-5,
+                     hsgp_force_noise=0.0, hsgp_nigp_warmup="residual", hsgp_eiv_warmup="none",
+                     hsgp_force_noise_rel=0.0, hsgp_force_noise_cv=0, hsgp_cv_folds=2, hsgp_force_noise_evidence=0,
+                     hsgp_reaction_weight_rule="fixed", hsgp_force_noise_from_reaction=0, hsgp_cv_tol=0.0)
 
 
 def parse_args():
@@ -211,7 +226,8 @@ def main():
             amplitude_prior_scale=opt["hsgp_amplitude_prior_scale"], lengthscale_prior_scale=opt["hsgp_lengthscale_prior_scale"],
             prior_mean=opt["hsgp_prior_mean"], envelope=bool(opt["hsgp_envelope"]), likelihood=opt["hsgp_likelihood"],
             sigma_u_known=None if float(opt["hsgp_force_noise"]) < 0 else disp_noise,    # < 0: sigma_f inferred (EM)
-            reaction_weight=opt["hsgp_reaction_weight"], warp=bool(opt["hsgp_warp"]),
+            reaction_weight=opt["hsgp_reaction_weight"], reaction_weight_rule=str(opt["hsgp_reaction_weight_rule"]),
+            warp=bool(opt["hsgp_warp"]),
             continuation=bool(opt["hsgp_continuation"]), max_outer=opt["hsgp_max_outer"], step_labels=train_steps,
             sigma_cap=opt["hsgp_sigma_cap"], stability_search=bool(opt["hsgp_stability_search"]),
             hyper_restarts=bool(opt["hsgp_hyper_restarts"]), continuation_stages=rec.get("hsgp_continuation_stages"),
@@ -220,7 +236,12 @@ def main():
             ls_floor_fraction=float(opt["hsgp_ls_floor_fraction"]),
             tol_intermediate=float(opt["hsgp_tol_intermediate"]) or None, hyper_delay=int(opt["hsgp_hyper_delay"]),
             cap_accept_tol=float(opt["hsgp_cap_accept_tol"]), incompressible_plane_stress=incompressible_ps,
-            sigma_f_known=float(opt["hsgp_force_noise"]) if float(opt["hsgp_force_noise"]) > 0 else None)
+            tol=float(opt["hsgp_tol"]),
+            sigma_f_known=float(opt["hsgp_force_noise"]) if float(opt["hsgp_force_noise"]) > 0 else None,
+            nigp_warmup=str(opt["hsgp_nigp_warmup"]), eiv_warmup=str(opt["hsgp_eiv_warmup"]),
+            sigma_f_rel=float(opt["hsgp_force_noise_rel"]) or None, sigma_f_cv=bool(int(opt["hsgp_force_noise_cv"])),
+            cv_folds=int(opt["hsgp_cv_folds"]), sigma_f_evidence=bool(int(opt["hsgp_force_noise_evidence"])),
+            sigma_f_from_reaction=bool(int(opt["hsgp_force_noise_from_reaction"])), cv_tol=float(opt["hsgp_cv_tol"]))
         fit_time = time.time() - t0
         model.save(post_path)
         # adaptive continuation may stop early: the posterior is then conditioned on fewer steps, and the teacher must
@@ -259,6 +280,7 @@ def main():
                    sigma_u_x=model.noise["sigma_u_x"], sigma_u_y=model.noise["sigma_u_y"],
                    linear_elastic_mean=model.linear_elastic_summary(), small_strain_moduli=model.small_strain_moduli(),
                    fraction_unstable=float(frac), reaction_forces=reac,
+                   force_noise=dict(sigma_f_rel=model.info.get("sigma_f_rel"), cv=model.info.get("force_noise_cv")),
                    hyper={k: np.asarray(v).tolist() for k, v in model.hyper.items()})
     if has_truth:   # synthetic benchmark: energy and stress against the true material
         from plots.training import (plot_training_r2, plot_training_r2_piola, plot_combined_validation,
