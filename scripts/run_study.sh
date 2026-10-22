@@ -32,10 +32,12 @@ MODE="normal"                     # threshold | coverage | normal
 
 # --- 1. threshold: noise-threshold sweep ---------------------------------------
 THR_RECIPE="configs/recipes_v2/isihara_hsgp_residual_cv.yaml"
-NOISE_LEVELS="1e-5 4e-5 7e-5 1e-4"                # displacement noise std (relative to the specimen size)
-LOAD_NOISE_LEVELS="0.02 0.05 0.1"                 # load noise (relative); reactions in the likelihood match it
-THR_SEEDS="1 2 3"
-FORCE_NOISE_RULE="cv"                             # cv | evidence | scaled | fixed | derived | from_reaction
+# The grid is read from THR_RECIPE (sweep_disp_noise, sweep_load_noise, sweep_seeds, sweep_force_noise_rule);
+# anything set here (or on the command line) overrides the recipe. Leave empty to use the recipe.
+NOISE_LEVELS=""                                   # displacement noise std, e.g. "1e-5 4e-5 7e-5 1e-4"
+LOAD_NOISE_LEVELS=""                              # load noise (relative), e.g. "0.02 0.05 0.1"; reactions match it
+THR_SEEDS=""                                      # e.g. "1 2 3"
+FORCE_NOISE_RULE=""                               # cv | evidence | scaled | fixed | derived | from_reaction
 CV_TOL="2"                                        # cv: smallest s within this many nats of the best ("" = best)
 R2_MIN="0.99"                                     # a grid point "works" if mean val energy R^2 >= R2_MIN ...
 EC_MIN="90"                                       # ... and mean val energy coverage >= EC_MIN (%)
@@ -78,9 +80,11 @@ echo "=== study: $MODE ($(date))"
 
 case "$MODE" in
 threshold)
-    ARGS=(--base_recipe "$THR_RECIPE" --force_noise_rule "$FORCE_NOISE_RULE" --noise_levels $NOISE_LEVELS
-          --load_noise_levels $LOAD_NOISE_LEVELS --seeds $THR_SEEDS --r2_min "$R2_MIN" --ec_min "$EC_MIN"
-          --sweep_dir "$SWEEP_DIR")
+    ARGS=(--base_recipe "$THR_RECIPE" --r2_min "$R2_MIN" --ec_min "$EC_MIN" --sweep_dir "$SWEEP_DIR")
+    [ -n "$NOISE_LEVELS" ] && ARGS+=(--noise_levels $NOISE_LEVELS)
+    [ -n "$LOAD_NOISE_LEVELS" ] && ARGS+=(--load_noise_levels $LOAD_NOISE_LEVELS)
+    [ -n "$THR_SEEDS" ] && ARGS+=(--seeds $THR_SEEDS)
+    [ -n "$FORCE_NOISE_RULE" ] && ARGS+=(--force_noise_rule "$FORCE_NOISE_RULE")
     [ -n "$CV_TOL" ] && ARGS+=(--cv_tol "$CV_TOL")
     [ -n "$THR_HSGP_ARGS" ] && ARGS+=(--hsgp_args "$THR_HSGP_ARGS")
     # inside a Slurm array: one grid point per task (unless only the summary is requested)

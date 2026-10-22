@@ -21,6 +21,9 @@ likelihood's reactions use sigma_R = load_noise x |reading| (matched), or --reac
 A level "works" when the mean over seeds of the validation energy R^2 >= --r2_min and of the validation energy
 coverage (95% band) >= --ec_min; the threshold is the largest level up to which every level works.
 
+The grid can be set in the base recipe (sweep_disp_noise, sweep_load_noise, sweep_seeds, sweep_force_noise_rule);
+command-line options override it.
+
 Usage:
   python3 validation/noise_threshold_sweep.py --base_recipe configs/recipes_v2/isihara_hsgp_residual_exact.yaml \
       --noise_levels 1e-6 3e-6 1e-5 3e-5 1e-4 3e-4 --seeds 1 2 3
@@ -43,13 +46,14 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--base_recipe", required=True)
-    p.add_argument("--noise_levels", type=float, nargs="+", default=[1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4],
-                   help="displacement noise levels")
+    p.add_argument("--noise_levels", type=float, nargs="+", default=None,
+                   help="displacement noise levels (default: recipe key sweep_disp_noise, else 1e-6 .. 3e-4)")
     p.add_argument("--load_noise_levels", type=float, nargs="+", default=None,
-                   help="load noise levels (relative); default: the base recipe's load_noise")
-    p.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
+                   help="load noise levels, relative (default: recipe key sweep_load_noise, else its load_noise)")
+    p.add_argument("--seeds", type=int, nargs="+", default=None,
+                   help="noise seeds (default: recipe key sweep_seeds, else 1 2 3)")
     p.add_argument("--force_noise_rule", choices=["scaled", "fixed", "derived", "cv", "evidence", "from_reaction"],
-                   default="scaled")
+                   default=None, help="sigma_f rule (default: recipe key sweep_force_noise_rule, else scaled)")
     p.add_argument("--force_noise_scale", type=float, default=1000.0, help="scaled: sigma_f = scale x disp_noise")
     p.add_argument("--force_noise", type=float, default=0.01, help="fixed: sigma_f")
     p.add_argument("--reaction_noise_rel", type=float, default=None,
@@ -114,7 +118,14 @@ def main():
     os.makedirs(os.path.join(sweep, "logs"), exist_ok=True)
     os.makedirs(os.path.join(sweep, "state"), exist_ok=True)
     base = yaml.safe_load(open(args.base_recipe))
-    loads = args.load_noise_levels or [float(base.get("load_noise", 0.01))]
+    # the grid: command line, else the recipe's sweep_* keys, else defaults
+    args.noise_levels = [float(x) for x in (args.noise_levels or base.get("sweep_disp_noise")
+                                            or [1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4])]
+    args.load_noise_levels = [float(x) for x in (args.load_noise_levels or base.get("sweep_load_noise")
+                                                 or [base.get("load_noise", 0.01)])]
+    args.seeds = [int(x) for x in (args.seeds or base.get("sweep_seeds") or [1, 2, 3])]
+    args.force_noise_rule = args.force_noise_rule or str(base.get("sweep_force_noise_rule", "scaled"))
+    loads = args.load_noise_levels
     grid = [(load, lvl) for load in loads for lvl in args.noise_levels]
     tag_of = lambda load, lvl: f"d{level_tag(lvl)}_l{level_tag(load)}"
     if args.list_grid:
@@ -146,7 +157,7 @@ def main():
         done = exp and all(collect(exp, s) is not None for s in args.seeds)
         if args.collect_only or done:
             continue
-        rec = dict(base)
+        rec = {k: v for k, v in base.items() if not k.startswith("sweep_")}
         rec["disp_noise"], rec["load_noise"] = float(lvl), float(load)
         rec["seeds"] = list(args.seeds)
         rec["reaction_noise_rel"] = float(args.reaction_noise_rel if args.reaction_noise_rel is not None else load)

@@ -43,6 +43,8 @@ GROUPS = [
         "sobol_threshold", "sobol_samples_factor", "dev_params_disabled", "vol_params_disabled",
         "aniso_params_disabled"]),
     ("FEM forward validation", ["run_validation", "val_number_samples", "val_workers"]),
+    ("Noise sweep (validation/noise_threshold_sweep.py)", [
+        "sweep_disp_noise", "sweep_load_noise", "sweep_seeds", "sweep_force_noise_rule"]),
 ]
 KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:")
 HEADING_RE = re.compile(r"^# --- .* -+$")
@@ -60,6 +62,8 @@ def group_of(key):
         return 3, 10_000
     if key.startswith("val_") or key.startswith("fem_"):
         return 4, 10_000
+    if key.startswith("sweep_"):
+        return 5, 10_000
     return len(GROUPS), 0                            # other
 
 
