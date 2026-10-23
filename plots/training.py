@@ -527,6 +527,35 @@ def plot_inducing_points(dev_z, vol_z, dev_I, vol_I, save_path, aniso_z=None, an
     plt.close(fig2)
 
 
+def standard_mode_F(learned_gp, gamma):
+    """
+    Deformation gradients (6, len(gamma), 3, 3) of the six standard modes (MODE_NAMES order: uniaxial tension,
+    equibiaxial tension, pure shear, uniaxial compression, equibiaxial compression, simple shear) for gamma in [0, 1].
+    Plane strain / compressible: in-plane modes with F33 = 1. Incompressible plane stress (learned_gp.
+    incompressible_plane_stress): F33 = 1 / det F_2D, so the in-plane F is chosen to give each mode's 3D stretches
+    (with the plane-strain definitions, uniaxial tension/compression would equal pure shear).
+    """
+    gamma = jnp.asarray(gamma)
+    n = gamma.shape[0]
+
+    def set_F(f11, f22, f33, f12=0.0):
+        arr = jnp.zeros((n, 3, 3))
+        return arr.at[:, 0, 0].set(f11).at[:, 1, 1].set(f22).at[:, 2, 2].set(f33).at[:, 0, 1].set(f12)
+
+    lam = 1 + gamma
+    if getattr(learned_gp, "incompressible_plane_stress", False):
+        modes = [set_F(lam, lam ** -0.5, lam ** -0.5),          # uniaxial tension
+                 set_F(lam, lam, lam ** -2),                    # equibiaxial tension
+                 set_F(lam, 1 / lam, 1.0),                      # pure shear
+                 set_F(1 / lam, lam ** 0.5, lam ** 0.5),        # uniaxial compression
+                 set_F(1 / lam, 1 / lam, lam ** 2),             # equibiaxial compression
+                 set_F(1.0, 1.0, 1.0, f12=gamma)]               # simple shear
+    else:
+        modes = [set_F(lam, 1.0, 1.0), set_F(lam, lam, 1.0), set_F(lam, 1 / lam, 1.0),
+                 set_F(1 / lam, 1.0, 1.0), set_F(1 / lam, 1 / lam, 1.0), set_F(1.0, 1.0, 1.0, f12=gamma)]
+    return jnp.stack(modes)
+
+
 def compute_interpolation_masks(learned_gp, F_all, I_obs=None, dev_tol: float = 1e-3, vol_tol: float = 1e-3):
     """
     Interpolation/extrapolation masks of standard deformation modes with respect to the TRAINING DATA support.
@@ -619,22 +648,7 @@ def plot_combined_validation(learned_gp, true_model, save_path, step, I_obs=None
     num_samples = 32
     gamma = jnp.linspace(0.0, 1.0, num_points)
 
-    F_all = jnp.zeros((6, num_points, 3, 3))
-
-    def set_F(f11, f22, f33, f12=0.0):
-        arr = jnp.zeros((num_points, 3, 3))
-        arr = arr.at[:, 0, 0].set(f11)
-        arr = arr.at[:, 1, 1].set(f22)
-        arr = arr.at[:, 2, 2].set(f33)
-        arr = arr.at[:, 0, 1].set(f12)
-        return arr
-
-    F_all = F_all.at[0].set(set_F(1 + gamma, 1.0, 1.0))
-    F_all = F_all.at[1].set(set_F(1 + gamma, 1 + gamma, 1.0))
-    F_all = F_all.at[2].set(set_F(1 + gamma, 1 / (1 + gamma), 1.0))
-    F_all = F_all.at[3].set(set_F(1 / (1 + gamma), 1.0, 1.0))
-    F_all = F_all.at[4].set(set_F(1 / (1 + gamma), 1 / (1 + gamma), 1.0))
-    F_all = F_all.at[5].set(set_F(1.0, 1.0, 1.0, f12=gamma))
+    F_all = standard_mode_F(learned_gp, gamma)
 
     mode_names = MODE_NAMES
 
@@ -806,6 +820,101 @@ def plot_stress_validation(gp_model, true_model, save_path):
     plt.close(fig)
 
 
+def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 1.0, n_gamma: int = 400):
+    """
+    Deviatoric GP input space (I1_bar - 3, I2_bar - 3): the training invariants, their convex hull (the interpolation
+    region of the energy plots) and the paths of the six standard modes for gamma in [0, gamma_max], with a cross and
+    the gamma value where each path leaves the hull. (a) full range in mode-separating coordinates: I1_bar - 3 (log)
+    against the ratio (I2_bar - 3) / (I1_bar - 3) (< 1: uniaxial-type stretch, > 1: biaxial-type; all paths share the
+    diagonal in plain (I1, I2)); (b) linear zoom on the data in (I1_bar - 3, I2_bar - 3). For a
+    compressible model, (c) J along each mode against the observed J range.
+    """
+    from scipy.spatial import ConvexHull, QhullError
+    from plots.theme import MODE_SHORT_NAMES
+    apply_style()
+    I_obs = np.asarray(I_obs).reshape(-1, np.asarray(I_obs).shape[-1])
+    dev_obs, vol_obs = I_obs[:, :2], I_obs[:, 2:3]
+    try:
+        hull = ConvexHull(dev_obs)
+        eqs, poly = hull.equations, dev_obs[hull.vertices]
+    except QhullError:
+        lo, hi = dev_obs.min(0), dev_obs.max(0)
+        eqs = np.array([[-1, 0, lo[0]], [1, 0, -hi[0]], [0, -1, lo[1]], [0, 1, -hi[1]]], dtype=float)
+        poly = np.array([[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]])
+    gamma = jnp.linspace(0.0, gamma_max, n_gamma)
+    F_all = standard_mode_F(learned_gp, gamma)
+    incompressible = getattr(learned_gp, "incompressible_plane_stress", False)
+    n_panels = 2 if incompressible else 3
+    fig, axes = plt.subplots(1, n_panels, figsize=(5.2 * n_panels, 4.6))
+    rng = np.random.default_rng(0)
+    sub = dev_obs[rng.choice(len(dev_obs), min(len(dev_obs), 6000), replace=False)]
+    eps = 1e-8
+    summary = {}
+    def to_a(x1, x2):                    # panel (a): (I1 - 3, (I2 - 3) / (I1 - 3))
+        a = np.maximum(np.asarray(x1) - 3, eps)
+        return a, (np.asarray(x2) - 3) / a
+
+    def to_b(x1, x2):                    # panel (b): (I1 - 3, I2 - 3)
+        return np.asarray(x1) - 3, np.asarray(x2) - 3
+    closed = np.vstack([poly, poly[:1]])
+    dense = np.concatenate([np.linspace(closed[k], closed[k + 1], 60) for k in range(len(closed) - 1)])
+    for ax, tf in ((axes[0], to_a), (axes[1], to_b)):
+        ax.scatter(*tf(sub[:, 0], sub[:, 1]), s=3, c="#9e9e9e", alpha=0.35, lw=0, label="training invariants")
+        hx, hy = tf(dense[:, 0], dense[:, 1])
+        if tf is to_b:
+            ax.fill(hx, hy, color="#4caf50", alpha=0.12, lw=0)
+        ax.plot(hx, hy, color="#2e7d32", lw=1.2, label="interpolation region (hull)")
+    for m in range(6):
+        feats = jax.vmap(learned_gp.feature_extractor.extract)(F_all[m])
+        dev_m, vol_m = np.asarray(feats[0]), np.asarray(feats[1])
+        inside = np.all(dev_m @ eqs[:, :-1].T + eqs[:, -1] <= 1e-3, axis=1)
+        exits = [k for k in range(1, n_gamma) if inside[k - 1] and not inside[k]]
+        g_exit = float(gamma[exits[0]]) if exits else None
+        summary[MODE_NAMES[m]] = g_exit
+        col = MODE_COLORS[m]
+        lab = f"{MODE_SHORT_NAMES[m]}" + (f" (exits at $\\gamma$ = {g_exit:.2f})" if g_exit is not None else " (inside up to $\\gamma$ = %g)" % gamma_max)
+        for ax, tf in ((axes[0], to_a), (axes[1], to_b)):
+            x, y = tf(dev_m[1:, 0], dev_m[1:, 1])
+            ax.plot(x, y, color=col, lw=1.8, label=lab if ax is axes[0] else None)
+            for k in exits:
+                px, py = tf(dev_m[k:k + 1, 0], dev_m[k:k + 1, 1])
+                ax.plot(px, py, "x", color=col, ms=9, mew=2.2)
+                ax.annotate(f"{float(gamma[k]):.2f}", (float(px[0]), float(py[0])), textcoords="offset points",
+                            xytext=(5, 4), fontsize=8, color=col)
+        if not incompressible:
+            ax = axes[2]
+            ax.plot(np.asarray(gamma), vol_m[:, 0], color=col, lw=1.8, label=MODE_SHORT_NAMES[m])
+            lo_j, hi_j = vol_obs.min() - 1e-3, vol_obs.max() + 1e-3
+            out = np.where((vol_m[:, 0] < lo_j) | (vol_m[:, 0] > hi_j))[0]
+            if len(out):
+                ax.plot(float(gamma[out[0]]), vol_m[out[0], 0], "x", color=col, ms=9, mew=2.2)
+    axes[0].set_xscale("log")
+    pos = (dev_obs[:, 0] - 3)[(dev_obs[:, 0] - 3) > 0]
+    axes[0].set_xlim(left=max(1e-6, 0.3 * float(np.quantile(pos, 0.001))) if len(pos) else 1e-6)
+    axes[0].set_ylim(0.0, 2.5)
+    axes[0].set_title("(a) Mode-separating coordinates, full range")
+    ext = (dev_obs - 3).max(0)
+    axes[1].set_xlim(-0.05 * ext[0], 1.5 * ext[0]); axes[1].set_ylim(-0.05 * ext[1], 1.5 * ext[1])
+    axes[1].set_title("(b) Zoom on the data")
+    axes[0].set_xlabel(r"$\bar I_1 - 3$"); axes[0].set_ylabel(r"$(\bar I_2 - 3)\,/\,(\bar I_1 - 3)$")
+    axes[1].set_xlabel(r"$\bar I_1 - 3$"); axes[1].set_ylabel(r"$\bar I_2 - 3$")
+    for ax in axes[:2]:
+        ax.grid(alpha=0.3)
+    axes[0].legend(fontsize=7.5, loc="upper left", frameon=False)
+    axes[1].legend(fontsize=7.5, loc="lower right", frameon=False)
+    if not incompressible:
+        ax = axes[2]
+        ax.axhspan(vol_obs.min(), vol_obs.max(), color="#4caf50", alpha=0.12, label="observed J range")
+        ax.set_xlabel(r"$\gamma$"); ax.set_ylabel("J (volumetric GP input)"); ax.grid(alpha=0.3)
+        ax.set_title("(c) Volumetric input along the modes"); ax.legend(fontsize=7.5, frameon=False)
+    fig.suptitle("Invariant space: data, interpolation region and standard deformation modes", fontsize=12)
+    fig.tight_layout()
+    save_figure(fig, os.path.join(save_path, "invariant_space_modes.pdf"))
+    plt.close(fig)
+    return summary
+
+
+
 def plot_energy_decomposition_validation(learned_gp, true_model, save_path, I_obs=None):
     """Plots energy decomposition (Deviatoric, Volumetric, Anisotropic, Total) across 6 deformation modes."""
     apply_style()
@@ -814,22 +923,7 @@ def plot_energy_decomposition_validation(learned_gp, true_model, save_path, I_ob
     num_samples = 32
     gamma = jnp.linspace(0.0, 1.0, num_points)
 
-    F_all = jnp.zeros((6, num_points, 3, 3))
-
-    def set_F(f11, f22, f33, f12=0.0):
-        arr = jnp.zeros((num_points, 3, 3))
-        arr = arr.at[:, 0, 0].set(f11)
-        arr = arr.at[:, 1, 1].set(f22)
-        arr = arr.at[:, 2, 2].set(f33)
-        arr = arr.at[:, 0, 1].set(f12)
-        return arr
-
-    F_all = F_all.at[0].set(set_F(1 + gamma, 1.0, 1.0))
-    F_all = F_all.at[1].set(set_F(1 + gamma, 1 + gamma, 1.0))
-    F_all = F_all.at[2].set(set_F(1 + gamma, 1 / (1 + gamma), 1.0))
-    F_all = F_all.at[3].set(set_F(1 / (1 + gamma), 1.0, 1.0))
-    F_all = F_all.at[4].set(set_F(1 / (1 + gamma), 1 / (1 + gamma), 1.0))
-    F_all = F_all.at[5].set(set_F(1.0, 1.0, 1.0, f12=gamma))
+    F_all = standard_mode_F(learned_gp, gamma)
 
     mode_names = MODE_NAMES
 

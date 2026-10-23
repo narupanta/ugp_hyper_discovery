@@ -27,7 +27,7 @@ GROUPS = [
         "hsgp_cv_folds", "hsgp_cv_tol", "hsgp_force_noise_evidence", "hsgp_force_noise_from_reaction",
         "hsgp_reaction_weight", "hsgp_reaction_weight_rule", "hsgp_eiv_warmup", "hsgp_nigp_warmup",
         "hsgp_eiv_damping", "hsgp_eiv_damping_decay", "reaction_components", "reaction_noise_rel",
-        "reaction_noise_floor",
+        "reaction_noise_floor", "reaction_zero_components",
         # basis
         "hsgp_num_basis_dev", "hsgp_num_basis_vol", "hsgp_box_factor", "hsgp_warp", "hsgp_envelope",
         # hyperparameters

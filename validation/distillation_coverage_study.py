@@ -22,7 +22,6 @@ Usage:
 """
 import argparse
 import csv
-import glob
 import json
 import os
 import subprocess
@@ -75,6 +74,25 @@ def distill_cmd(cfg, extract_dir, out_dir, component, seed, n_iter, checkpoints)
     if checkpoints:
         cmd += ["--checkpoints"] + [str(k) for k in checkpoints]
     return cmd
+
+
+def export_cmd(cfg, extract_dir):
+    """The GP export that distill_uqmodeldisc.py would create on demand (same subfolder naming)."""
+    mode, n_pts = str(cfg.get("sample_mode", "standard")), str(cfg.get("num_points", 100))
+    gamma, target = str(cfg.get("max_gamma", 1.0)), str(cfg.get("distill_target", "sef_split"))
+    if mode == "dataset_all":
+        sub = "pytorch_export_dataset_all"
+    elif mode.startswith("dataset_f"):
+        sub = f"pytorch_export_{mode}_n{n_pts}"
+    elif mode in ("standard_interp", "inducing_points"):
+        sub = f"pytorch_export_{mode}"
+    else:
+        sub = f"pytorch_export_standard_g{gamma}"
+    if target in ("sef_stress", "sef_cauchy"):
+        sub += f"_{target}"
+    return [sys.executable, "distillation/export_gp_to_pytorch.py", "--saved_model_dir", extract_dir,
+            "--sample_mode", mode, "--num_points", n_pts, "--max_gamma", gamma, "--distill_target", target,
+            "--export_subfolder", sub], os.path.join(extract_dir, sub)
 
 
 def run_job(job):
@@ -149,8 +167,7 @@ def main():
                        cwd=ROOT, check=True)
 
     # --- distillations, in order: seed s / init m with its dev and vol distillation run together, then the next init,
-    # then the next seed. The first pair of a seed runs dev before vol when the shared GP export does not exist yet
-    # (both would otherwise create it at the same time).
+    # then the next seed. A missing shared GP export is created first (dev and vol would otherwise both create it).
     if not args.evaluate_only:
         pairs = []
         for s in seeds:
@@ -170,14 +187,17 @@ def main():
         for i, (s, m, jobs) in enumerate(pairs, 1):
             print(f"[{i}/{len(pairs)}] seed {s} init {m}: {' + '.join(j[2].split()[-1] for j in jobs)}", flush=True)
             extract_dir = os.path.join(exp, str(s), "extracted")
-            has_export = any(os.path.exists(os.path.join(d, f)) for d in glob.glob(os.path.join(extract_dir, "pytorch_export_*"))
-                             for f in ("mean_dev.npy", "mean_psi.npy"))
-            if not has_export and len(jobs) > 1:
-                for job in jobs:                       # creates the export first
-                    run_job(job)
-            else:
-                with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
-                    list(pool.map(run_job, jobs))
+            cmd, export_dir = export_cmd(cfg, extract_dir)
+            if len(jobs) > 1 and not any(os.path.exists(os.path.join(export_dir, f))
+                                         for f in ("mean_dev.npy", "mean_psi.npy")):
+                print(f"  exporting the GP of seed {s}: {export_dir}", flush=True)
+                with open(os.path.join(extract_dir, "export_study.log"), "w") as f:
+                    if subprocess.run(cmd, cwd=ROOT, stdout=f, stderr=subprocess.STDOUT).returncode != 0:
+                        print(f"  export FAILED (see {extract_dir}/export_study.log); dev runs first", flush=True)
+                        run_job(jobs[0])
+                        jobs = jobs[1:]
+            with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+                list(pool.map(run_job, jobs))
 
     # --- evaluation
     rows, summary = [], {"experiment": exp, "noise_seeds": seeds, "n_inits": len(inits), "level": args.level,

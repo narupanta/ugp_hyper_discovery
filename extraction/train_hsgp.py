@@ -19,6 +19,8 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_cv_tol: 0.0                # > 0: smallest s within this many nats of the best CV score (plateau rule)
     hsgp_reaction_weight_rule: fixed  # fixed (hsgp_reaction_weight) | euclid (N_free / N_BC, EUCLID balancing)
     hsgp_force_noise_from_reaction: 0 # residual likelihoods: 1 = sigma_f,t,d = (N_BC / N_free) sigma_R,t,d
+    (recipe, not hsgp_*) reaction_zero_components: [1]  # reactions known to vanish (R_y in a tensile test): fitted to 0
+                                    # with sigma = reaction_noise_rel x |measured force| (>= reaction_noise_floor)
     hsgp_force_noise_evidence: 0    # residual_exact: 1 = choose that value by the evidence of the reaction-weighted
                                     # likelihood (set hsgp_reaction_weight >= 10, e.g. 10)
     hsgp_force_noise: 0.0           # residual likelihoods: free-node force-residual noise std (force units);
@@ -120,12 +122,15 @@ def external_work_density(prep, node_type, last_step):
     return e if np.isfinite(e) and e > 0 else 1.0
 
 
-def plot_reactions(model, F_steps, prep, train_steps, save_path, has_truth):
-    """Reaction forces per load step: epistemic band vs true reactions (synthetic), predictive band vs measured."""
+def plot_reactions(model, F_steps, prep, train_steps, save_path, has_truth, sigma_R=None):
+    """Reaction forces per load step: epistemic band vs true reactions (synthetic), predictive band vs measured.
+    sigma_R: (n_steps, 2) reaction noise of the likelihood (default: the dataset's load_noise_std_steps)."""
     corr = model.info.get("likelihood", "eiv") not in ("residual", "residual_learned", "residual_exact")
     mean, cov = eiv_reaction_prediction(model, F_steps, prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"], correction=corr)
     sd_epi = np.sqrt(np.stack([cov[:, 0, 0], cov[:, 1, 1]], axis=1))
-    sig_R = np.maximum(np.asarray(prep["load_noise_std_steps"]), 1e-3)
+    sig_R = np.maximum(np.asarray(prep["load_noise_std_steps"] if sigma_R is None else sigma_R, dtype=float), 1e-3)
+    unmeasured = np.all(sig_R > 1e6, axis=0)                 # components without a load cell: epistemic band only
+    sig_R = np.where(unmeasured[None, :], 0.0, sig_R)
     sd_pred = np.sqrt(sd_epi ** 2 + sig_R ** 2)
     R_obs = np.asarray(prep["reaction_forces"])
     panels = [("predictive", sd_pred, R_obs, "measured reaction")]
@@ -150,7 +155,10 @@ def plot_reactions(model, F_steps, prep, train_steps, save_path, has_truth):
             r2 = 1 - np.sum((r - m) ** 2) / np.sum((r - r.mean()) ** 2)
             cov_all = hit.mean() * 100
             cov_val = hit[~is_tr].mean() * 100 if np.any(~is_tr) else float("nan")
-            ax.set_title(f"$R_{comp}$ {kind}: coverage {cov_all:.0f}% (val {cov_val:.0f}%), $R^2$ {r2:.4f}")
+            if kind == "predictive" and unmeasured[i]:
+                ax.set_title(f"$R_{comp}$: not measured (epistemic band only)")
+            else:
+                ax.set_title(f"$R_{comp}$ {kind}: coverage {cov_all:.0f}% (val {cov_val:.0f}%), $R^2$ {r2:.4f}")
             ax.set_ylabel(f"$R_{comp}$")
             if i == 1:
                 ax.set_xlabel("load step")
@@ -210,6 +218,17 @@ def main():
         rel = np.maximum(float(rec["reaction_noise_rel"]) * R_abs, float(rec.get("reaction_noise_floor", 0.0)))
         meas = [int(c) for c in rec.get("reaction_components", range(sigma_R_steps.shape[1]))]
         sigma_R_steps[:, meas] = rel[:, meas]
+    zero_comps = [int(c) for c in rec.get("reaction_zero_components", [])]
+    if zero_comps:     # components known to vanish (e.g. R_y of a tensile test): observed 0, noise from the measured force
+        rf = np.array(prep["reaction_forces"], dtype=float)
+        rf[:, zero_comps] = 0.0
+        prep["reaction_forces"] = rf
+        meas = [int(c) for c in rec.get("reaction_components", range(rf.shape[1])) if int(c) not in zero_comps]
+        scale = np.linalg.norm(rf[:, meas], axis=1)
+        rel_z = float(rec.get("reaction_noise_rel", 0.01))
+        sigma_R_steps[:, zero_comps] = np.maximum(rel_z * scale, float(rec.get("reaction_noise_floor", 0.0)))[:, None]
+        print(f"[HSGP] reaction components {zero_comps} fitted to 0 with sigma = {rel_z:g} x |measured force| "
+              f"(floor {float(rec.get('reaction_noise_floor', 0.0)):g})", flush=True)
     energy_scale = external_work_density(prep, prep["node_type"], max(train_steps))
     lin_prior_scale = float(rec.get("linear_elastic_prior_scale", 100.0 * energy_scale))
     disp_noise = float(rec.get("disp_noise", prep.get("disp_noise", 0.0)))
@@ -271,7 +290,7 @@ def main():
 
     t0 = time.time()
     plot_convergence(hist, save_path)
-    reac = plot_reactions(model, F_all, prep, train_steps, save_path, has_truth)
+    reac = plot_reactions(model, F_all, prep, train_steps, save_path, has_truth, sigma_R=sigma_R_steps)
     _, frac = ellipticity_penalty(model.psi_det, F_all[jnp.array(train_steps)], 8)
     metrics = dict(seed=args.seed, extraction_method="hsgp", extraction_time=fit_time, train_steps=train_steps,
                    val_steps=val_steps, log_evidence=model.info["log_evidence"], converged=model.info["converged"],
@@ -302,6 +321,12 @@ def main():
                        r2_train=r2_res.train_metrics.get("r2"), ec_train=r2_res.train_metrics.get("ec"),
                        r2_val=r2_res.val_metrics.get("r2"), rmse_val=r2_res.val_metrics.get("rmse"),
                        ec_val=r2_res.val_metrics.get("ec"))
+    else:   # experimental data: the extracted energy along the six standard deformation modes, without a truth
+        from plots.training import plot_energy_decomposition_validation
+        plot_energy_decomposition_validation(model, None, save_path, I_obs=I_obs)
+    # data coverage in the GP input space: interpolation region and where the standard modes leave it
+    from plots.training import plot_invariant_space_modes
+    metrics["mode_exit_gamma"] = plot_invariant_space_modes(model, save_path, I_obs)
     json.dump(metrics, open(os.path.join(save_path, "extraction_metrics.json"), "w"), indent=4, default=float)
     print(f"[seed {args.seed}] plots and metrics done in {time.time() - t0:.0f}s -> {save_path} | "
           f"R2 val {metrics.get('r2_val', float('nan')):.4f} EC val {metrics.get('ec_val', float('nan')):.1f} | "
