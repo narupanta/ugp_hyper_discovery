@@ -106,7 +106,8 @@ def ellipticity_penalty(psi_fn: Any, f3x3: jnp.ndarray, n_dirs: int = 8):
     def tangent(f3):
         return jax.jacfwd(jax.grad(lambda f2: psi_fn(f3.at[:2, :2].set(f2))))(f3[:2, :2])   # (2,2,2,2)
 
-    A = jax.vmap(tangent)(f3x3.reshape(-1, 3, 3))
+    # batched: a vmap over all states holds every state's second-derivative intermediates at once
+    A = jax.lax.map(tangent, f3x3.reshape(-1, 3, 3), batch_size=256)
     theta = jnp.arange(n_dirs) * jnp.pi / n_dirs
     n = jnp.stack([jnp.cos(theta), jnp.sin(theta)], axis=-1)                          # (D, 2)
     Q = jnp.einsum("eijkl,dj,dl->edik", A, n, n)

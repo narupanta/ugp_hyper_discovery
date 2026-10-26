@@ -1550,15 +1550,16 @@ def plot_training_r2_piola(
     @jax.jit
     def _eval_step_piola(F_s, key):
         keys = jax.random.split(key, n_pws_samples)
-        return jax.vmap(lambda k: learned_gp.piola_pws(F_s, k))(keys)
+        # draws in batches of 8: a full vmap over the draws holds every draw's basis Jacobians at once
+        return jax.lax.map(lambda k: learned_gp.piola_pws(F_s, k), keys, batch_size=8)
 
     for step in range(num_steps):
         if step not in train_set and step not in val_set and step not in test_set:
             continue
         F_step = F_train_full[step]
-        P_tr = jax.vmap(true_model.P)(F_step)
-        P_gp = jax.vmap(learned_gp.piola_det)(F_step)
-        P_samps = _eval_step_piola(F_step, jax.random.PRNGKey(42 + step))
+        P_tr = np.asarray(jax.vmap(true_model.P)(F_step))
+        P_gp = np.asarray(jax.vmap(learned_gp.piola_det)(F_step))
+        P_samps = np.asarray(_eval_step_piola(F_step, jax.random.PRNGKey(42 + step)))
         step_results[step] = (P_tr, P_gp, P_samps)
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 12), squeeze=False)

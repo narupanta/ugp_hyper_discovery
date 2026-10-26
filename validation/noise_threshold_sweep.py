@@ -13,6 +13,12 @@ Free-residual noise sigma_f across the levels (--force_noise_rule):
   evidence           per-step sigma_f,t = s |R_t| with s maximising the evidence of the reaction-weighted likelihood
                      (--reaction_weight: 'euclid' = N_free / N_BC (default), or a number).
   from_reaction      sigma_f,t,d = (N_BC / N_free) sigma_R,t,d (force-residual noise tied to the reaction noise).
+  joint              per-step sigma_f,t = s |R_t| with log s optimised by gradient together with the kernel
+                     hyperparameters on the evidence of the reaction-weighted likelihood (one solve; --reaction_weight).
+  joint_refit        as joint, but the weighted evidence only selects s; with s fixed the hyperparameters and the
+                     posterior are recomputed with reaction weight 1 (reactions at their actual noise level).
+  em                 sigma_f inferred per direction by EM from the expected free residual (hsgp_force_noise -1,
+                     residual_exact), with the reaction term weighted by --reaction_weight (as for 'evidence').
   cv                 per-step sigma_f,t = s |R_t| with s chosen by cross-validation over the training steps
                      (held-out reactions; residual_exact). The chosen s is reported per seed.
 Load noise: --load_noise_levels gives a grid displacement x load noise (data generated with each load_noise); the
@@ -52,7 +58,7 @@ def parse_args():
                    help="load noise levels, relative (default: recipe key sweep_load_noise, else its load_noise)")
     p.add_argument("--seeds", type=int, nargs="+", default=None,
                    help="noise seeds (default: recipe key sweep_seeds, else 1 2 3)")
-    p.add_argument("--force_noise_rule", choices=["scaled", "fixed", "derived", "cv", "evidence", "from_reaction"],
+    p.add_argument("--force_noise_rule", choices=["scaled", "fixed", "derived", "cv", "evidence", "from_reaction", "em", "joint", "joint_refit"],
                    default=None, help="sigma_f rule (default: recipe key sweep_force_noise_rule, else scaled)")
     p.add_argument("--force_noise_scale", type=float, default=1000.0, help="scaled: sigma_f = scale x disp_noise")
     p.add_argument("--force_noise", type=float, default=0.01, help="fixed: sigma_f")
@@ -164,13 +170,16 @@ def main():
         if args.likelihood:
             rec["hsgp_likelihood"] = args.likelihood
         rule = args.force_noise_rule
-        rec["hsgp_force_noise"] = {"scaled": args.force_noise_scale * lvl, "fixed": args.force_noise}.get(rule, 0.0)
+        rec["hsgp_force_noise"] = {"scaled": args.force_noise_scale * lvl, "fixed": args.force_noise,
+                                   "em": -1.0}.get(rule, 0.0)
         rec["hsgp_force_noise_cv"] = int(rule == "cv")
         rec["hsgp_force_noise_evidence"] = int(rule == "evidence")
         rec["hsgp_force_noise_from_reaction"] = int(rule == "from_reaction")
+        rec["hsgp_force_noise_joint"] = int(rule in ("joint", "joint_refit"))
+        rec["hsgp_force_noise_joint_refit"] = int(rule == "joint_refit")
         if rule == "cv" and args.cv_tol is not None:
             rec["hsgp_cv_tol"] = float(args.cv_tol)
-        if rule == "evidence":
+        if rule in ("evidence", "em", "joint", "joint_refit"):
             if str(args.reaction_weight) == "euclid":
                 rec["hsgp_reaction_weight_rule"] = "euclid"
             else:
@@ -178,7 +187,8 @@ def main():
         rp = os.path.join(sweep, "recipes", f"noise_{tag}.yaml")
         yaml.safe_dump(rec, open(rp, "w"), sort_keys=False)
         how = {"cv": "by cross-validation", "evidence": "by evidence", "from_reaction": "(N_BC/N_free) sigma_R",
-               "derived": "from disp_noise"}.get(rule, rec["hsgp_force_noise"])
+               "derived": "from disp_noise", "em": "inferred (EM)", "joint": "optimised with the hyperparameters",
+               "joint_refit": "selected with the hyperparameters, refit at weight 1"}.get(rule, rec["hsgp_force_noise"])
         print(f"  disp {lvl:.0e}, load {load:g}: sigma_f {how} ...", flush=True)
         target = exp if exp and os.path.isdir(exp) else rp   # an existing directory: only the missing seeds run
         t0 = time.time()

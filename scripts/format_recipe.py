@@ -24,7 +24,7 @@ GROUPS = [
     ("Extraction (HSGP)", [
         # likelihood and noise model
         "hsgp_likelihood", "hsgp_prior_mean", "hsgp_force_noise", "hsgp_force_noise_rel", "hsgp_force_noise_cv",
-        "hsgp_cv_folds", "hsgp_cv_tol", "hsgp_force_noise_evidence", "hsgp_force_noise_from_reaction",
+        "hsgp_cv_folds", "hsgp_cv_tol", "hsgp_force_noise_evidence", "hsgp_force_noise_joint", "hsgp_force_noise_joint_refit", "hsgp_force_noise_from_reaction",
         "hsgp_reaction_weight", "hsgp_reaction_weight_rule", "hsgp_eiv_warmup", "hsgp_nigp_warmup",
         "hsgp_eiv_damping", "hsgp_eiv_damping_decay", "reaction_components", "reaction_noise_rel",
         "reaction_noise_floor", "reaction_zero_components",

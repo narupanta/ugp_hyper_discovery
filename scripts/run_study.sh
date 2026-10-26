@@ -40,7 +40,7 @@ THR_RECIPE=""                                     # "" = RECIPE
 NOISE_LEVELS=""                                   # displacement noise std, e.g. "1e-5 4e-5 7e-5 1e-4"
 LOAD_NOISE_LEVELS=""                              # load noise (relative), e.g. "0.02 0.05 0.1"; reactions match it
 THR_SEEDS=""                                      # e.g. "1 2 3"
-FORCE_NOISE_RULE=""                               # cv | evidence | scaled | fixed | derived | from_reaction
+FORCE_NOISE_RULE=""                               # cv | evidence | joint | joint_refit | em | scaled | fixed | derived | from_reaction
 CV_TOL="2"                                        # cv: smallest s within this many nats of the best ("" = best)
 R2_MIN="0.99"                                     # a grid point "works" if mean val energy R^2 >= R2_MIN ...
 EC_MIN="90"                                       # ... and mean val energy coverage >= EC_MIN (%)

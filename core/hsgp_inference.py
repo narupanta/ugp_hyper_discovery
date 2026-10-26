@@ -153,7 +153,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              sigma_f_known: Optional[float] = None, nigp_warmup: str = "residual", eiv_warmup: str = "none",
              sigma_f_rel: Optional[float] = None, sigma_f_cv: bool = False, cv_folds: int = 2, cv_grid=None,
              sigma_f_evidence: bool = False, reaction_weight_rule: str = "fixed", sigma_f_from_reaction: bool = False,
-             cv_tol: float = 0.0,
+             cv_tol: float = 0.0, sigma_f_joint: bool = False, joint_refit_unweighted: bool = False,
              hyper_steps: int = 60, verbose: bool = True, log_fn=print):
     """
     f3x3_steps: (T, C, 3, 3) observed deformation gradients of the training steps; R_obs, sigma_R: (T, 2).
@@ -219,6 +219,12 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     folds, fit on the others, held-out log predictive density of the REACTIONS (the free residuals have zero
     targets and would select a vanishing energy, as the evidence does), log grid
     (cv_grid, default 1e-5..1, 11 points) refined around the optimum; the validation steps stay untouched.
+    sigma_f_joint ('residual_exact', zero-mean prior): sigma_f,t = s |R_t| with log s a hyperparameter, optimised with the
+    kernel hyperparameters on the (reaction-weighted) evidence by the same L-BFGS (one solve; as sigma_f_evidence, but by
+    gradient instead of a grid). Needs reaction_weight >~ 10 for an interior maximum (weight 1: s -> 0).
+    joint_refit_unweighted (with sigma_f_joint): the weighted evidence only selects s; s is then fixed and the kernel
+    hyperparameters and the posterior are recomputed with reaction weight 1, so that the reactions count at their
+    actual noise level (a weight w makes the posterior treat each reading as w readings: bands ~ 1/sqrt(w) too narrow).
     sigma_f_known (residual likelihoods): iid noise std of the free-node force residual, set directly (force units);
     replaces the force-equivalent noise from sigma_u_known, so no reaction-only linear-elastic material is fitted.
     warp: GP inputs log(I_bar - 2), log J (see hsgp_model); boxes, spans and lengthscales live in the warped space.
@@ -274,10 +280,13 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     """
     # residual_exact without a given noise: sigma_f inferred per direction by EM (expected residual), exact posterior
     exact_learn = likelihood == "residual_exact" and not (sigma_u_known or sigma_f_known or sigma_f_rel or sigma_f_cv
-                                                          or sigma_f_evidence or sigma_f_from_reaction)
+                                                          or sigma_f_evidence or sigma_f_from_reaction or sigma_f_joint)
     nigp = likelihood == "nigp"
-    # per-step force-residual noise sigma_f,t = s |R_t| (s given, or chosen by cross-validation over training steps)
-    force_rel = bool(sigma_f_rel) or bool(sigma_f_cv) or bool(sigma_f_evidence)
+    # per-step force-residual noise sigma_f,t = s |R_t| (s given, chosen by cross-validation / evidence grid, or a
+    # hyperparameter of the evidence optimisation)
+    force_rel = bool(sigma_f_rel) or bool(sigma_f_cv) or bool(sigma_f_evidence) or bool(sigma_f_joint)
+    if sigma_f_joint and (sigma_f_cv or sigma_f_evidence or sigma_f_rel):
+        raise ValueError("sigma_f_joint excludes sigma_f_rel / sigma_f_cv / sigma_f_evidence (one rule for s).")
     fnoise = dict(s=float(sigma_f_rel) if sigma_f_rel else 1.0, cv=None)
     if nigp_warmup not in ("residual", "linear"):
         raise ValueError(f"nigp_warmup must be 'residual' or 'linear', got {nigp_warmup!r}")
@@ -359,11 +368,15 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             # (they would only drift through the restarts). Fixed values here; constrained_transform switches the
             # volumetric GP off (theta_vol = 0 exactly), and vol_sig is reported as 0.
             h["vol_sig"], h["vol_ls"] = jnp.exp(jnp.asarray(sig_centre)), jnp.asarray(centre_v)
+        if sigma_f_joint:
+            h["s"] = jnp.exp(eta["log_s"])
         return h
 
     eta = dict(log_sig_dev=jnp.asarray(sig_centre), log_sig_vol=jnp.asarray(sig_centre),
                raw_ls_dev=to_raw(jnp.log(centre_d), *bounds["dev"]), raw_ls_vol=to_raw(jnp.log(centre_v), *bounds["vol"]),
                log_su=jnp.log(jnp.array([1e-3, 1e-3])))
+    if sigma_f_joint:
+        eta["log_s"] = jnp.log(jnp.asarray(1e-3))
 
     eta_init = dict(eta)
 
@@ -481,6 +494,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     stability_margin = make_stability_check()
 
     stats_cache = {}
+    rw_scale = dict(v=1.0)        # multiplies the reaction weight the step statistics were assembled with
 
     def linearise(theta_mean, damping=0.0):
         """Sufficient statistics of the Gauss-Newton-linearised EIV model at theta_mean (summed over load steps), with
@@ -499,11 +513,14 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             stats = {k: sum(o[k] for o in out) for k in out[0]}
             if theta_free:
                 stats_cache[key] = dict(stats)
-        if force_rel and theta_free:          # sigma_f,t = s |R_t|: free-force weights / s^2
+        if rw_scale["v"] != 1.0:             # reaction weight changed after the statistics were built (linear in it)
+            stats = dict(stats, GR=stats["GR"] * rw_scale["v"], bR=stats["bR"] * rw_scale["v"])
+        if force_rel and theta_free and not sigma_f_joint:   # sigma_f,t = s |R_t|: free-force weights / s^2
+            # (sigma_f_joint: unit-s statistics here, s applied in posterior_factors / neg_log_post)
             s2 = fnoise["s"] ** 2
             stats = dict(stats, Gx=stats["Gx"] / s2, Gy=stats["Gy"] / s2,
                          logdetW_f=stats["logdetW_f"] - free.shape[0] * len(active) * np.log(s2))
-        w_all = (reaction_weight if (learned_noise or residual) else 1.0) / sigma_R[np.asarray(active)] ** 2
+        w_all = (reaction_weight * rw_scale["v"] if (learned_noise or residual) else 1.0) / sigma_R[np.asarray(active)] ** 2
         stats.update(yWy_R=jnp.sum(w_all * R_obs[np.asarray(active)] ** 2), logdetW_R=jnp.sum(jnp.log(w_all)),
                      theta_fix=theta_fix, ls_floor_dev=ls_floor[0], ls_floor_vol=ls_floor[1])
         # square-root factors of the Gram blocks (G = R^T R, negative round-off eigenvalues clipped), so that the
@@ -540,6 +557,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         lin_scale = lin_prior_scale if (lin_only or prior_mean == "linear_elastic") else 0.0
         M = constrained_transform(model, cons, h, lin_scale, lin_only)
         wx, wy = (1.0, 1.0) if residual else (1.0 / h["su_x"] ** 2, 1.0 / h["su_y"] ** 2)   # residual: weights in stats
+        if sigma_f_joint:                    # unit-s free-force statistics, weighted by 1 / s^2 here
+            wx = wy = 1.0 / h["s"] ** 2
         b = wx * stats["cx"] + wy * stats["cy"] + stats["bR"]
         yWy = wx * stats["sx"] + wy * stats["sy"] + stats["yWy_R"]
         # fixed mean function theta = theta_fix + M gamma: shift the data by the linear prediction of theta_fix
@@ -557,6 +576,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     def neg_log_post(eta_, stats, lin_only):
         h, M, L, v, yWy = posterior_factors(eta_, stats, lin_only)
         noise_logdet = 0.5 * stats["logdetW_f"] if residual else -N_x * jnp.log(h["su_x"]) - N_y * jnp.log(h["su_y"])
+        if sigma_f_joint:                    # log |W_f| at s: the unit-s value minus n_free log s^2
+            noise_logdet = noise_logdet - (N_x + N_y) * jnp.log(h["s"])
         log_z = (-0.5 * yWy + 0.5 * v @ v - jnp.sum(jnp.log(jnp.abs(jnp.diag(L)))) + noise_logdet + 0.5 * stats["logdetW_R"]
                  - 0.5 * (N_x + N_y + 2 * len(active)) * jnp.log(2 * jnp.pi))
         return -(log_z + log_hyperprior(h, stats)), log_z
@@ -654,6 +675,37 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         lin_done = True                         # zero-mean GP: the linear-elastic (mu, kappa) would be discarded
         log_fn(f"[HSGP] {'exact residual warm-up' if warmup_residual else 'exact update'} with a zero-mean prior: "
                f"linear-elastic stage skipped")
+    if sigma_f_joint:
+        if not exact or prior_mean != "none":
+            raise ValueError("sigma_f_joint needs likelihood 'residual_exact' and prior_mean 'none'.")
+        log_fn(f"[HSGP] force noise sigma_f,t = s |R_t|: s optimised with the kernel hyperparameters on the evidence "
+               f"(reaction weight {reaction_weight:.3g})")
+        if joint_refit_unweighted:
+            # step 1: s from the weighted evidence on all training steps; step 2 (the main solve below): s fixed,
+            # reaction weight 1, hyperparameters and posterior recomputed
+            active = list(all_idx)
+            N_x, N_y = n_free_x * len(active), n_free_y * len(active)
+            ls_floor = stage_ls_floor(active)
+            st, sel_opt, best = linearise(theta_mean), make_optimiser(), None
+            for e0 in [eta_init] + ([with_lengthscales(eta_init, 0.5), with_lengthscales(eta_init, 2.0)]
+                                    if hyper_restarts else []):
+                cand = sel_opt(e0, st, False)
+                val, lz = neg_log_post(cand, st, False)
+                if np.isfinite(float(val)) and (best is None or float(val) < best[0]):
+                    best = (float(val), float(lz), cand)
+            if best is None:
+                raise RuntimeError("joint s selection: no finite evidence")
+            s_sel = float(unpack(best[2])["s"])
+            log_fn(f"[HSGP] step 1: s = {s_sel:.3g} (weighted evidence {best[1]:.2f}, reaction weight "
+                   f"{reaction_weight:.3g}); step 2: s fixed, reaction weight 1")
+            fnoise["s"] = s_sel
+            fnoise["cv"] = dict(method="joint evidence, refit unweighted", reaction_weight=float(reaction_weight),
+                                s=s_sel, log_evidence_weighted=best[1])
+            sigma_f_joint = False                 # from here on s is fixed (statistics scaled by 1 / s^2)
+            rw_scale["v"] = 1.0 / float(reaction_weight)
+            active = None
+    elif joint_refit_unweighted:
+        raise ValueError("joint_refit_unweighted needs sigma_f_joint.")
     if sigma_f_cv or sigma_f_evidence:
         if not exact or prior_mean != "none":
             raise ValueError("sigma_f_cv / sigma_f_evidence need likelihood 'residual_exact' and prior_mean 'none'.")
@@ -783,6 +835,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 aborted = True
                 break
             eta, factor = eta_new, new_factor
+            if sigma_f_joint:
+                fnoise["s"] = float(unpack(eta)["s"])
             if learned_noise:   # variational update of the per-direction force noise from the expected residual
                 S_theta = factor @ factor.T
                 su_new = [jnp.sqrt((new_mean @ stats[g] @ new_mean + jnp.trace(stats[g] @ S_theta)) / n) for g, n in (("Gx", N_x), ("Gy", N_y))]

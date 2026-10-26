@@ -23,6 +23,10 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
                                     # with sigma = reaction_noise_rel x |measured force| (>= reaction_noise_floor)
     hsgp_force_noise_evidence: 0    # residual_exact: 1 = choose that value by the evidence of the reaction-weighted
                                     # likelihood (set hsgp_reaction_weight >= 10, e.g. 10)
+    hsgp_force_noise_joint: 0       # residual_exact: 1 = that value (log s) optimised with the kernel hyperparameters
+                                    # on the reaction-weighted evidence by gradient (one solve; weight >= 10)
+    hsgp_force_noise_joint_refit: 0 # with _joint: the weighted evidence only selects s; s fixed, hyperparameters and
+                                    # posterior recomputed with reaction weight 1 (calibrated bands)
     hsgp_force_noise: 0.0           # residual likelihoods: free-node force-residual noise std (force units);
                                     # 0 = from disp_noise, < 0 = inferred by EM (residual_exact)
     hsgp_prior_mean: none           # none | linear_elastic | linear_elastic_fixed (mean frozen at the linear-elastic fit)
@@ -86,7 +90,8 @@ HSGP_DEFAULTS = dict(hsgp_likelihood="eiv", hsgp_prior_mean="none", hsgp_envelop
                      hsgp_ls_floor_fraction=0.0, hsgp_tol_intermediate=0.0, hsgp_hyper_delay=0, hsgp_cap_accept_tol=0.0, hsgp_tol=1e-5,
                      hsgp_force_noise=0.0, hsgp_nigp_warmup="residual", hsgp_eiv_warmup="none",
                      hsgp_force_noise_rel=0.0, hsgp_force_noise_cv=0, hsgp_cv_folds=2, hsgp_force_noise_evidence=0,
-                     hsgp_reaction_weight_rule="fixed", hsgp_force_noise_from_reaction=0, hsgp_cv_tol=0.0)
+                     hsgp_reaction_weight_rule="fixed", hsgp_force_noise_from_reaction=0, hsgp_cv_tol=0.0,
+                     hsgp_force_noise_joint=0, hsgp_force_noise_joint_refit=0)
 
 
 def parse_args():
@@ -260,7 +265,9 @@ def main():
             nigp_warmup=str(opt["hsgp_nigp_warmup"]), eiv_warmup=str(opt["hsgp_eiv_warmup"]),
             sigma_f_rel=float(opt["hsgp_force_noise_rel"]) or None, sigma_f_cv=bool(int(opt["hsgp_force_noise_cv"])),
             cv_folds=int(opt["hsgp_cv_folds"]), sigma_f_evidence=bool(int(opt["hsgp_force_noise_evidence"])),
-            sigma_f_from_reaction=bool(int(opt["hsgp_force_noise_from_reaction"])), cv_tol=float(opt["hsgp_cv_tol"]))
+            sigma_f_from_reaction=bool(int(opt["hsgp_force_noise_from_reaction"])), cv_tol=float(opt["hsgp_cv_tol"]),
+            sigma_f_joint=bool(int(opt["hsgp_force_noise_joint"])),
+            joint_refit_unweighted=bool(int(opt["hsgp_force_noise_joint_refit"])))
         fit_time = time.time() - t0
         model.save(post_path)
         # adaptive continuation may stop early: the posterior is then conditioned on fewer steps, and the teacher must
@@ -309,6 +316,7 @@ def main():
         def release():   # compiled functions keep their (large, closed-over) sample arrays alive: free between plots
             jax.clear_caches()
             gc.collect()
+        release()   # the stability check and moduli above leave their compiled functions behind
         r2_res = plot_training_r2(model, mat, F_all, save_path, train_steps=train_steps, val_steps=val_steps, test_steps=test_steps)
         release()
         plot_training_r2_piola(model, mat, F_all, save_path, train_steps=train_steps, val_steps=val_steps,
