@@ -1,0 +1,67 @@
+# ==============================================================================
+# Recipe v2 (HSGP extraction): Isihara, plane strain, displacement control, target displacement 1.0
+# Small-to-large continuation {1,7} -> ... -> {1,7,13,17,19} with annealed EIV damping (A/B against 20261008T144809)
+# Run: sbatch scripts/run_hsgp_slurm.sh configs/recipes_v2/isihara_hsgp_t1.0_s2l_lefix.yaml
+# ==============================================================================
+
+# 1. Synthetic data (clean FEM dataset solved once per configuration; noise added per seed at load time)
+
+# --- Material and data generation --------------------------------------------
+material_model_name: isihara
+material_params:
+  dev_params: [0.5, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  vol_params: [1.0, 0.5, 0.0]
+geometry_train: block
+geometry_val: holes              # FEM forward validation geometry
+mesh_size: 0.08
+control_mode: displacement
+stress_mode: plane_strain
+n_loadsteps: 20
+target_load_true_top: 1.0
+target_load_holes: 1.0           # validation load kept inside the training range
+asym_factor: 0.5
+disp_noise: 0.0005
+load_noise: 0.05
+
+# --- Load steps and seeds ----------------------------------------------------
+train_load_steps_indices: [1,2,3,5, 7, 9,11, 13, 15]
+val_load_steps_indices: [4, 6, 8, 10, 12, 14, 15, 16, 18]
+test_load_steps_indices: [18, 19]
+seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+# --- Extraction (HSGP) -------------------------------------------------------
+hsgp_likelihood: eiv              # eiv | residual | residual_learned
+hsgp_prior_mean: linear_elastic_fixed  # mean frozen at the linear-elastic fit; GP models the departure
+hsgp_eiv_damping: 0.0            # initial relative EIV damping per stage, annealed x0.1 per iteration to exactly 0
+hsgp_eiv_damping_decay: 0.1
+hsgp_num_basis_dev: 24            # eigenfunctions per deviatoric dimension (24 x 24)
+hsgp_num_basis_vol: 32
+hsgp_box_factor: 8.0              # basis box half-width / data half-range
+hsgp_warp: 1                      # GP inputs log(I_bar - 2), log J (dense core + long tail of strain states)
+hsgp_envelope: 1                  # amplitude envelope from the linear-elastic stage (energies over orders of magnitude)
+hsgp_amplitude_prior_scale: 1.0   # log-normal hyperprior widths (log units)
+hsgp_lengthscale_prior_scale: 1.0
+hsgp_sigma_cap: 10.0              # GP amplitudes capped at 10x their prior centre (healthy fits stay within ~2x)
+hsgp_hyper_restarts: 1            # multi-start hyperparameter optimisation (robust to CPU/GPU numerical differences)
+hsgp_continuation: 1              # load-step continuation {1,7} -> {1,7,13} -> ... (large deformations)
+hsgp_continuation_stages: [[1, 2, 3], [1, 2, 3, 5], [1, 2, 3, 5, 7], [1, 2, 3, 5, 7, 9, 11], [1, 2, 3, 5, 7, 9, 11, 13, 15]]
+hsgp_max_outer: 60                # Gauss-Newton iteration cap per continuation stage (a stage stopped at the cap is logged)
+hsgp_stability_search: 1          # Gauss-Newton updates must keep the mean tangent positive definite
+
+# --- Distillation ------------------------------------------------------------
+distilled_material_model: gmr
+distill_target: sef_split
+distillation_n_iterations: 10000
+dev_vol_distillation_n_iterations: 10000
+sample_mode: dataset_f
+num_points: 512
+num_func_samples: 512
+max_gamma: 1.0
+do_sensitivity: 1
+sobol_threshold: 0.0001
+sobol_samples_factor: 4096
+
+# --- FEM forward validation --------------------------------------------------
+run_validation: 1
+val_number_samples: 1024
+val_workers: 4

@@ -1,0 +1,70 @@
+# ==============================================================================
+# Recipe v2 (HSGP extraction): isihara, plane strain, displacement control, target 1.0, 40 load steps, adaptive continuation, no hyperpriors
+# Run: sbatch scripts/run_hsgp_slurm.sh configs/recipes_v2/isihara_hsgp_t1.0_n40_adaptive_nohyperprior.yaml
+# ==============================================================================
+
+# 1. Synthetic data (clean FEM dataset solved once per configuration; noise added per seed at load time)
+
+# --- Material and data generation --------------------------------------------
+material_model_name: isihara
+material_params:
+  dev_params: [0.5, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  vol_params: [1.0, 0.5, 0.0]
+geometry_train: block
+geometry_val: holes              # FEM forward validation geometry
+mesh_size: 0.08
+control_mode: displacement
+stress_mode: plane_strain
+n_loadsteps: 40
+target_load_true_top: 1.0
+target_load_holes: 1.0           # validation load kept inside the training range
+asym_factor: 0.5
+disp_noise: 0.0001                # strain noise ~0.2-0.9% on this mesh (5e-4 gave noise-made instabilities)
+load_noise: 0.05
+
+# --- Load steps and seeds ----------------------------------------------------
+train_load_steps_indices: [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39]
+val_load_steps_indices: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38]
+test_load_steps_indices: [38, 39]
+seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+# --- Extraction (HSGP) -------------------------------------------------------
+hsgp_likelihood: eiv              # eiv | residual | residual_learned
+hsgp_prior_mean: none             # zero-mean GP
+hsgp_eiv_damping: 0.0
+hsgp_num_basis_dev: 24
+hsgp_num_basis_vol: 32
+hsgp_box_factor: 8.0
+hsgp_warp: 0                      # GP inputs: raw invariants (I1bar, I2bar, J)
+hsgp_envelope: 0                  # no amplitude envelope
+hsgp_amplitude_prior_scale: 0.0   # hyperprior off (pure type-II maximum likelihood)
+hsgp_lengthscale_prior_scale: 0.0 # hyperprior off
+hsgp_sigma_cap: 10.0
+hsgp_hyper_restarts: 1
+hsgp_hyper_delay: 2               # later stages: hyperparameters fixed in their first 2 GP iterations (mean absorbs new steps first)
+hsgp_hyper_iters_per_stage: 3     # hyperparameters optimised in the first 3 GP iterations of a stage, then fixed
+hsgp_ls_floor_fraction: 0.0       # soft lengthscale floor relative to the stage's data span (off)
+hsgp_continuation: 1
+hsgp_adaptive: 1                  # adaptive continuation: coarse full range first, roll back and bisect on failure
+hsgp_max_outer: 60
+hsgp_tol_intermediate: 0.001      # intermediate stages only pass on the linearisation point (final stage: 1e-5)
+hsgp_cap_accept_tol: 0.001        # a stage at the iteration cap with force change < 1e-3 counts as converged
+hsgp_stability_search: 1
+
+# --- Distillation ------------------------------------------------------------
+distilled_material_model: gmr
+distill_target: sef_split
+distillation_n_iterations: 10000
+dev_vol_distillation_n_iterations: 10000
+sample_mode: dataset_f
+num_points: 512
+num_func_samples: 512
+max_gamma: 1.0
+do_sensitivity: 1
+sobol_threshold: 0.0001
+sobol_samples_factor: 4096
+
+# --- FEM forward validation --------------------------------------------------
+run_validation: 1
+val_number_samples: 1024
+val_workers: 4

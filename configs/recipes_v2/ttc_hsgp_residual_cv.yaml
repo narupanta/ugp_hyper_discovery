@@ -1,0 +1,94 @@
+# ==============================================================================
+# Recipe v2 (HSGP extraction): TTc experiment, residual likelihood (exact update), force-residual noise by
+# cross-validation over the training steps (sigma_f,t = s |R_t|, s from held-out reactions, plateau rule 2 nats).
+# Incompressible plane stress (deviatoric energy only); R_x measured (0.5% of the reading, floor 0.02 N) and
+# R_y fitted to 0 (tensile test) with the same noise, 0.5% of |R_x|.
+# Otherwise as configs/recipes_v2/ttc_hsgp_incompressible.yaml. Amplitude cap 100 x the prior centre.
+# Run: bash scripts/run_study.sh --mode normal --recipe configs/recipes_v2/ttc_hsgp_residual_cv.yaml --downstream 0
+# ==============================================================================
+
+# --- Material and data generation --------------------------------------------
+material_model_name: experimental
+has_ground_truth: false
+dataset_path: dataset/preprocessed/experiment/ttc_20_steps_ps_incomp.npz
+geometry_train: ttc
+geometry_val: ttc
+control_mode: displacement
+stress_mode: plane_stress
+plane_stress_mode: incompressible
+n_loadsteps: 20
+load_noise: 0.005
+
+# --- Load steps and seeds ----------------------------------------------------
+train_load_steps_indices:
+- 1
+- 3
+- 5
+- 7
+- 9
+- 11
+- 13
+- 15
+- 17
+- 19
+val_load_steps_indices:
+- 0
+- 2
+- 4
+- 6
+- 8
+- 10
+- 12
+- 14
+- 16
+- 18
+seeds:
+- 1
+
+# --- Extraction (HSGP) -------------------------------------------------------
+hsgp_likelihood: residual_exact
+hsgp_prior_mean: none
+hsgp_force_noise: 0.0
+hsgp_force_noise_cv: 1
+hsgp_cv_folds: 2
+hsgp_cv_tol: 2.0
+hsgp_reaction_weight: 1.0
+reaction_components:
+- 0
+reaction_noise_rel: 0.005
+reaction_noise_floor: 0.02
+reaction_zero_components: [1]             # R_y = 0 (tensile test), sigma = 0.5% x |R_x|
+hsgp_num_basis_dev: 8
+hsgp_num_basis_vol: 8
+hsgp_box_factor: 8.0
+hsgp_warp: 0
+hsgp_envelope: 0
+hsgp_amplitude_prior_scale: 0.0
+hsgp_lengthscale_prior_scale: 0.0
+hsgp_sigma_cap: 100.0
+hsgp_hyper_restarts: 1
+hsgp_hyper_delay: 2
+hsgp_ls_floor_fraction: 0.0
+hsgp_continuation: 1
+hsgp_adaptive: 1
+hsgp_max_outer: 60
+hsgp_cap_accept_tol: 1e-4
+hsgp_stability_search: 1
+
+# --- Distillation ------------------------------------------------------------
+distilled_material_model: gmr_ogden_dev
+distill_target: sef_split
+distillation_n_iterations: 10000
+dev_vol_distillation_n_iterations: 10000
+sample_mode: dataset_f
+num_points: 512
+num_func_samples: 512
+max_gamma: 1.0
+do_sensitivity: 1
+sobol_threshold: 0.0001
+sobol_samples_factor: 4096
+
+# --- FEM forward validation --------------------------------------------------
+run_validation: 1
+val_number_samples: 1024
+val_workers: 4
