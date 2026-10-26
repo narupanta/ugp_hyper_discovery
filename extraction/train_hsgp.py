@@ -1,62 +1,26 @@
 """
-HSGP extraction (closed-form reduced-rank GP posterior under the EIV likelihood, core/hsgp_*.py) for one seed.
+HSGP extraction for one seed: exact Gaussian posterior of the reduced-rank GP energy under the residual likelihood
+(core/hsgp_inference.py), with the free-residual noise sigma_free,t = s |R_t| and s chosen by cross-validation on
+held-out reactions (or given).
 
-Writes the same layout as extraction/train_unsupervised.py into --batch_dir:
-    hsgp_posterior.npz, hsgp_history.json, config.json, I_obs_all.npy, extraction_metrics.json and the plots.
-
---phase fit|plot|all: the fit and the plots run in separate processes on small machines (peak memory adds up
-otherwise); scripts/run_hsgp_pipeline.sh calls the two phases one after the other.
+Writes into --batch_dir: hsgp_posterior.npz, hsgp_history.json, config.json, I_obs_all.npy, extraction_metrics.json
+and the plots. --phase fit|plot|all: the fit and the plots can run in separate processes (peak memory on small
+machines); scripts/run_hsgp_pipeline.sh calls the two phases one after the other.
 
 HSGP settings are read from the recipe (keys below) and can be overridden on the command line:
-    hsgp_likelihood: eiv            # eiv | residual | residual_learned | residual_exact (needs disp_noise or hsgp_force_noise)
-                                    # | nigp (exact residual warm-up, then K Sigma_u K^T input noise; needs disp_noise)
-    hsgp_nigp_warmup: residual      # nigp warm-up: residual (exact residual Gaussian) | linear (linear-elastic stage only)
-    hsgp_eiv_warmup: none           # eiv: none | residual_exact (first GP iteration = exact residual Gaussian with
-                                    # hsgp_force_noise / disp_noise; its mean and hyperparameters start the EIV iterations)
-    hsgp_force_noise_rel: 0.0       # residual likelihoods: per-step sigma_f,t = value x |R_t| (0: off)
-    hsgp_force_noise_cv: 0          # residual_exact: 1 = choose that value by cross-validation over the training steps
-    hsgp_cv_folds: 2                # interleaved folds of the training steps for the cross-validation
-    hsgp_cv_tol: 0.0                # > 0: smallest s within this many nats of the best CV score (plateau rule)
-    hsgp_reaction_weight_rule: fixed  # fixed (hsgp_reaction_weight) | euclid (N_free / N_BC, EUCLID balancing)
-    hsgp_force_noise_from_reaction: 0 # residual likelihoods: 1 = sigma_f,t,d = (N_BC / N_free) sigma_R,t,d
-    (recipe, not hsgp_*) reaction_zero_components: [1]  # reactions known to vanish (R_y in a tensile test): fitted to 0
-                                    # with sigma = reaction_noise_rel x |measured force| (>= reaction_noise_floor)
-    hsgp_force_noise_evidence: 0    # residual_exact: 1 = choose that value by the evidence of the reaction-weighted
-                                    # likelihood (set hsgp_reaction_weight >= 10, e.g. 10)
-    hsgp_force_noise_joint: 0       # residual_exact: 1 = that value (log s) optimised with the kernel hyperparameters
-                                    # on the reaction-weighted evidence by gradient (one solve; weight >= 10)
-    hsgp_force_noise_joint_refit: 0 # with _joint: the weighted evidence only selects s; s fixed, hyperparameters and
-                                    # posterior recomputed with reaction weight 1 (calibrated bands)
-    hsgp_force_noise: 0.0           # residual likelihoods: free-node force-residual noise std (force units);
-                                    # 0 = from disp_noise, < 0 = inferred by EM (residual_exact)
-    hsgp_prior_mean: none           # none | linear_elastic | linear_elastic_fixed (mean frozen at the linear-elastic fit)
-    hsgp_envelope: 1                # amplitude envelope s_dev, s_vol from the linear-elastic stage
-    hsgp_warp: 1                    # GP inputs log(I_bar - 2), log J
-    hsgp_continuation: 1            # load-step continuation over the training steps
+    hsgp_force_noise_rel: 0.0       # s of sigma_free,t = s |R_t|; 0 = chosen by cross-validation
+    hsgp_cv_folds: 2                # interleaved folds of the training steps
+    hsgp_cv_tol: 0.0                # > 0: smallest s within this many nats of the best held-out score (plateau rule)
     hsgp_num_basis_dev: 24          # eigenfunctions per deviatoric dimension
     hsgp_num_basis_vol: 32
     hsgp_box_factor: 8.0
-    hsgp_max_outer: 60              # GP-stage iteration cap per continuation stage
-    hsgp_amplitude_prior_scale: 1.0 # log-normal hyperprior widths (log units)
-    hsgp_lengthscale_prior_scale: 1.0
-    hsgp_reaction_weight: 1.0       # residual likelihoods only (residual, residual_exact, residual_learned): reaction
-                                    # log-likelihood x weight (= sigma_R / sqrt(weight)); the EIV likelihood is unweighted
     hsgp_sigma_cap: 10.0            # GP amplitudes capped at this multiple of their prior centre; <= 0: no cap
-    hsgp_stability_search: 1        # Gauss-Newton updates must keep the mean tangent positive definite
+    hsgp_amplitude_prior_scale: 0.0 # > 0: log-normal hyperprior widths (log units)
+    hsgp_lengthscale_prior_scale: 0.0
     hsgp_hyper_restarts: 1          # multi-start hyperparameter optimisation (prior centre, lengthscales x0.5, x2)
-    hsgp_eiv_damping: 0.0           # initial relative damping of the EIV correction (K^2 + mu^2)^-1 K f; 0 = Newton K^-1 f
-    hsgp_eiv_damping_decay: 0.1     # damping factor per GP iteration within a stage (annealed to exactly 0)
-    hsgp_adaptive: 0                # 1: adaptive continuation with rollback (coarse full range first, bisect on failure)
-    hsgp_hyper_iters_per_stage: 0   # >0: optimise hyperparameters only in the first k GP iterations of each stage
-    hsgp_ls_floor_fraction: 0.0     # >0: soft lengthscale floor = fraction x span of the stage's data (GP input space)
-    hsgp_tol: 1e-5                  # convergence tolerance (relative force change) of the final stage
-    hsgp_tol_intermediate: 0.0      # >0: convergence tolerance of intermediate continuation stages (default: hsgp_tol)
-    hsgp_hyper_delay: 0             # >0: hyperparameters fixed in the first k GP iterations of each later stage
-    hsgp_cap_accept_tol: 0.0        # >0 (adaptive): a stage at the iteration cap with force change below this counts as converged
-    hsgp_continuation_stages:       # optional explicit ladder of cumulative load-step sets (recipe only), e.g.
-      - [1, 2, 3]                   #   default: [first two training steps], then one more step per stage
-      - [1, 2, 3, 5]
-      - [1, 2, 3, 5, 7]
+Recipe keys for the reactions (not hsgp_*): reaction_components, reaction_noise_rel, reaction_noise_floor,
+reaction_zero_components (components known to vanish, e.g. R_y of a tensile test, fitted to 0).
+The EIV likelihood and the other noise models: archive/eiv/train_hsgp.py.
 """
 import argparse
 import json
@@ -75,23 +39,16 @@ jax.config.update("jax_enable_x64", True)
 import matplotlib.pyplot as plt
 
 from core.datasetclass import DatasetFactory
-from core.hsgp_inference import fit_hsgp, eiv_reaction_prediction
+from core.hsgp_inference import fit_hsgp, reaction_prediction
 from core.hsgp_model import HSGPHyperelasticity
 from core.loss_function import ellipticity_penalty
 from core.material_models import get_material
 from core.utils import load_f3x3_from_dataset
 from plots.theme import apply_style, save_figure
 
-HSGP_DEFAULTS = dict(hsgp_likelihood="eiv", hsgp_prior_mean="none", hsgp_envelope=1, hsgp_warp=1, hsgp_continuation=1,
-                     hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_box_factor=8.0, hsgp_max_outer=60,
-                     hsgp_amplitude_prior_scale=1.0, hsgp_lengthscale_prior_scale=1.0, hsgp_reaction_weight=1.0,
-                     hsgp_sigma_cap=10.0, hsgp_stability_search=1, hsgp_hyper_restarts=1,
-                     hsgp_eiv_damping=0.0, hsgp_eiv_damping_decay=0.1, hsgp_adaptive=0, hsgp_hyper_iters_per_stage=0,
-                     hsgp_ls_floor_fraction=0.0, hsgp_tol_intermediate=0.0, hsgp_hyper_delay=0, hsgp_cap_accept_tol=0.0, hsgp_tol=1e-5,
-                     hsgp_force_noise=0.0, hsgp_nigp_warmup="residual", hsgp_eiv_warmup="none",
-                     hsgp_force_noise_rel=0.0, hsgp_force_noise_cv=0, hsgp_cv_folds=2, hsgp_force_noise_evidence=0,
-                     hsgp_reaction_weight_rule="fixed", hsgp_force_noise_from_reaction=0, hsgp_cv_tol=0.0,
-                     hsgp_force_noise_joint=0, hsgp_force_noise_joint_refit=0)
+HSGP_DEFAULTS = dict(hsgp_force_noise_rel=0.0, hsgp_cv_folds=2, hsgp_cv_tol=0.0,
+                     hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_box_factor=8.0, hsgp_sigma_cap=10.0,
+                     hsgp_amplitude_prior_scale=0.0, hsgp_lengthscale_prior_scale=0.0, hsgp_hyper_restarts=1)
 
 
 def parse_args():
@@ -104,7 +61,7 @@ def parse_args():
     p.add_argument("--val_load_steps_indices", type=int, nargs="+", default=None)
     p.add_argument("--test_load_steps_indices", type=int, nargs="*", default=None)
     p.add_argument("--phase", choices=["fit", "plot", "all"], default="all")
-    for k, v in HSGP_DEFAULTS.items():   # --hsgp_warp 0 etc. override the recipe
+    for k, v in HSGP_DEFAULTS.items():   # --hsgp_cv_tol 2 etc. override the recipe
         p.add_argument(f"--{k}", type=type(v), default=None)
     return p.parse_args()
 
@@ -130,8 +87,7 @@ def external_work_density(prep, node_type, last_step):
 def plot_reactions(model, F_steps, prep, train_steps, save_path, has_truth, sigma_R=None):
     """Reaction forces per load step: epistemic band vs true reactions (synthetic), predictive band vs measured.
     sigma_R: (n_steps, 2) reaction noise of the likelihood (default: the dataset's load_noise_std_steps)."""
-    corr = model.info.get("likelihood", "eiv") not in ("residual", "residual_learned", "residual_exact")
-    mean, cov = eiv_reaction_prediction(model, F_steps, prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"], correction=corr)
+    mean, cov = reaction_prediction(model, F_steps, prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"])
     sd_epi = np.sqrt(np.stack([cov[:, 0, 0], cov[:, 1, 1]], axis=1))
     sig_R = np.maximum(np.asarray(prep["load_noise_std_steps"] if sigma_R is None else sigma_R, dtype=float), 1e-3)
     unmeasured = np.all(sig_R > 1e6, axis=0)                 # components without a load cell: epistemic band only
@@ -171,32 +127,39 @@ def plot_reactions(model, F_steps, prep, train_steps, save_path, has_truth, sigm
                 ax.legend(fontsize=9)
             out[f"{kind}_{comp}"] = dict(coverage=float(cov_all), coverage_val=float(cov_val), r2=float(r2),
                                          z=((r - m) / s).tolist())
-    fig.suptitle("Reaction forces (" + ("EIV-corrected prediction" if corr else "residual model, no state correction")
-                 + " at the observed displacements)")
+    fig.suptitle("Reaction forces at the measured displacements")
     save_figure(fig, os.path.join(save_path, "reaction_force_uncertainty.pdf"))
     return out
 
 
-def plot_convergence(history, save_path):
+def plot_force_noise_cv(model, save_path):
+    """Cross-validation curve of the free-residual scale s (held-out reaction log predictive density)."""
+    cv = model.info.get("force_noise_cv")
+    if not cv:
+        return
+    s_vals = np.array([float(k) for k in cv["curve"]])
+    score = np.array(list(cv["curve"].values()), dtype=float)
+    ok = np.isfinite(score)
     apply_style()
-    it = [h["iteration"] for h in history]
-    fig, ax = plt.subplots(1, 3, figsize=(15, 4))
-    ax[0].plot(it, [h["log_evidence"] for h in history], "o-"); ax[0].set_title("log evidence"); ax[0].set_xlabel("outer iteration")
-    ax[1].semilogy(it, [h["force_change"] for h in history], "o-"); ax[1].set_title("relative change of internal forces")
-    ax[2].semilogy(it, [h["sigma_u_x"] for h in history], "o-", label=r"$\sigma_{u,x}$")
-    ax[2].semilogy(it, [h["sigma_u_y"] for h in history], "s-", label=r"$\sigma_{u,y}$"); ax[2].legend(); ax[2].set_title("displacement noise")
-    stage_starts = [h["iteration"] for k, h in enumerate(history)
-                    if k > 0 and h.get("continuation_stage", 0) != history[k - 1].get("continuation_stage", 0)]
-    for a in ax:
-        for x in stage_starts:
-            a.axvline(x - 0.5, color="grey", ls=":")
-    save_figure(fig, os.path.join(save_path, "hsgp_convergence.pdf"))
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.semilogx(s_vals[ok], score[ok], "o-", color="tab:blue")
+    ax.axvline(cv["s"], color="tab:red", ls="--", label=f"selected s = {cv['s']:.3g}")
+    if cv["s_best_score"] != cv["s"]:
+        ax.axvline(cv["s_best_score"], color="grey", ls=":", label=f"best score s = {cv['s_best_score']:.3g}")
+    ax.set_xlabel(r"$s$ ($\sigma_{\mathrm{free},t} = s\,\|R_t\|$)")
+    ax.set_ylabel("held-out reaction log predictive density")
+    ax.set_title(f"{len(cv['folds'])}-fold cross-validation")
+    ax.legend()
+    save_figure(fig, os.path.join(save_path, "force_noise_cv.pdf"))
 
 
 def main():
     args = parse_args()
     rec = yaml.safe_load(open(args.recipe)) or {}
     opt = {k: (getattr(args, k) if getattr(args, k) is not None else type(v)(rec.get(k, v))) for k, v in HSGP_DEFAULTS.items()}
+    if str(rec.get("hsgp_likelihood", "residual_exact")) != "residual_exact":
+        raise ValueError(f"hsgp_likelihood {rec['hsgp_likelihood']!r}: only residual_exact is supported here; "
+                         f"the EIV and other likelihoods are in archive/eiv/train_hsgp.py")
     train_steps = args.train_load_steps_indices or rec.get("train_load_steps_indices")
     val_steps = args.val_load_steps_indices or rec.get("val_load_steps_indices", [])
     test_steps = args.test_load_steps_indices if args.test_load_steps_indices is not None else rec.get("test_load_steps_indices", [])
@@ -235,8 +198,6 @@ def main():
         print(f"[HSGP] reaction components {zero_comps} fitted to 0 with sigma = {rel_z:g} x |measured force| "
               f"(floor {float(rec.get('reaction_noise_floor', 0.0)):g})", flush=True)
     energy_scale = external_work_density(prep, prep["node_type"], max(train_steps))
-    lin_prior_scale = float(rec.get("linear_elastic_prior_scale", 100.0 * energy_scale))
-    disp_noise = float(rec.get("disp_noise", prep.get("disp_noise", 0.0)))
     post_path = os.path.join(save_path, "hsgp_posterior.npz")
     print(f"[HSGP] seed {args.seed} | steps {train_steps} | energy scale {energy_scale:.4g} | options {opt}", flush=True)
 
@@ -245,66 +206,38 @@ def main():
         model, hist = fit_hsgp(
             F_all[jnp.array(train_steps)], np.asarray(prep["reaction_forces"])[train_steps],
             sigma_R_steps[train_steps], prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"],
-            energy_scale=energy_scale, lin_prior_scale=lin_prior_scale,
-            num_basis_dev=opt["hsgp_num_basis_dev"], num_basis_vol=opt["hsgp_num_basis_vol"], box_factor=opt["hsgp_box_factor"],
+            energy_scale=energy_scale, num_basis_dev=opt["hsgp_num_basis_dev"], num_basis_vol=opt["hsgp_num_basis_vol"],
+            box_factor=opt["hsgp_box_factor"], sigma_cap=opt["hsgp_sigma_cap"],
             amplitude_prior_scale=opt["hsgp_amplitude_prior_scale"], lengthscale_prior_scale=opt["hsgp_lengthscale_prior_scale"],
-            prior_mean=opt["hsgp_prior_mean"], envelope=bool(opt["hsgp_envelope"]), likelihood=opt["hsgp_likelihood"],
-            sigma_u_known=None if float(opt["hsgp_force_noise"]) < 0 else disp_noise,    # < 0: sigma_f inferred (EM)
-            reaction_weight=opt["hsgp_reaction_weight"], reaction_weight_rule=str(opt["hsgp_reaction_weight_rule"]),
-            warp=bool(opt["hsgp_warp"]),
-            continuation=bool(opt["hsgp_continuation"]), max_outer=opt["hsgp_max_outer"], step_labels=train_steps,
-            sigma_cap=opt["hsgp_sigma_cap"], stability_search=bool(opt["hsgp_stability_search"]),
-            hyper_restarts=bool(opt["hsgp_hyper_restarts"]), continuation_stages=rec.get("hsgp_continuation_stages"),
-            eiv_damping=float(opt["hsgp_eiv_damping"]), eiv_damping_decay=float(opt["hsgp_eiv_damping_decay"]),
-            adaptive=bool(opt["hsgp_adaptive"]), hyper_iters_per_stage=int(opt["hsgp_hyper_iters_per_stage"]),
-            ls_floor_fraction=float(opt["hsgp_ls_floor_fraction"]),
-            tol_intermediate=float(opt["hsgp_tol_intermediate"]) or None, hyper_delay=int(opt["hsgp_hyper_delay"]),
-            cap_accept_tol=float(opt["hsgp_cap_accept_tol"]), incompressible_plane_stress=incompressible_ps,
-            tol=float(opt["hsgp_tol"]),
-            sigma_f_known=float(opt["hsgp_force_noise"]) if float(opt["hsgp_force_noise"]) > 0 else None,
-            nigp_warmup=str(opt["hsgp_nigp_warmup"]), eiv_warmup=str(opt["hsgp_eiv_warmup"]),
-            sigma_f_rel=float(opt["hsgp_force_noise_rel"]) or None, sigma_f_cv=bool(int(opt["hsgp_force_noise_cv"])),
-            cv_folds=int(opt["hsgp_cv_folds"]), sigma_f_evidence=bool(int(opt["hsgp_force_noise_evidence"])),
-            sigma_f_from_reaction=bool(int(opt["hsgp_force_noise_from_reaction"])), cv_tol=float(opt["hsgp_cv_tol"]),
-            sigma_f_joint=bool(int(opt["hsgp_force_noise_joint"])),
-            joint_refit_unweighted=bool(int(opt["hsgp_force_noise_joint_refit"])))
+            hyper_restarts=bool(opt["hsgp_hyper_restarts"]), incompressible_plane_stress=incompressible_ps,
+            sigma_f_rel=float(opt["hsgp_force_noise_rel"]) or None, cv_folds=int(opt["hsgp_cv_folds"]),
+            cv_tol=float(opt["hsgp_cv_tol"]), step_labels=train_steps)
         fit_time = time.time() - t0
         model.save(post_path)
-        # adaptive continuation may stop early: the posterior is then conditioned on fewer steps, and the teacher must
-        # only be exported at those states (distillation reads train_load_steps_indices from config.json)
-        valid_steps = model.info.get("valid_load_steps") or train_steps
-        if model.info.get("truncated"):
-            print(f"[HSGP] WARNING: posterior conditioned on load steps {valid_steps} only "
-                  f"({model.info.get('adaptive_stop_reason')}; skipped {model.info.get('skipped_load_steps')})", flush=True)
-        feats = jax.vmap(model.feature_extractor.extract)(F_all[jnp.array(valid_steps)].reshape(-1, 3, 3))
+        feats = jax.vmap(model.feature_extractor.extract)(F_all[jnp.array(train_steps)].reshape(-1, 3, 3))
         I_obs = np.concatenate([np.asarray(feats[0]), np.asarray(feats[1])], axis=-1)
         np.save(os.path.join(save_path, "I_obs_all.npy"), I_obs)
         cfg_out = dict(rec, extraction_method="hsgp", dataset_path=args.dataset_path, seed=args.seed, batch_dir=save_path,
-                       train_load_steps_indices=valid_steps, train_load_steps_requested=train_steps,
-                       val_load_steps_indices=val_steps, test_load_steps_indices=test_steps,
-                       data_energy_scale=energy_scale, hsgp_continuation_stages=rec.get("hsgp_continuation_stages"), linear_elastic_prior_scale=lin_prior_scale, hsgp_options=opt,
+                       train_load_steps_indices=train_steps, val_load_steps_indices=val_steps,
+                       test_load_steps_indices=test_steps, data_energy_scale=energy_scale, hsgp_options=opt,
                        hsgp=dict(model.info, hyper={k: np.asarray(v).tolist() for k, v in model.hyper.items()}))
         json.dump(cfg_out, open(os.path.join(save_path, "config.json"), "w"), indent=4, default=float)
         json.dump(hist, open(os.path.join(save_path, "hsgp_history.json"), "w"), indent=2)
-        print(f"[seed {args.seed}] fit done in {fit_time:.0f}s, converged {model.info['converged']}", flush=True)
+        print(f"[seed {args.seed}] fit done in {fit_time:.0f}s, s = {model.info['sigma_f_rel']:.3g}", flush=True)
         if args.phase == "fit":
             return
     else:
         model = HSGPHyperelasticity.load(post_path)
-        hist = json.load(open(os.path.join(save_path, "hsgp_history.json")))
         I_obs = np.load(os.path.join(save_path, "I_obs_all.npy"))
         fit_time = model.info.get("fit_time", float("nan"))
 
     t0 = time.time()
-    plot_convergence(hist, save_path)
+    plot_force_noise_cv(model, save_path)
     reac = plot_reactions(model, F_all, prep, train_steps, save_path, has_truth, sigma_R=sigma_R_steps)
     _, frac = ellipticity_penalty(model.psi_det, F_all[jnp.array(train_steps)], 8)
     metrics = dict(seed=args.seed, extraction_method="hsgp", extraction_time=fit_time, train_steps=train_steps,
                    val_steps=val_steps, log_evidence=model.info["log_evidence"], converged=model.info["converged"],
-                   outer_iterations=model.info["outer_iterations"],
-                   all_stages_converged=model.info.get("all_stages_converged"), stage_status=model.info.get("stage_status"),
-                   sigma_u_x=model.noise["sigma_u_x"], sigma_u_y=model.noise["sigma_u_y"],
-                   linear_elastic_mean=model.linear_elastic_summary(), small_strain_moduli=model.small_strain_moduli(),
+                   small_strain_moduli=model.small_strain_moduli(),
                    fraction_unstable=float(frac), reaction_forces=reac,
                    force_noise=dict(sigma_f_rel=model.info.get("sigma_f_rel"), cv=model.info.get("force_noise_cv")),
                    hyper={k: np.asarray(v).tolist() for k, v in model.hyper.items()})

@@ -2,7 +2,7 @@
 # HSGP extraction pipeline: dataset spec (clean FEM data solved once, reused) -> HSGP fit -> plots/metrics, per seed.
 #
 # Usage:
-#   scripts/run_hsgp_pipeline.sh <recipe.yaml | recipe name (configs/recipes_v2 first) | experiment dir> [--seeds "6 7 8"] [--hsgp_warp 0 ...]
+#   scripts/run_hsgp_pipeline.sh <recipe.yaml | recipe name (configs/recipes_v2 first) | experiment dir> [--seeds "6 7 8"] [--hsgp_cv_tol 2 ...]
 #   Any --hsgp_* option is passed on to extraction/train_hsgp.py and overrides the recipe (see its docstring).
 #   --downstream: afterwards run distillation, FEM forward validation and validation plots with scripts/run_pipeline.sh
 #                 on the same experiment directory (it accepts HSGP extractions; data generation only adds the missing

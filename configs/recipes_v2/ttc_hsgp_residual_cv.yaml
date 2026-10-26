@@ -3,7 +3,7 @@
 # cross-validation over the training steps (sigma_f,t = s |R_t|, s from held-out reactions, plateau rule 2 nats).
 # Incompressible plane stress (deviatoric energy only); R_x measured (0.5% of the reading, floor 0.02 N) and
 # R_y fitted to 0 (tensile test) with the same noise, 0.5% of |R_x|.
-# Otherwise as configs/recipes_v2/ttc_hsgp_incompressible.yaml. Amplitude cap 100 x the prior centre.
+# Amplitude cap 100 x the prior centre.
 # Run: bash scripts/run_study.sh --mode normal --recipe configs/recipes_v2/ttc_hsgp_residual_cv.yaml --downstream 0
 # ==============================================================================
 
@@ -47,12 +47,9 @@ seeds:
 
 # --- Extraction (HSGP) -------------------------------------------------------
 hsgp_likelihood: residual_exact
-hsgp_prior_mean: none
-hsgp_force_noise: 0.0
-hsgp_force_noise_cv: 1
+hsgp_force_noise_rel: 0.0       # 0: s chosen by cross-validation
 hsgp_cv_folds: 2
 hsgp_cv_tol: 2.0
-hsgp_reaction_weight: 1.0
 reaction_components:
 - 0
 reaction_noise_rel: 0.005
@@ -61,19 +58,10 @@ reaction_zero_components: [1]             # R_y = 0 (tensile test), sigma = 0.5%
 hsgp_num_basis_dev: 8
 hsgp_num_basis_vol: 8
 hsgp_box_factor: 8.0
-hsgp_warp: 0
-hsgp_envelope: 0
 hsgp_amplitude_prior_scale: 0.0
 hsgp_lengthscale_prior_scale: 0.0
 hsgp_sigma_cap: 100.0
 hsgp_hyper_restarts: 1
-hsgp_hyper_delay: 2
-hsgp_ls_floor_fraction: 0.0
-hsgp_continuation: 1
-hsgp_adaptive: 1
-hsgp_max_outer: 60
-hsgp_cap_accept_tol: 1e-4
-hsgp_stability_search: 1
 
 # --- Distillation ------------------------------------------------------------
 distilled_material_model: gmr_ogden_dev

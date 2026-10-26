@@ -12,15 +12,10 @@
 
 # scripts/run_study.sh on the cluster (same container as run_hsgp_slurm.sh); all arguments are passed through.
 #   normal:    sbatch scripts/run_study_slurm.sh --mode normal --recipe configs/recipes_v2/<recipe>.yaml --seeds "1 2 3"
-#   coverage:  sbatch scripts/run_study_slurm.sh --mode coverage --cov_from_sweep d4e-05_l2e-02   # after threshold
-#              (or --cov_experiment_dir results/<exp>, or --cov_disp_noise 4e-5 --cov_load_noise 0.02 for a new one)
-#   threshold: one array task per grid point, then the summary
-#     sbatch scripts/run_study_slurm.sh --mode threshold --list_grid                  # (or locally) shows the indices
-#     JOB=$(sbatch --parsable --array=0-11 scripts/run_study_slurm.sh --mode threshold)
-#     sbatch --dependency=afterany:$JOB scripts/run_study_slurm.sh --mode threshold --collect_only
-# The settings of each mode are at the top of scripts/run_study.sh (or override them here, e.g. --sweep_dir ...).
-# Another material: add --recipe configs/recipes_v2/nh2_hsgp_residual_cv.yaml (or gentthomas_...) to any of these;
-# the sweep folder follows the recipe name (results/noise_sweep_<recipe>), so --cov_from_sweep needs the same --recipe.
+#   coverage:  sbatch scripts/run_study_slurm.sh --mode coverage --cov_experiment_dir results/<exp>
+#              (or --cov_disp_noise 1e-5 --cov_load_noise 0.02 to run the extractions of a new experiment first)
+# The settings of each mode are at the top of scripts/run_study.sh (or override them here).
+# Another material: add --recipe configs/recipes_v2/nh2_hsgp_residual_cv.yaml (or gentthomas_ / ttc_...).
 
 echo "Launching study via Singularity: scripts/run_study.sh $*"
 singularity exec --nv -B /home/npantapalin/work/projects/ugp_hyper_discovery:/home/mmdiscovery/shared --pwd /home/mmdiscovery/shared /home/npantapalin/work/container/ugp_hyper_discovery.sif bash scripts/run_study.sh "$@"

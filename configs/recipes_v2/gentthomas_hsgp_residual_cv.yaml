@@ -1,8 +1,6 @@
 # ==============================================================================
 # Recipe v2 (HSGP extraction): gentthomas block, residual likelihood (exact update) with the force-residual noise
 # chosen by cross-validation over the training load steps: sigma_f,t = s |R_t|, s from held-out reactions.
-# Base for the noise-threshold sweep (validation/noise_threshold_sweep.py --force_noise_rule cv), which sets
-# disp_noise, load_noise and reaction_noise_rel (= load noise) per grid point.
 # Settings as configs/recipes_v2/isihara_hsgp_residual_cv.yaml
 # Material and loads from results/20261015T090954_hsgp_gentthomas_0.0005_0.05_0.5_0.5_block/config.yaml
 # ==============================================================================
@@ -65,31 +63,16 @@ seeds:
 
 # --- Extraction (HSGP) -------------------------------------------------------
 hsgp_likelihood: residual_exact
-hsgp_prior_mean: none
-hsgp_force_noise: 0.0
-hsgp_force_noise_cv: 1
+hsgp_force_noise_rel: 0.0       # 0: s chosen by cross-validation
 hsgp_cv_folds: 2
 hsgp_cv_tol: 0.0
-hsgp_force_noise_evidence: 0
-hsgp_force_noise_from_reaction: 0
-hsgp_reaction_weight: 1.0
-hsgp_eiv_damping: 0.0
 hsgp_num_basis_dev: 8
 hsgp_num_basis_vol: 8
 hsgp_box_factor: 8.0
-hsgp_warp: 0
-hsgp_envelope: 0
 hsgp_amplitude_prior_scale: 0.0
 hsgp_lengthscale_prior_scale: 0.0
-hsgp_sigma_cap: 0.0
+hsgp_sigma_cap: 10.0
 hsgp_hyper_restarts: 1
-hsgp_hyper_delay: 0
-hsgp_ls_floor_fraction: 0.0
-hsgp_continuation: 1
-hsgp_adaptive: 1
-hsgp_max_outer: 60
-hsgp_cap_accept_tol: 1e-4
-hsgp_stability_search: 1
 
 # --- Distillation ------------------------------------------------------------
 distilled_material_model: gmr
@@ -108,19 +91,3 @@ sobol_samples_factor: 4096
 run_validation: 1
 val_number_samples: 1024
 val_workers: 4
-
-# --- Noise sweep (validation/noise_threshold_sweep.py) -----------------------
-sweep_disp_noise:
-- 1.0e-05
-- 4.0e-05
-- 7.0e-05
-- 0.0001
-sweep_load_noise:
-- 0.02
-- 0.05
-- 0.1
-sweep_seeds:
-- 1
-- 2
-- 3
-sweep_force_noise_rule: cv

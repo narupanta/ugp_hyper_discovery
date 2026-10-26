@@ -22,20 +22,12 @@ GROUPS = [
     ("Load steps and seeds", [
         "train_load_steps_indices", "val_load_steps_indices", "test_load_steps_indices", "seeds"]),
     ("Extraction (HSGP)", [
-        # likelihood and noise model
-        "hsgp_likelihood", "hsgp_prior_mean", "hsgp_force_noise", "hsgp_force_noise_rel", "hsgp_force_noise_cv",
-        "hsgp_cv_folds", "hsgp_cv_tol", "hsgp_force_noise_evidence", "hsgp_force_noise_joint", "hsgp_force_noise_joint_refit", "hsgp_force_noise_from_reaction",
-        "hsgp_reaction_weight", "hsgp_reaction_weight_rule", "hsgp_eiv_warmup", "hsgp_nigp_warmup",
-        "hsgp_eiv_damping", "hsgp_eiv_damping_decay", "reaction_components", "reaction_noise_rel",
-        "reaction_noise_floor", "reaction_zero_components",
-        # basis
-        "hsgp_num_basis_dev", "hsgp_num_basis_vol", "hsgp_box_factor", "hsgp_warp", "hsgp_envelope",
-        # hyperparameters
-        "hsgp_amplitude_prior_scale", "hsgp_lengthscale_prior_scale", "hsgp_sigma_cap", "hsgp_hyper_restarts",
-        "hsgp_hyper_delay", "hsgp_hyper_iters_per_stage", "hsgp_ls_floor_fraction",
-        # continuation and convergence
-        "hsgp_continuation", "hsgp_continuation_stages", "hsgp_adaptive", "hsgp_max_outer", "hsgp_tol",
-        "hsgp_tol_intermediate", "hsgp_cap_accept_tol", "hsgp_stability_search"]),
+        # likelihood and free-residual noise
+        "hsgp_likelihood", "hsgp_force_noise_rel", "hsgp_cv_folds", "hsgp_cv_tol",
+        "reaction_components", "reaction_noise_rel", "reaction_noise_floor", "reaction_zero_components",
+        # basis and hyperparameters
+        "hsgp_num_basis_dev", "hsgp_num_basis_vol", "hsgp_box_factor",
+        "hsgp_amplitude_prior_scale", "hsgp_lengthscale_prior_scale", "hsgp_sigma_cap", "hsgp_hyper_restarts"]),
     ("Distillation", [
         "distilled_material_model", "distill_target", "distillation_n_iterations",
         "dev_vol_distillation_n_iterations", "aniso_distillation_n_iterations", "sample_mode",
@@ -43,8 +35,6 @@ GROUPS = [
         "sobol_threshold", "sobol_samples_factor", "dev_params_disabled", "vol_params_disabled",
         "aniso_params_disabled"]),
     ("FEM forward validation", ["run_validation", "val_number_samples", "val_workers"]),
-    ("Noise sweep (validation/noise_threshold_sweep.py)", [
-        "sweep_disp_noise", "sweep_load_noise", "sweep_seeds", "sweep_force_noise_rule"]),
 ]
 KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:")
 HEADING_RE = re.compile(r"^# --- .* -+$")
@@ -62,8 +52,6 @@ def group_of(key):
         return 3, 10_000
     if key.startswith("val_") or key.startswith("fem_"):
         return 4, 10_000
-    if key.startswith("sweep_"):
-        return 5, 10_000
     return len(GROUPS), 0                            # other
 
 
