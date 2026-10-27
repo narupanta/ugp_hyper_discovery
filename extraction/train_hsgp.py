@@ -13,11 +13,15 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_cv_tol: 0.0                # > 0: smallest s within this many nats of the best held-out score (plateau rule)
     hsgp_num_basis_dev: 24          # eigenfunctions per deviatoric dimension
     hsgp_num_basis_vol: 32
+    hsgp_num_basis_aniso: 0         # anisotropic recipes (material_params.angles): functions per fibre invariant
+                                    # (I4_bar, I6_bar); 0 = hsgp_num_basis_dev
     hsgp_box_factor: 8.0
     hsgp_sigma_cap: 10.0            # GP amplitudes capped at this multiple of their prior centre; <= 0: no cap
     hsgp_amplitude_prior_scale: 0.0 # > 0: log-normal hyperprior widths (log units)
     hsgp_lengthscale_prior_scale: 0.0
     hsgp_hyper_restarts: 1          # multi-start hyperparameter optimisation (prior centre, lengthscales x0.5, x2)
+Anisotropy: material_params.angles (degrees, one or two fibre families) switches on the fibre GP over (I4_bar, I6_bar);
+model_mode: isotropic in such a recipe switches it off (isotropic GP on anisotropic data).
 Recipe keys for the reactions (not hsgp_*): reaction_components, reaction_noise_rel, reaction_noise_floor,
 reaction_zero_components (components known to vanish, e.g. R_y of a tensile test, fitted to 0).
 The EIV likelihood and the other noise models: archive/eiv/train_hsgp.py.
@@ -40,14 +44,14 @@ import matplotlib.pyplot as plt
 
 from core.datasetclass import DatasetFactory
 from core.hsgp_inference import fit_hsgp, reaction_prediction
-from core.hsgp_model import HSGPHyperelasticity
+from core.hsgp_model import HSGPHyperelasticity, fiber_vectors
 from core.loss_function import ellipticity_penalty
 from core.material_models import get_material
 from core.utils import load_f3x3_from_dataset
 from plots.theme import apply_style, save_figure
 
 HSGP_DEFAULTS = dict(hsgp_force_noise_rel=0.0, hsgp_cv_folds=2, hsgp_cv_tol=0.0,
-                     hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_box_factor=8.0, hsgp_sigma_cap=10.0,
+                     hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_num_basis_aniso=0, hsgp_box_factor=8.0, hsgp_sigma_cap=10.0,
                      hsgp_amplitude_prior_scale=0.0, hsgp_lengthscale_prior_scale=0.0, hsgp_hyper_restarts=1)
 
 
@@ -198,6 +202,10 @@ def main():
         print(f"[HSGP] reaction components {zero_comps} fitted to 0 with sigma = {rel_z:g} x |measured force| "
               f"(floor {float(rec.get('reaction_noise_floor', 0.0)):g})", flush=True)
     energy_scale = external_work_density(prep, prep["node_type"], max(train_steps))
+    angles = (rec.get("material_params") or {}).get("angles", rec.get("angles"))
+    fibers = fiber_vectors(angles) if angles and str(rec.get("model_mode", "anisotropic")) != "isotropic" else None
+    if fibers is not None:
+        print(f"[HSGP] anisotropic GP over (I4_bar, I6_bar), fibre angles {angles} deg", flush=True)
     post_path = os.path.join(save_path, "hsgp_posterior.npz")
     print(f"[HSGP] seed {args.seed} | steps {train_steps} | energy scale {energy_scale:.4g} | options {opt}", flush=True)
 
@@ -211,11 +219,12 @@ def main():
             amplitude_prior_scale=opt["hsgp_amplitude_prior_scale"], lengthscale_prior_scale=opt["hsgp_lengthscale_prior_scale"],
             hyper_restarts=bool(opt["hsgp_hyper_restarts"]), incompressible_plane_stress=incompressible_ps,
             sigma_f_rel=float(opt["hsgp_force_noise_rel"]) or None, cv_folds=int(opt["hsgp_cv_folds"]),
-            cv_tol=float(opt["hsgp_cv_tol"]), step_labels=train_steps)
+            cv_tol=float(opt["hsgp_cv_tol"]), step_labels=train_steps, fibers=fibers,
+            num_basis_aniso=int(opt["hsgp_num_basis_aniso"]) or None)
         fit_time = time.time() - t0
         model.save(post_path)
         feats = jax.vmap(model.feature_extractor.extract)(F_all[jnp.array(train_steps)].reshape(-1, 3, 3))
-        I_obs = np.concatenate([np.asarray(feats[0]), np.asarray(feats[1])], axis=-1)
+        I_obs = np.concatenate([np.asarray(x) for x in feats], axis=-1)   # dev (2), vol (1)[, aniso (3)]
         np.save(os.path.join(save_path, "I_obs_all.npy"), I_obs)
         cfg_out = dict(rec, extraction_method="hsgp", dataset_path=args.dataset_path, seed=args.seed, batch_dir=save_path,
                        train_load_steps_indices=train_steps, val_load_steps_indices=val_steps,

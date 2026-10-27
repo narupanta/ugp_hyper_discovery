@@ -26,7 +26,7 @@ GROUPS = [
         "hsgp_likelihood", "hsgp_force_noise_rel", "hsgp_cv_folds", "hsgp_cv_tol",
         "reaction_components", "reaction_noise_rel", "reaction_noise_floor", "reaction_zero_components",
         # basis and hyperparameters
-        "hsgp_num_basis_dev", "hsgp_num_basis_vol", "hsgp_box_factor",
+        "hsgp_num_basis_dev", "hsgp_num_basis_vol", "hsgp_num_basis_aniso", "hsgp_box_factor",
         "hsgp_amplitude_prior_scale", "hsgp_lengthscale_prior_scale", "hsgp_sigma_cap", "hsgp_hyper_restarts"]),
     ("Distillation", [
         "distilled_material_model", "distill_target", "distillation_n_iterations",

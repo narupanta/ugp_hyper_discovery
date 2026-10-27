@@ -24,6 +24,12 @@ The reference conditions psi_dev(I) = 0, psi_vol(J=1) = 0, dpsi_vol/dJ(1) = 0 ho
 (the GP prior is conditioned on them, see hsgp_inference.constrained_transform); dev stress at F = I vanishes by
 itself because dI1_bar/dF = dI2_bar/dF = 0 there.
 
+Optional anisotropic part (two fibre families a0, a1, in-plane unit vectors): an additive 2D GP over the isochoric
+fibre invariants, psi_aniso(I4_bar, I6_bar) = phi_aniso(I4_bar, I6_bar)^T w_aniso, with I4_bar = a0 . C_bar a0 and
+I6_bar = a1 . C_bar a1 (no parametric term). At F = I its stress is 2 (dpsi/dI4 dev(a0 x a0) + dpsi/dI6 dev(a1 x a1)),
+which vanishes for two distinct fibres only if both slopes vanish: psi_aniso(1, 1) = 0 and both first derivatives at
+(1, 1) are imposed exactly, like the volumetric conditions.
+
 Duck-type compatible with the SparseHyperelasticityGP methods used by evaluation, plotting and the distillation export.
 """
 import json
@@ -41,6 +47,13 @@ jax.config.update("jax_enable_x64", True)
 
 DEV_REFERENCE = np.array([3.0, 3.0])
 VOL_REFERENCE = np.array([1.0])
+ANISO_REFERENCE = np.array([1.0, 1.0])
+
+
+def fiber_vectors(angles_deg):
+    """In-plane unit fibre vectors from angles in degrees (one or two families)."""
+    out = [np.array([np.cos(np.radians(a)), np.sin(np.radians(a)), 0.0]) for a in angles_deg]
+    return out[0], (out[1] if len(out) > 1 else None)
 
 
 class HSGPHyperelasticity:
@@ -48,22 +61,35 @@ class HSGPHyperelasticity:
 
     def __init__(self, dev_box: Box, vol_box: Box, theta_mean, theta_factor, hyper: Dict[str, np.ndarray] = None,
                  noise: Dict[str, float] = None, info: Dict = None, envelope: Optional[Dict[str, float]] = None,
-                 warp: bool = False, incompressible_plane_stress: bool = False):
-        self.dev_box, self.vol_box = dev_box, vol_box
+                 warp: bool = False, incompressible_plane_stress: bool = False, aniso_box: Optional[Box] = None,
+                 a0=None, a1=None):
+        self.dev_box, self.vol_box, self.aniso_box = dev_box, vol_box, aniso_box
         self.warp = bool(warp)
         self.envelope = None if envelope is None else {k: float(v) for k, v in envelope.items()}   # mu, kappa, scale
         # incompressible plane stress: F33 = 1/det F_2D inside the features, J = 1, the volumetric part drops out
         self.incompressible_plane_stress = bool(incompressible_plane_stress)
-        from .features import make_feature_extractor
-        self.feature_extractor = make_feature_extractor(self.incompressible_plane_stress)
+        from .features import make_feature_extractor, AnisotropicFeatureExtractor
+        self.is_anisotropic = aniso_box is not None
+        if self.is_anisotropic:
+            if self.incompressible_plane_stress:
+                raise ValueError("anisotropic HSGP with incompressible plane stress is not implemented")
+            self.a0 = jnp.asarray(a0, dtype=jnp.float64)
+            self.a1 = None if a1 is None else jnp.asarray(a1, dtype=jnp.float64)
+            self.feature_extractor = AnisotropicFeatureExtractor(self.a0, a1=self.a1)   # (dev, vol, [I4, I6, I8])
+        else:
+            self.a0 = self.a1 = None
+            self.feature_extractor = make_feature_extractor(self.incompressible_plane_stress)
         self.n_lin = 2
         self.k_dev, self.k_vol = dev_box.num_basis, vol_box.num_basis
+        self.k_aniso = aniso_box.num_basis if self.is_anisotropic else 0
         self.sl_dev = slice(self.n_lin, self.n_lin + self.k_dev)
         self.sl_vol = slice(self.n_lin + self.k_dev, self.n_lin + self.k_dev + self.k_vol)
-        self.num_params = self.n_lin + self.k_dev + self.k_vol
-        # component index sets: dev = mu term + dev GP, vol = kappa term + vol GP
+        self.sl_aniso = slice(self.n_lin + self.k_dev + self.k_vol, self.n_lin + self.k_dev + self.k_vol + self.k_aniso)
+        self.num_params = self.n_lin + self.k_dev + self.k_vol + self.k_aniso
+        # component index sets: dev = mu term + dev GP, vol = kappa term + vol GP, aniso = fibre GP
         self.idx_dev = np.concatenate([[0], np.arange(self.n_lin, self.n_lin + self.k_dev)])
-        self.idx_vol = np.concatenate([[1], np.arange(self.n_lin + self.k_dev, self.num_params)])
+        self.idx_vol = np.concatenate([[1], np.arange(self.sl_vol.start, self.sl_vol.stop)])
+        self.idx_aniso = np.arange(self.sl_aniso.start, self.sl_aniso.stop)
         self.set_posterior(theta_mean, theta_factor)
         self.hyper = {k: np.asarray(v) for k, v in (hyper or {}).items()}
         self.noise = dict(noise or {})
@@ -98,15 +124,25 @@ class HSGPHyperelasticity:
         _, x_vol = self.gp_inputs(jnp.full(vol.shape[:-1] + (2,), 3.0), vol)
         return s_vol[..., None] * eigenfunctions(self.vol_box, x_vol)
 
-    def basis_from_features(self, dev: jnp.ndarray, vol: jnp.ndarray) -> jnp.ndarray:
-        """(..., 2), (..., 1) -> (..., P) values of [h_mu, h_kappa, s_dev phi_dev, s_vol phi_vol]."""
+    def aniso_basis(self, aniso: jnp.ndarray) -> jnp.ndarray:
+        """Fibre features (..., >= 2) = [I4_bar, I6_bar, ...] -> (..., K_aniso)."""
+        return eigenfunctions(self.aniso_box, aniso[..., :2])
+
+    def basis_from_features(self, dev: jnp.ndarray, vol: jnp.ndarray, aniso: Optional[jnp.ndarray] = None) -> jnp.ndarray:
+        """(..., 2), (..., 1) [, (..., 2|3)] -> (..., P) values of [h_mu, h_kappa, s_dev phi_dev, s_vol phi_vol
+        (, phi_aniso)]; aniso None: the fibre invariants at the reference (I4 = I6 = 1)."""
         h = jnp.stack([0.5 * (dev[..., 0] - 3.0), 0.5 * (vol[..., 0] - 1.0) ** 2], axis=-1)
-        return jnp.concatenate([h, self.dev_basis(dev), self.vol_basis(vol)], axis=-1)
+        parts = [h, self.dev_basis(dev), self.vol_basis(vol)]
+        if self.is_anisotropic:
+            if aniso is None:
+                aniso = jnp.ones(dev.shape[:-1] + (2,))
+            parts.append(self.aniso_basis(aniso))
+        return jnp.concatenate(parts, axis=-1)
 
     def basis(self, f: jnp.ndarray) -> jnp.ndarray:
         """Single F (3, 3) -> (P,)."""
-        dev, vol = self.feature_extractor.extract(f)
-        return self.basis_from_features(dev, vol)
+        feats = self.feature_extractor.extract(f)
+        return self.basis_from_features(feats[0], feats[1], feats[2] if self.is_anisotropic else None)
 
     def basis_batch(self, f: jnp.ndarray) -> jnp.ndarray:
         f = jnp.asarray(f, dtype=jnp.float64)
@@ -143,7 +179,9 @@ class HSGPHyperelasticity:
         return self._dist(f, self.idx_vol)
 
     def aniso_psi_dist(self, f, params=None, weights=None) -> EnergyDist:
-        """Isotropic model: the anisotropic energy is identically zero (same interface as the SVGP teacher)."""
+        """Fibre energy; identically zero for an isotropic model (same interface as the SVGP teacher)."""
+        if self.is_anisotropic:
+            return self._dist(f, self.idx_aniso)
         f = jnp.asarray(f, dtype=jnp.float64)
         z = jnp.zeros(()) if f.ndim == 2 else jnp.zeros(f.shape[0])
         return EnergyDist(z, z)
@@ -162,9 +200,12 @@ class HSGPHyperelasticity:
     def vol_psi_joint_cov(self, f, params=None, weights=None):
         return self._joint_cov(f, self.idx_vol)
 
+    def aniso_psi_joint_cov(self, f, params=None, weights=None):
+        return self._joint_cov(f, self.idx_aniso)
+
     def joint_factor(self, f, component: str = "total"):
         """Exact low-rank factor G (N, Q) of the energy covariance G G^T at the states f (export / sampling)."""
-        idx = {"total": None, "dev": self.idx_dev, "vol": self.idx_vol}[component]
+        idx = {"total": None, "dev": self.idx_dev, "vol": self.idx_vol, "aniso": self.idx_aniso}[component]
         phi, _, F = self._rows(jnp.asarray(f, dtype=jnp.float64).reshape(-1, 3, 3), idx)
         return phi @ F
 
@@ -177,6 +218,13 @@ class HSGPHyperelasticity:
         vol = jnp.asarray(vol_feats).reshape(-1, 1)
         h = 0.5 * (vol[:, 0] - 1.0) ** 2
         return h * self.theta_mean[1] + self.vol_basis(vol) @ self.theta_mean[self.sl_vol]
+
+    def aniso_gp_mean(self, aniso_feats, params=None, weights=None):
+        aniso = jnp.asarray(aniso_feats)
+        aniso = aniso.reshape(-1, aniso.shape[-1])
+        if not self.is_anisotropic:
+            return jnp.zeros(aniso.shape[0])
+        return self.aniso_basis(aniso) @ self.theta_mean[self.sl_aniso]
 
     # ---------------- stress ----------------
     def piola_det(self, f, params=None, weights=None):
@@ -204,13 +252,15 @@ class HSGPHyperelasticity:
     def _evaluators(self):
         if getattr(self, "_jit_eval", None) is None:
             idx_dev, idx_vol = np.asarray(self.idx_dev), np.asarray(self.idx_vol)   # constants: no tracers in the cache
+            idx_an = np.asarray(self.idx_aniso)
 
             def total(theta, f):
                 return self.basis(f) @ theta
 
             def comps(theta, f):
                 phi = self.basis(f)
-                return phi[idx_dev] @ theta[idx_dev], phi[idx_vol] @ theta[idx_vol], jnp.zeros(())
+                aniso = phi[idx_an] @ theta[idx_an] if idx_an.size else jnp.zeros(())
+                return phi[idx_dev] @ theta[idx_dev], phi[idx_vol] @ theta[idx_vol], aniso
             self._jit_eval = (jax.jit(total), jax.jit(comps))
         return self._jit_eval
 
@@ -279,14 +329,22 @@ class HSGPHyperelasticity:
                  hyper=json.dumps({k: np.asarray(v).tolist() for k, v in self.hyper.items()}),
                  noise=json.dumps(self.noise), info=json.dumps(self.info, default=float),
                  envelope=json.dumps(self.envelope), warp=self.warp,
-                 incompressible_plane_stress=self.incompressible_plane_stress)
+                 incompressible_plane_stress=self.incompressible_plane_stress,
+                 **({} if not self.is_anisotropic else dict(
+                     aniso_centre=self.aniso_box.centre, aniso_half_width=self.aniso_box.half_width,
+                     aniso_indices=self.aniso_box.indices, a0=np.asarray(self.a0),
+                     a1=np.asarray(self.a1) if self.a1 is not None else np.zeros(0))))
 
     @classmethod
     def load(cls, path: str) -> "HSGPHyperelasticity":
         d = np.load(path, allow_pickle=False)
         dev_box = Box(d["dev_centre"], d["dev_half_width"], d["dev_indices"])
         vol_box = Box(d["vol_centre"], d["vol_half_width"], d["vol_indices"])
-        return cls(dev_box, vol_box, d["theta_mean"], d["theta_factor"],
+        aniso = {}
+        if "aniso_centre" in d.files:
+            aniso = dict(aniso_box=Box(d["aniso_centre"], d["aniso_half_width"], d["aniso_indices"]), a0=d["a0"],
+                         a1=d["a1"] if d["a1"].size else None)
+        return cls(dev_box, vol_box, d["theta_mean"], d["theta_factor"], **aniso,
                    hyper={k: np.asarray(v) for k, v in json.loads(str(d["hyper"])).items()},
                    noise=json.loads(str(d["noise"])), info=json.loads(str(d["info"])),
                    envelope=json.loads(str(d["envelope"])) if "envelope" in d.files else None,

@@ -713,7 +713,7 @@ def main():
     parser.add_argument("--no_sensitivity", dest="do_sensitivity", action="store_false", help="Skip sensitivity analysis")
     parser.add_argument("--sobol_threshold", type=float, default=1e-4, help="Total Sobol index threshold for selecting sensitive parameters")
     parser.add_argument("--sobol_samples_factor", type=int, default=1024, help="Saltelli sample factor for sensitivity analysis")
-    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_f_stratified", "dataset_f_uniform_energy", "dataset_all", "inducing_points"], help="Sample deformation inputs from extraction dataset directly (with standard FPS, stratified high-strain FPS, or uniform energy spectrum sampling) or standard modes")
+    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_f_random", "dataset_f_stratified", "dataset_f_uniform_energy", "dataset_all", "inducing_points"], help="Sample deformation inputs from extraction dataset directly (with standard FPS, stratified high-strain FPS, or uniform energy spectrum sampling) or standard modes")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points for GP joint evaluation and distillation")
     parser.add_argument("--num_func_samples", type=int, default=512, help="Number of functional samples drawn from GP during parameter distillation")
     parser.add_argument("--max_gamma", type=float, default=1.0, help="Max deformation intensity gamma when sample_mode is standard")

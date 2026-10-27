@@ -16,7 +16,8 @@
 #   bash scripts/run_study.sh --mode coverage --cov_experiment_dir results/<exp> --evaluate_only
 # Any setting below can be given as --<name in lower case> <value>.
 # Results: normal: a new results/<timestamp>_hsgp_... folder (or the given experiment directory);
-#          coverage: <experiment>/coverage_study.
+#          coverage: <experiment>/coverage_study_<states> (e.g. coverage_study_dataset_f_random_n256,
+#          coverage_study_standard_interp; set COV_SAMPLE_MODE / COV_NUM_POINTS or the recipe's sample_mode).
 # ==============================================================================
 set -e
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
@@ -39,6 +40,9 @@ COV_N_NOISE_SEEDS="10"
 COV_N_INITS="5"
 COV_N_ITERATIONS=""                               # Wasserstein iterations ("" = recipe value)
 COV_CHECKPOINTS=""                                # e.g. "2000 4000 6000 8000 10000" (pilot)
+COV_SAMPLE_MODE=""                                # distillation states ("" = recipe sample_mode): dataset_f |
+                                                  # dataset_f_random | standard_interp (modes inside the data region)
+COV_NUM_POINTS=""                                 # number of distillation states ("" = recipe num_points)
 COV_JOBS="2"
 COV_LEVEL="0.95"
 
@@ -86,6 +90,8 @@ PY
           --jobs "$COV_JOBS" --level "$COV_LEVEL" --extract)
     [ -n "$COV_N_ITERATIONS" ] && ARGS+=(--n_iterations "$COV_N_ITERATIONS")
     [ -n "$COV_CHECKPOINTS" ] && ARGS+=(--checkpoints $COV_CHECKPOINTS)
+    [ -n "$COV_SAMPLE_MODE" ] && ARGS+=(--sample_mode "$COV_SAMPLE_MODE")
+    [ -n "$COV_NUM_POINTS" ] && ARGS+=(--num_points "$COV_NUM_POINTS")
     python3 validation/distillation_coverage_study.py "${ARGS[@]}" "${PASS[@]}"
     ;;
 normal)

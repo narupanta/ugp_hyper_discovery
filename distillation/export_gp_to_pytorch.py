@@ -15,6 +15,45 @@ from core.features import IsotropicFeatureExtractor, AnisotropicFeatureExtractor
 import json
 import datetime
 
+def hsgp_standard_modes_in_data(gp_model, F_2x2, F_3d, n_per_mode: int, max_gamma: float, n_scan: int = 400):
+    """
+    States of the six standard modes (plots.training.standard_mode_F) inside the data region of an HSGP teacher: each
+    mode is cut at the first gamma where it leaves the convex hull of the training (I1_bar, I2_bar) plus the reference
+    (3, 3) (the deviatoric data region, as in plots.training.plot_invariant_space_modes), and n_per_mode states are
+    spread evenly over (0, gamma_exit] (gamma_max if the mode stays inside). The standard modes change J in plane
+    strain; states outside the training J range are counted (the volumetric distillation extrapolates there).
+    Returns (6 n_per_mode, 3, 3).
+    """
+    from scipy.spatial import ConvexHull
+    from plots.training import standard_mode_F, MODE_NAMES
+    if F_3d is None:
+        F_3d = np.zeros((len(F_2x2), 3, 3))
+        F_3d[:, :2, :2] = F_2x2
+        F_3d[:, 2, 2] = 1.0
+    feats = jax.vmap(gp_model.feature_extractor.extract)(jnp.asarray(F_3d))
+    dev, vol = np.asarray(feats[0]), np.asarray(feats[1])[:, 0]
+    eqs = ConvexHull(np.vstack([dev, [[3.0, 3.0]]])).equations
+    j_lo, j_hi = min(vol.min(), 1.0), max(vol.max(), 1.0)
+    gamma = jnp.linspace(0.0, max_gamma, n_scan)
+    F_modes = np.asarray(standard_mode_F(gp_model, gamma))                                    # (6, n_scan, 3, 3)
+    out = []
+    for m in range(F_modes.shape[0]):
+        f = jax.vmap(gp_model.feature_extractor.extract)(jnp.asarray(F_modes[m]))
+        d, j = np.asarray(f[0]), np.asarray(f[1])[:, 0]
+        inside = np.all(d @ eqs[:, :-1].T + eqs[:, -1] <= 1e-6, axis=1)
+        inside[0] = True                                                                       # F = I
+        k_exit = int(np.argmin(inside)) if not inside.all() else n_scan
+        g_end = float(gamma[max(k_exit - 1, 1)])
+        g = jnp.linspace(g_end / n_per_mode, g_end, n_per_mode)
+        Fm = np.asarray(standard_mode_F(gp_model, g))[m]
+        jm = np.linalg.det(Fm)
+        out.append(Fm)
+        print(f"[EXPORT] standard_interp: {MODE_NAMES[m]:24s} inside the deviatoric data region up to gamma = "
+              f"{g_end:.3f}" + (" (gamma_max)" if k_exit >= n_scan else "")
+              + f"; J outside the training range [{j_lo:.3f}, {j_hi:.3f}] at {np.mean((jm < j_lo) | (jm > j_hi)) * 100:.0f}% of its states")
+    return np.concatenate(out)
+
+
 def verify_and_report_export(out_dir, components_dict, f3x3_flat, sample_mode="dataset_f", distill_target="sef_split"):
     """
     Verifies exported GP posterior arrays for PyTorch distillation:
@@ -260,7 +299,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--saved_model_dir", type=str, required=True)
     parser.add_argument("--max_gamma", type=float, default=0.8, help="Retained for CLI backward compatibility.")
-    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["dataset_f", "dataset_f_stratified", "dataset_f_uniform_energy", "dataset_all", "standard", "standard_interp", "inducing_points"], help="Sample deformations from extraction dataset (standard FPS, stratified high-strain FPS, uniform energy spectrum sampling, or all points), standard modes, or inducing points.")
+    parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["dataset_f", "dataset_f_random", "dataset_f_stratified", "dataset_f_uniform_energy", "dataset_all", "standard", "standard_interp", "inducing_points"], help="Sample deformations from extraction dataset (standard FPS, a uniform random subset (dataset_f_random), stratified high-strain FPS, uniform energy spectrum sampling, or all points), standard modes, or inducing points.")
+    parser.add_argument("--random_seed", type=int, default=0, help="dataset_f_random: seed of the random subset of states.")
     parser.add_argument("--stratified_power", type=float, default=1.5, help="Exponent for weighting high-strain bins in stratified FPS.")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points to evaluate GP over.")
     parser.add_argument("--distill_target", type=str, default="sef", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"], help="Distillation target mode: solely Strain Energy Function (sef), joint SEF + Piola stress (sef_stress), joint SEF + Cauchy stress (sef_cauchy), or separate DEV and VOL energy (sef_split).")
@@ -271,9 +311,10 @@ def main():
     from core.teacher import load_hsgp_teacher
     hsgp_teacher = load_hsgp_teacher(args.saved_model_dir)   # HSGP extraction (extraction/train_hsgp.py) or None
     if hsgp_teacher is not None:
-        if not args.sample_mode.startswith("dataset"):
-            # HSGP teachers are exported at the training states only (no standard-mode extrapolation, no inducing points)
-            raise ValueError(f"sample_mode '{args.sample_mode}' is not supported for an HSGP teacher; use dataset_f (training states).")
+        if not (args.sample_mode.startswith("dataset") or args.sample_mode == "standard_interp"):
+            # HSGP teachers: training states, or standard modes cut where they leave the data (no extrapolation)
+            raise ValueError(f"sample_mode '{args.sample_mode}' is not supported for an HSGP teacher; use dataset_f* "
+                             f"(training states) or standard_interp (standard modes inside the data region).")
         gp_params = I_z = dev_z = vol_z = aniso_z = None
         min_dev = max_dev = min_vol = max_vol = min_aniso = max_aniso = None
     else:
@@ -532,7 +573,7 @@ def main():
     f3x3_flat = None
 
     # Generate points
-    if args.sample_mode in ["dataset_f", "dataset_f_stratified", "dataset_f_uniform_energy", "dataset_all"]:
+    if args.sample_mode in ["dataset_f", "dataset_f_random", "dataset_f_stratified", "dataset_f_uniform_energy", "dataset_all"]:
         if dataset_F_flat_2x2 is None:
             raise ValueError(f"Dataset loading failed, cannot use sample_mode '{args.sample_mode}'.")
         F_flat_2x2 = dataset_F_flat_2x2
@@ -543,6 +584,17 @@ def main():
             if dataset_F_flat_3d is not None:
                 f3x3_flat = dataset_F_flat_3d
             default_export_subfolder = "pytorch_export_dataset_all"
+        elif args.sample_mode == "dataset_f_random":
+            # uniform random subset: the states follow the data distribution (bulk-weighted, like the validation
+            # metrics), unlike FPS, which spreads them evenly and so favours the rare large-strain states
+            n_all = len(F_flat_2x2)
+            rng = np.random.default_rng(args.random_seed)
+            indices = np.sort(rng.choice(n_all, size=min(args.num_points, n_all), replace=False))
+            f3x3_flat_2x2 = F_flat_2x2[indices]
+            if dataset_F_flat_3d is not None:
+                f3x3_flat = dataset_F_flat_3d[indices]
+            default_export_subfolder = f"pytorch_export_{args.sample_mode}_n{args.num_points}"
+            print(f"Sampled {len(indices)} of {n_all} observed deformations uniformly at random (seed {args.random_seed}).")
         elif args.sample_mode == "dataset_f_stratified":
             print(f"Applying Stratified High-Strain FPS over {len(F_flat_2x2)} observed deformations (power={args.stratified_power})...")
             if dataset_F_flat_3d is not None:
@@ -600,6 +652,12 @@ def main():
                 f3x3_flat = dataset_F_flat_3d[indices]
             default_export_subfolder = f"pytorch_export_dataset_f_n{args.num_points}"
             print(f"Sampled {len(indices)} deformations directly from extraction dataset via Farthest Point Sampling.")
+    elif args.sample_mode == "standard_interp" and hsgp_teacher is not None:
+        if dataset_F_flat_2x2 is None:
+            raise ValueError("standard_interp for an HSGP teacher needs the training dataset (data region).")
+        f3x3_flat = hsgp_standard_modes_in_data(gp_model, dataset_F_flat_2x2, dataset_F_flat_3d,
+                                                max(1, args.num_points // 6), args.max_gamma)
+        default_export_subfolder = "pytorch_export_standard_interp"
     elif args.sample_mode == "standard_interp":
         print(f"Generating standard deformation modes strictly within GP interpolation bounds (up to gamma = {args.max_gamma})...")
         f3x3_flat_2x2 = generate_standard_modes_interp(num_points=max(1, args.num_points // 6), max_search_gamma=args.max_gamma, min_dev=min_dev, max_dev=max_dev, min_vol=min_vol, max_vol=max_vol)

@@ -5,7 +5,9 @@ Coverage study of the distilled material parameters over noise realisations and 
 For an HSGP experiment (synthetic, with a ground truth) with extractions <exp>/<s>/extracted for the noise seeds s:
   for each noise seed s and initialisation m = 0..M-1 (in this order: seed 1 init 0, seed 1 init 1, ..., last seed
   last init; dev and vol of a pair run at the same time), the distillation (dev, and vol unless deviatoric-only) is run with
-  seed s + 1000 m into <exp>/coverage_study/seed<s>/init<m>/ (m = 0 uses the same seed as the standard pipeline run);
+  seed s + 1000 m into <exp>/coverage_study_<states>/seed<s>/init<m>/ (m = 0 uses the same seed as the standard
+  pipeline run). <states> names the distillation states like the GP export folder: e.g. dataset_f_n512,
+  dataset_f_random_n256, standard_interp, standard_g1.0 (--sample_mode / --num_points override the recipe);
   optional --checkpoints save the parameter samples of the final distillation stage after k Wasserstein iterations
   (the training trajectory is unchanged by the checkpoints).
 Evaluation, per permutation (s, m) and checkpoint: the central `level` interval of every parameter marginal; the
@@ -18,6 +20,7 @@ Usage:
   python3 validation/distillation_coverage_study.py --experiment_dir results/<exp> --n_noise_seeds 1 --n_inits 5 \
       --checkpoints 2000 4000 6000 8000 10000                       # pilot
   python3 validation/distillation_coverage_study.py --experiment_dir results/<exp> --n_noise_seeds 10 --n_inits 5
+  python3 validation/distillation_coverage_study.py --experiment_dir results/<exp> --sample_mode standard_interp
   --evaluate_only: recompute the summary from existing runs.   --extract: run missing HSGP extractions first.
 """
 import argparse
@@ -51,8 +54,15 @@ def parse_args():
     p.add_argument("--extract", action="store_true", help="run missing HSGP extractions (scripts/run_hsgp_pipeline.sh)")
     p.add_argument("--evaluate_only", action="store_true", help="only evaluate existing runs")
     p.add_argument("--force", action="store_true", help="rerun distillations that already have results")
-    p.add_argument("--study_dir", default=None, help="output directory (default: <experiment_dir>/coverage_study)")
+    p.add_argument("--sample_mode", default=None, help="distillation states (default: recipe sample_mode), e.g. "
+                   "dataset_f, dataset_f_random, standard_interp, standard")
+    p.add_argument("--num_points", type=int, default=None, help="number of distillation states (default: recipe)")
+    p.add_argument("--max_gamma", type=float, default=None, help="standard modes: maximum amplitude (default: recipe)")
+    p.add_argument("--study_dir", default=None,
+                   help="output directory (default: <experiment_dir>/coverage_study_<states>, see above)")
     p.add_argument("--no_sensitivity", action="store_true", help="skip the Sobol pruning (quick tests only)")
+    p.add_argument("--no_plots", action="store_true",
+                   help="skip the post-distillation plots after each seed/init (scripts/replot_coverage_study.sh)")
     return p.parse_args()
 
 
@@ -150,11 +160,15 @@ def main():
     if truth is None:
         sys.exit("No ground truth in config.yaml (material_params): the coverage study needs a synthetic experiment.")
     names = FULL_NAMES[:13] if library == "gmr" else FULL_NAMES
-    study = os.path.abspath(args.study_dir) if args.study_dir else os.path.join(exp, "coverage_study")
+    for key, val in (("sample_mode", args.sample_mode), ("num_points", args.num_points), ("max_gamma", args.max_gamma)):
+        if val is not None:
+            cfg[key] = val
+    states = os.path.basename(export_cmd(cfg, "")[1])[len("pytorch_export_"):]   # same naming as the GP export
+    study = os.path.abspath(args.study_dir) if args.study_dir else os.path.join(exp, f"coverage_study_{states}")
     if args.no_sensitivity:
         cfg["do_sensitivity"] = 0
     os.makedirs(study, exist_ok=True)
-    print(f"Coverage study: {exp}\n  noise seeds {seeds}, {len(inits)} initialisations, {n_iter} iterations, "
+    print(f"Coverage study: {exp}\n  distillation states {states} -> {study}\n  noise seeds {seeds}, {len(inits)} initialisations, {n_iter} iterations, "
           f"checkpoints {checkpoints or 'final only'}, library {library}{' (dev only)' if dev_only else ''}", flush=True)
 
     # --- extractions
@@ -198,6 +212,10 @@ def main():
                         jobs = jobs[1:]
             with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
                 list(pool.map(run_job, jobs))
+            if not args.no_plots:   # energy / stress / parameter plots of this pair, as after a normal distillation
+                with open(os.path.join(study, f"seed{s}", f"init{m}", "plots.log"), "w") as f:
+                    subprocess.run(["bash", "scripts/replot_coverage_study.sh", study, "--seeds", str(s), "--inits", str(m)],
+                                   cwd=ROOT, stdout=f, stderr=subprocess.STDOUT)
 
     # --- evaluation
     rows, summary = [], {"experiment": exp, "noise_seeds": seeds, "n_inits": len(inits), "level": args.level,
