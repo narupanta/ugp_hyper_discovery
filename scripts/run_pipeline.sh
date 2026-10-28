@@ -654,6 +654,11 @@ for SEED in $SEEDS_LIST; do
             --material_model "$DIST_MODEL" \
             --distill_target "$DIST_TARGET" || true
 
+        python3 plots/plot_effective_moduli.py \
+            --distilled_dir "$DISTILL_DIR" \
+            --saved_model_dir "$EXTRACT_DIR" \
+            --material_model "$DIST_MODEL" || true
+
         python3 plots/plot_distilled_r2_energy.py \
             --distilled_dir "$DISTILL_DIR" \
             --saved_model_dir "$EXTRACT_DIR" \

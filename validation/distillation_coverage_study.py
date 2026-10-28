@@ -36,7 +36,7 @@ import yaml
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
-from core.material_library import (FULL_NAMES, full_param_vectors, is_dev_only, library_from_material_model,  # noqa: E402
+from core.material_library import (FULL_NAMES, effective_moduli, full_param_vectors, is_dev_only, library_from_material_model,  # noqa: E402
                                    sort_ogden_terms, true_full_vector)
 
 
@@ -119,7 +119,7 @@ def samples_path(run_dir, component, k, final_iter):
     return os.path.join(run_dir, name)
 
 
-def evaluate(run_dir, k, final_iter, library, dev_only, truth, level):
+def evaluate(run_dir, k, final_iter, library, dev_only, truth, level, true_moduli=None):
     """Interval check of one permutation at checkpoint k: dict or None if the samples are missing."""
     p_dev = samples_path(run_dir, "dev", k, final_iter)
     if not os.path.exists(p_dev):
@@ -140,8 +140,15 @@ def evaluate(run_dir, k, final_iter, library, dev_only, truth, level):
     tol = 1e-12                                                    # pruned parameters are exactly 0
     inside = (t >= lo - tol) & (t <= hi + tol)
     active = t != 0.0
-    return dict(inside=inside, covered_true=bool(np.all(inside[active])), covered_all=bool(np.all(inside)),
-                mean=full.mean(0), std=full.std(0), lo=lo, hi=hi)
+    out = dict(inside=inside, covered_true=bool(np.all(inside[active])), covered_all=bool(np.all(inside)),
+               mean=full.mean(0), std=full.std(0), lo=lo, hi=hi)
+    if true_moduli is not None:          # effective small-strain moduli (identifiable even when C10/C01 are not)
+        for name, x, t in zip(("mu", "kappa"), effective_moduli(full), true_moduli):
+            if name == "kappa" and dev_only:
+                continue
+            q_lo, q_hi = np.quantile(x, [a, 1.0 - a])
+            out[name] = dict(mean=float(x.mean()), lo=float(q_lo), hi=float(q_hi), covered=bool(q_lo <= t <= q_hi))
+    return out
 
 
 def main():
@@ -159,11 +166,23 @@ def main():
     truth = true_full_vector(cfg.get("material_params"))
     if truth is None:
         sys.exit("No ground truth in config.yaml (material_params): the coverage study needs a synthetic experiment.")
+    try:                                   # true effective moduli from the true material (any family)
+        from core.material_models import get_material_from_config
+        from core.material_library import true_effective_moduli
+        true_moduli = true_effective_moduli(get_material_from_config(
+            dict(cfg, material_model_name=cfg.get("material_model_name", "isihara"))))
+    except Exception as e:
+        print(f"effective moduli not evaluated ({type(e).__name__}: {e})", flush=True)
+        true_moduli = None
     names = FULL_NAMES[:13] if library == "gmr" else FULL_NAMES
     for key, val in (("sample_mode", args.sample_mode), ("num_points", args.num_points), ("max_gamma", args.max_gamma)):
         if val is not None:
             cfg[key] = val
     states = os.path.basename(export_cmd(cfg, "")[1])[len("pytorch_export_"):]   # same naming as the GP export
+    for comp in ("dev", "vol", "aniso"):     # disabled library terms: own study folder (runs are not interchangeable)
+        off = [int(x) for x in np.atleast_1d(cfg.get(f"{comp}_params_disabled") or [])]
+        if off:
+            states += f"_{comp}off" + "-".join(map(str, sorted(off)))
     study = os.path.abspath(args.study_dir) if args.study_dir else os.path.join(exp, f"coverage_study_{states}")
     if args.no_sensitivity:
         cfg["do_sensitivity"] = 0
@@ -226,11 +245,14 @@ def main():
         res = {}
         for s in seeds:
             for m in inits:
-                r = evaluate(os.path.join(study, f"seed{s}", f"init{m}"), k, n_iter, library, dev_only, truth, args.level)
+                r = evaluate(os.path.join(study, f"seed{s}", f"init{m}"), k, n_iter, library, dev_only, truth, args.level,
+                             true_moduli)
                 if r is not None:
                     res[(s, m)] = r
                     rows.append(dict(iteration=k, noise_seed=s, init=m, covered_true=int(r["covered_true"]),
                                      covered_all=int(r["covered_all"]),
+                                     **{f"covered_{q}": int(r[q]["covered"]) for q in ("mu", "kappa") if q in r},
+                                     **{f"mean_{q}": r[q]["mean"] for q in ("mu", "kappa") if q in r},
                                      **{f"in_{n}": int(v) for n, v in zip(names, r["inside"])},
                                      **{f"mean_{n}": float(v) for n, v in zip(names, r["mean"])}))
         if not res:
@@ -241,6 +263,13 @@ def main():
         per_param = {n: 100.0 * np.mean([r["inside"][i] for r in res.values()]) for i, n in enumerate(names)}
         entry = dict(n_permutations=n_perm, coverage_true_params=cov_true, coverage_all_params=cov_all,
                      per_parameter=per_param)
+        for q in ("mu", "kappa"):
+            got = [r[q] for r in res.values() if q in r]
+            if got:
+                entry[f"coverage_{q}"] = 100.0 * np.mean([g["covered"] for g in got])
+                entry[f"mean_{q}"] = float(np.mean([g["mean"] for g in got]))
+        if true_moduli is not None:
+            entry["true_moduli"] = dict(mu=true_moduli[0], kappa=None if dev_only else true_moduli[1])
         # spread between initialisations (per noise seed, averaged) and drift of the means towards the final iteration
         means = {key: r["mean"] for key, r in res.items()}
         between = np.mean([np.std([means[(s, m)] for m in inits if (s, m) in means], axis=0)
@@ -282,6 +311,16 @@ def main():
         for k in drift_ks:
             d = summary["checkpoints"][k]["drift_over_between_init_std"]
             lines.append(f"| {k} | " + " | ".join(f"{d[n]:.2f}" for n in active) + " |")
+    mod_ks = [k for k in sorted(summary["checkpoints"]) if "coverage_mu" in summary["checkpoints"][k]]
+    if mod_ks:
+        tm = summary["checkpoints"][mod_ks[0]].get("true_moduli", {})
+        lines += ["", f"Effective small-strain moduli (true mu = {tm.get('mu', float('nan')):.4g}"
+                      + (f", kappa = {tm['kappa']:.4g}" if tm.get("kappa") is not None else "") + "):", "",
+                  "| Iteration | Coverage mu (%) | mean mu | Coverage kappa (%) | mean kappa |", "|---|---|---|---|---|"]
+        for k in mod_ks:
+            e = summary["checkpoints"][k]
+            lines.append(f"| {k} | {e['coverage_mu']:.0f} | {e['mean_mu']:.4g} | "
+                         + (f"{e['coverage_kappa']:.0f} | {e['mean_kappa']:.4g} |" if "coverage_kappa" in e else "- | - |"))
     open(os.path.join(study, "coverage_summary.md"), "w").write("\n".join(lines) + "\n")
     print("\n".join(lines))
     print(f"\nSaved {study}/coverage_summary.md, coverage_summary.json, coverage_permutations.csv")

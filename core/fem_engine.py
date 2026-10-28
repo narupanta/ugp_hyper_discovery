@@ -508,6 +508,22 @@ def make_plane_stress_piola(mat_model: Any, max_iter: int = 15) -> Tuple[Callabl
     return piola_2d, solve_lambda3
 
 
+def make_incompressible_plane_stress_piola(mat_model: Any) -> Tuple[Callable, Callable]:
+    """
+    Incompressible plane stress: lambda_3 = 1 / det F_2D, and the in-plane Piola stress is the derivative of the
+    reduced energy Psi(F_2D, 1 / det F_2D) (the pressure is eliminated by sigma_33 = 0). J = 1 identically, so any
+    volumetric term of the material is constant and drops out.
+    """
+    def solve_lambda3(F_2d: jnp.ndarray) -> jnp.ndarray:
+        return 1.0 / jnp.linalg.det(F_2d)
+
+    def reduced_psi(F_2d):
+        F_3d = jnp.zeros((3, 3), dtype=F_2d.dtype).at[:2, :2].set(F_2d).at[2, 2].set(solve_lambda3(F_2d))
+        return mat_model.psi(F_3d)
+
+    return jax.grad(reduced_psi), solve_lambda3
+
+
 # ==============================================================================
 # 3. Universal JAX-FEM HyperElasticity Problem & Adaptive Solver
 # ==============================================================================

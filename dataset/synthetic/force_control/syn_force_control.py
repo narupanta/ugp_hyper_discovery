@@ -15,7 +15,8 @@ from core.fem_engine import (
     create_default_bc_config,
     HyperElasticityProblem,
     solve_adaptive_fem,
-    make_plane_stress_piola
+    make_plane_stress_piola,
+    make_incompressible_plane_stress_piola
 )
 from core.dataset_store import (
     CLEAN_DIR, clean_dataset_path, make_dataset_spec, save_clean_dataset, displacement_reactions
@@ -92,6 +93,8 @@ def main():
     parser.add_argument('--mesh_size', type=float, default=0.08)
     parser.add_argument('--control_mode', type=str, default=None, choices=["force", "displacement"])
     parser.add_argument('--stress_mode', type=str, default=None, choices=["plane_strain", "plane_stress"])
+    parser.add_argument('--plane_stress_mode', type=str, default=None, choices=["compressible", "incompressible"],
+                        help="plane stress: lambda3 from P33 = 0 (compressible, default) or 1 / det F_2D (incompressible)")
     parser.add_argument('--prescribe_right', type=int, default=None, help="1 to prescribe right boundary, 0 to leave free. Default: 1 for block, 0 for holes.")
     parser.add_argument('--clamp_top_x', type=int, default=None, help="1 to clamp top boundary in x (ux=0, rigid clamp), 0 for free roller.")
     parser.add_argument('--angles', type=float, nargs='+', default=None)
@@ -117,6 +120,8 @@ def main():
 
     control_mode = (args.control_mode or rec.get("control_mode", "force")).lower()
     stress_mode = (args.stress_mode or rec.get("stress_mode", "plane_strain")).lower()
+    ps_mode = (args.plane_stress_mode or rec.get("plane_stress_mode") or "compressible").lower()
+    incompressible_ps = stress_mode == "plane_stress" and ps_mode == "incompressible"
     target_load = args.target_top if args.target_top is not None else float(rec.get("target_load_true_top", 10.0))
     asym_factor = args.asym if args.asym is not None else float(rec.get("asym_factor", 0.9))
     num_steps = args.n_steps if args.n_steps is not None else int(rec.get("n_loadsteps", 21))
@@ -159,6 +164,8 @@ def main():
         target_load=float(target_load), asym_factor=float(asym_factor), n_steps=int(num_steps),
         prescribe_right=bool(prescribe_right), clamp_top_x=bool(clamp_top_x_val),
     )
+    if incompressible_ps:      # only added when set, so the hashes of the existing datasets are unchanged
+        config["plane_stress_mode"] = "incompressible"
     if material_model_name == "ogden":   # energy convention 2 mu/alpha^2 (core/ogden.py); older mu/alpha datasets differ
         config["ogden_convention"] = "2mu_over_alpha2"
     clean_path = clean_dataset_path(config, root=args.clean_dir)
@@ -206,7 +213,9 @@ def main():
 
     # 3. Material Constitutive Model
     true_mat_model = get_material(material_model_name, **mat_kwargs)
-    if stress_mode == "plane_stress":
+    if incompressible_ps:
+        true_piola_stress_func, solve_lambda3 = make_incompressible_plane_stress_piola(true_mat_model)
+    elif stress_mode == "plane_stress":
         true_piola_stress_func, solve_lambda3 = make_plane_stress_piola(true_mat_model)
     else:
         true_piola_stress_func = lambda f: true_mat_model.P(fto3x3(f))[:2, :2]

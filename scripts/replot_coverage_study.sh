@@ -1,6 +1,6 @@
 #!/bin/bash
 # Post-distillation plots for the distillations of a coverage study, as in the normal pipeline (scripts/run_pipeline.sh):
-# distilled-vs-GP validation, split summary, energy R^2 and sensitivity plots (no block validation, no FEM).
+# distilled-vs-GP validation, split summary, effective moduli, energy R^2 and sensitivity plots (no block validation, no FEM).
 # Also called by validation/distillation_coverage_study.py after each seed/init pair. Runs every <study>/seed<s>/init<m> that has flow samples.
 #
 # Usage: bash scripts/replot_coverage_study.sh results/<experiment>/coverage_study_<states> [--seeds "1 2"] [--inits "0 1"]
@@ -37,6 +37,7 @@ for RUN in "$STUDY"/seed*/init*; do
     COMMON=(--distilled_dir "$RUN" --saved_model_dir "$EXTRACT_DIR" --material_model "$DIST_MODEL" --distill_target "$DIST_TARGET")
     python3 plots/plot_distilled_validation.py "${COMMON[@]}" || echo "  plot_distilled_validation failed"
     python3 plots/plot_split_summary.py "${COMMON[@]}" || echo "  plot_split_summary failed"
+    python3 plots/plot_effective_moduli.py --distilled_dir "$RUN" --saved_model_dir "$EXTRACT_DIR" --material_model "$DIST_MODEL" || echo "  plot_effective_moduli failed"
     python3 plots/plot_distilled_r2_energy.py "${COMMON[@]}" --val_load_steps $FEM_VAL_STEPS || echo "  plot_distilled_r2_energy failed"
     for COMP in dev vol aniso; do
         if [ -d "$RUN/output/${COMP}_sensitivities" ] || [ -d "$RUN/${COMP}_sensitivities" ]; then

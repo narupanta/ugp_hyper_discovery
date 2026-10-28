@@ -23,7 +23,7 @@ GROUPS = [
         "train_load_steps_indices", "val_load_steps_indices", "test_load_steps_indices", "seeds"]),
     ("Extraction (HSGP)", [
         # likelihood and free-residual noise
-        "hsgp_likelihood", "hsgp_force_noise_rel", "hsgp_cv_folds", "hsgp_cv_tol",
+        "hsgp_likelihood", "hsgp_force_noise_rel", "hsgp_cv_folds", "hsgp_cv_holdout", "hsgp_cv_tol",
         "reaction_components", "reaction_noise_rel", "reaction_noise_floor", "reaction_zero_components",
         # basis and hyperparameters
         "hsgp_num_basis_dev", "hsgp_num_basis_vol", "hsgp_num_basis_aniso", "hsgp_box_factor",

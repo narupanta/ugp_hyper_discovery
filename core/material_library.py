@@ -112,3 +112,28 @@ def sort_ogden_terms(dev, library="gmr", mu_tol=1e-6):
     rows = np.arange(dev.shape[0])[:, None]
     dev[:, start:start + 2 * n_terms:2], dev[:, start + 1:start + 2 * n_terms:2] = mu[rows, order], al[rows, order]
     return dev
+
+
+def effective_moduli(full):
+    """Small-strain moduli of full parameter vectors (S, 13 | 25): mu = 2 (C10 + C01 + E/3) + sum mu_k (Ogden,
+    convention 2 mu_k / alpha_k^2) and kappa = 2 D1 (psi_vol = D1 (J-1)^2 + ...). Same definition as the HSGP
+    (mu = 2 (dpsi/dI1_bar + dpsi/dI2_bar), kappa = d2psi/dJ2 at F = I); fibre terms are not included."""
+    full = np.atleast_2d(np.asarray(full, dtype=float))
+    mu = 2.0 * (full[:, 0] + full[:, 1] + full[:, 9] / 3.0)
+    if full.shape[1] > OGDEN_START:
+        mu = mu + full[:, OGDEN_START::2].sum(axis=1)
+    return mu, 2.0 * full[:, 10]
+
+
+def true_effective_moduli(material):
+    """(mu, kappa) of any material with psi(F (3, 3)) by differentiation at F = I: mu = d2psi/dgamma2 in isochoric
+    simple shear, kappa = d2psi/dJ2 under pure dilatation F = J^(1/3) I."""
+    import jax
+    import jax.numpy as jnp
+    jax.config.update("jax_enable_x64", True)
+    eye = jnp.eye(3, dtype=jnp.float64)
+    shear = lambda g: material.psi(eye.at[0, 1].set(g))
+    dil = lambda j: material.psi(j ** (1.0 / 3.0) * eye)
+    mu = float(jax.grad(jax.grad(shear))(jnp.float64(0.0)))
+    kappa = float(jax.grad(jax.grad(dil))(jnp.float64(1.0)))
+    return mu, kappa

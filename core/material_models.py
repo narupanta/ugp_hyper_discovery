@@ -58,6 +58,42 @@ def get_material_from_config(config: Dict[str, Any], **kwargs) -> "BaseMaterialM
     return get_material(model_name, **extra_kwargs)
 
 
+class IncompressiblePlaneStressView:
+    """
+    A material seen under incompressible plane stress: F33 = 1 / det F_2D, and P is the gradient of the reduced energy
+    Psi(F_2D, 1 / det F_2D) with respect to F (in-plane block; the out-of-plane entries are 0). This is the stress the
+    FEM data are generated with (core.fem_engine.make_incompressible_plane_stress_piola) and the one an
+    incompressible-plane-stress HSGP returns, so GP-vs-truth stress comparisons use the same convention. The full 3D
+    model.P has no pressure and a non-zero P33 and is NOT comparable. Every other attribute is the wrapped model's.
+    """
+    def __init__(self, model):
+        self._model = model
+
+        def reduced_psi(F):
+            F = jnp.asarray(F)
+            f2 = F[:2, :2]
+            F3 = jnp.zeros((3, 3), dtype=F.dtype).at[:2, :2].set(f2).at[2, 2].set(1.0 / jnp.linalg.det(f2))
+            return model.psi(F3)
+        self._reduced_psi = reduced_psi
+        self._P = jax.grad(reduced_psi)
+
+    @staticmethod
+    def _batched(fn, F):
+        F = jnp.asarray(F)
+        if F.ndim == 2:
+            return fn(F)
+        return jax.vmap(fn)(F.reshape(-1, 3, 3)).reshape(F.shape[:-2] + jnp.shape(fn(F.reshape(-1, 3, 3)[0])))
+
+    def psi(self, F):
+        return self._batched(self._reduced_psi, F)
+
+    def P(self, F):
+        return self._batched(self._P, F)
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+
 def get_material_from_dir(dir_path: str, **kwargs) -> "BaseMaterialModel":
     """
     Instantiate a material model by loading the configuration from a saved model directory.
@@ -565,3 +601,36 @@ class AnisotropicHolzapfel(HyperelasticModel):
         if self.k2 == 0.0:
             return 0.5 * self.k1 * (E_active**2)
         return (self.k1 / (2.0 * self.k2)) * (jnp.exp(self.k2 * (E_active**2)) - 1.0)
+
+
+@register_material("hgo2")
+class HolzapfelTwoFiber(HyperelasticModel):
+    """
+    Holzapfel-Gasser-Ogden material with two fibre families a0, a1 (angles in degrees), neo-Hookean matrix from
+    dev_params, volumetric part from vol_params:
+        psi_aniso = sum_i k1_i / (2 k2_i) (exp(k2_i E_i^2) - 1),   E_i = kappa (I1_bar - 3) + (1 - 3 kappa) (I4i_bar - 1)
+    with I41_bar = a0 . C_bar a0, I42_bar = a1 . C_bar a1 (k2_i = 0: k1_i E_i^2 / 2).
+    aniso_params (the usual length-6 vector): [k1, k2 (fibre 1), k3, k4 (fibre 2), kappa (dispersion, 0..1/3),
+    tension_only (1: E_i -> max(E_i, 0), fibres carry no compression)].
+    """
+
+    def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, **kwargs):
+        if dev_params is None or vol_params is None or aniso_params is None or angles is None or len(angles) != 2:
+            raise ValueError("hgo2 requires 'dev_params', 'vol_params', 'aniso_params' and two fibre 'angles'.")
+        super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
+        p = [float(x) for x in self.aniso_params]
+        self.fibre_params = [(p[0], p[1]), (p[2], p[3])]
+        self.kappa, self.tension_only = p[4], bool(p[5])
+        if not 0.0 <= self.kappa <= 1.0 / 3.0:
+            raise ValueError(f"hgo2: dispersion kappa must lie in [0, 1/3], got {self.kappa}")
+
+    def psi_aniso(self, F: jnp.ndarray) -> jnp.ndarray:
+        _, C_bar, i1_dev, _, _ = self._eval_invariants(F)
+        out = 0.0
+        for a, (k1, k2) in zip((self.a0, self.a1), self.fibre_params):
+            I4 = jnp.einsum('i,...ij,j->...', a, C_bar, a)
+            E = self.kappa * (i1_dev - 3.0) + (1.0 - 3.0 * self.kappa) * (I4 - 1.0)
+            if self.tension_only:
+                E = jnp.maximum(E, 0.0)
+            out = out + (0.5 * k1 * E ** 2 if k2 == 0.0 else (k1 / (2.0 * k2)) * (jnp.exp(k2 * E ** 2) - 1.0))
+        return out

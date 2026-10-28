@@ -283,6 +283,8 @@ class DatasetDict(dict):
 
 def _plane_stress_lambda3_solver(config: Dict[str, Any]) -> Callable:
     """Rebuilds lambda3(F_2D) of the generating material (synthetic plane stress only; this uses the truth)."""
+    if config.get("plane_stress_mode") == "incompressible":    # lambda3 = 1 / det F_2D, material-independent
+        return lambda F_2d: 1.0 / jnp.linalg.det(F_2d)
     from core.material_models import get_material
     from core.fem_engine import make_plane_stress_piola
     _, solve_lambda3 = make_plane_stress_piola(get_material(config["material_model"], **config.get("material_kwargs", {})))
@@ -331,5 +333,7 @@ def load_dataset(spec: str, seed: Optional[int] = None, disp_noise: Optional[flo
     solve_l3 = _plane_stress_lambda3_solver(config) if str(clean["stress_mode"]) == "plane_stress" else None
     obs = observe_dataset(clean, seed, disp_noise, load_noise, solve_lambda3_fn=solve_l3)
     obs["config_json"] = clean["config_json"]
+    if config.get("plane_stress_mode"):
+        obs["plane_stress_mode"] = config["plane_stress_mode"]
     obs["dataset_spec"] = make_dataset_spec(path, seed, disp_noise, load_noise)
     return DatasetDict(obs)

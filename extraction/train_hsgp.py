@@ -10,6 +10,8 @@ machines); scripts/run_hsgp_pipeline.sh calls the two phases one after the other
 HSGP settings are read from the recipe (keys below) and can be overridden on the command line:
     hsgp_force_noise_rel: 0.0       # s of sigma_free,t = s |R_t|; 0 = chosen by cross-validation
     hsgp_cv_folds: 2                # interleaved folds of the training steps
+    hsgp_cv_holdout: "folds"        # "val": fit on the training steps, choose s by the reactions of the validation
+                                    # steps (val_load_steps_indices; hsgp_cv_folds ignored); "folds" = interleaved folds
     hsgp_cv_tol: 0.0                # > 0: smallest s within this many nats of the best held-out score (plateau rule)
     hsgp_num_basis_dev: 24          # eigenfunctions per deviatoric dimension
     hsgp_num_basis_vol: 32
@@ -50,7 +52,7 @@ from core.material_models import get_material
 from core.utils import load_f3x3_from_dataset
 from plots.theme import apply_style, save_figure
 
-HSGP_DEFAULTS = dict(hsgp_force_noise_rel=0.0, hsgp_cv_folds=2, hsgp_cv_tol=0.0,
+HSGP_DEFAULTS = dict(hsgp_force_noise_rel=0.0, hsgp_cv_folds=2, hsgp_cv_holdout="folds", hsgp_cv_tol=0.0,
                      hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_num_basis_aniso=0, hsgp_box_factor=8.0, hsgp_sigma_cap=10.0,
                      hsgp_amplitude_prior_scale=0.0, hsgp_lengthscale_prior_scale=0.0, hsgp_hyper_restarts=1)
 
@@ -152,7 +154,7 @@ def plot_force_noise_cv(model, save_path):
         ax.axvline(cv["s_best_score"], color="grey", ls=":", label=f"best score s = {cv['s_best_score']:.3g}")
     ax.set_xlabel(r"$s$ ($\sigma_{\mathrm{free},t} = s\,\|R_t\|$)")
     ax.set_ylabel("held-out reaction log predictive density")
-    ax.set_title(f"{len(cv['folds'])}-fold cross-validation")
+    ax.set_title(f"validation steps {cv.get('validation_steps')}" if cv.get('holdout') == 'validation' else f"{len(cv['folds'])}-fold cross-validation")
     ax.legend()
     save_figure(fig, os.path.join(save_path, "force_noise_cv.pdf"))
 
@@ -180,6 +182,9 @@ def main():
     # incompressible plane stress (recipe or dataset): F33 = 1/det F_2D inside the model, no volumetric part
     ps_mode = str(rec.get("plane_stress_mode", prep.get("plane_stress_mode", "")) or "")
     incompressible_ps = str(prep.get("stress_mode", rec.get("stress_mode", ""))) == "plane_stress" and ps_mode == "incompressible"
+    if incompressible_ps and mat is not None:   # truth stress = gradient of the reduced energy (as the data and the GP)
+        from core.material_models import IncompressiblePlaneStressView
+        mat = IncompressiblePlaneStressView(mat)
     # reaction components with a load cell (e.g. [0] for a uniaxial machine): the others get no weight in the likelihood
     sigma_R_steps = np.array(prep["load_noise_std_steps"], dtype=float)
     if rec.get("reaction_components") is not None:
@@ -209,6 +214,22 @@ def main():
     post_path = os.path.join(save_path, "hsgp_posterior.npz")
     print(f"[HSGP] seed {args.seed} | steps {train_steps} | energy scale {energy_scale:.4g} | options {opt}", flush=True)
 
+    cv_mode = str(opt["hsgp_cv_holdout"] or "folds").lower()
+    if cv_mode not in ("folds", "val"):
+        raise ValueError(f"hsgp_cv_holdout must be 'folds' or 'val' (got {cv_mode!r})")
+    cv_data = None
+    if cv_mode == "val":
+        cv_steps = [int(t) for t in val_steps if 0 <= int(t) < F_all.shape[0]]
+        if len(cv_steps) < len(val_steps):
+            print(f"[HSGP] validation steps {sorted(set(map(int, val_steps)) - set(cv_steps))} are not in the data "
+                  f"({F_all.shape[0]} steps): left out of the s selection", flush=True)
+        if not cv_steps:
+            raise ValueError("hsgp_cv_holdout: val needs val_load_steps_indices inside the data")
+        cv_data = dict(f3x3=F_all[jnp.array(cv_steps)], R=np.asarray(prep["reaction_forces"])[cv_steps],
+                       sigma_R=sigma_R_steps[cv_steps], labels=cv_steps)
+        print(f"[HSGP] s chosen on the validation steps {cv_steps} (these are then not independent of the fit "
+              f"settings)", flush=True)
+
     if args.phase in ("fit", "all"):
         t0 = time.time()
         model, hist = fit_hsgp(
@@ -219,7 +240,8 @@ def main():
             amplitude_prior_scale=opt["hsgp_amplitude_prior_scale"], lengthscale_prior_scale=opt["hsgp_lengthscale_prior_scale"],
             hyper_restarts=bool(opt["hsgp_hyper_restarts"]), incompressible_plane_stress=incompressible_ps,
             sigma_f_rel=float(opt["hsgp_force_noise_rel"]) or None, cv_folds=int(opt["hsgp_cv_folds"]),
-            cv_tol=float(opt["hsgp_cv_tol"]), step_labels=train_steps, fibers=fibers,
+            cv_tol=float(opt["hsgp_cv_tol"]),
+            cv_data=cv_data, step_labels=train_steps, fibers=fibers,
             num_basis_aniso=int(opt["hsgp_num_basis_aniso"]) or None)
         fit_time = time.time() - t0
         model.save(post_path)

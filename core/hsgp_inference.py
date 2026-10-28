@@ -112,13 +112,16 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              lengthscale_factor: float = 1.5, lengthscale_prior_scale: float = 0.0,
              sigma_cap: float = 10.0, hyper_restarts: bool = True, incompressible_plane_stress: bool = False,
              sigma_f_rel: Optional[float] = None, cv_folds: int = 2, cv_grid=None, cv_tol: float = 0.0,
-             fibers=None, num_basis_aniso: Optional[int] = None,
+             cv_data: Optional[dict] = None, fibers=None, num_basis_aniso: Optional[int] = None,
              step_labels=None, hyper_steps: int = 300, verbose: bool = True, log_fn=print):
     """
     f3x3_steps: (T, C, 3, 3) measured deformation gradients of the training steps; R_obs, sigma_R: (T, 2).
     sigma_f_rel: free-residual scale s (sigma_free,t = s |R_t|); None = chosen by cross-validation:
       cv_folds interleaved folds of the training steps; log grid cv_grid (default 1e-5..1, 11 points) refined around
       the best score; cv_tol > 0: the smallest s within cv_tol nats of the best held-out score (plateau rule).
+      cv_data: a separate validation set instead of the folds, dict(f3x3 (V, C, 3, 3), R (V, 2), sigma_R (V, 2),
+      labels): each s is fitted on ALL training steps and scored on these steps' reactions only (cv_folds ignored);
+      they never enter the fit.
     fibers: (a0, a1) in-plane fibre vectors (a1 may be None) for the anisotropic GP over (I4_bar, I6_bar), with
     num_basis_aniso functions per fibre invariant (default num_basis_dev); None: isotropic.
     amplitude_factor x energy_scale: prior centre of the amplitudes; sigma_cap: amplitudes capped at sigma_cap x that
@@ -303,19 +306,40 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         m, Fc = posterior(best[2], st)
         return dict(eta=best[2], log_z=best[1], mean=m, factor=Fc)
 
-    def heldout_score(m, Fc, t):
-        """log N(R_t; B_R m, Sigma_R,t + B_R S B_R^T), S = Fc Fc^T (held-out reactions only)."""
-        UR = B_R_steps[t] @ Fc
-        C = jnp.diag(sigma_R[t] ** 2) + UR @ UR.T
-        d = R_obs[t] - B_R_steps[t] @ m
+    def heldout_score(m, Fc, t, BR=None, R=None, sR=None):
+        """log N(R_t; B_R m, Sigma_R,t + B_R S B_R^T), S = Fc Fc^T (held-out reactions only); BR/R/sR: a step
+        outside the training set."""
+        BR, R, sR = (B_R_steps[t], R_obs[t], sigma_R[t]) if BR is None else (BR, R, sR)
+        UR = BR @ Fc
+        C = jnp.diag(sR ** 2) + UR @ UR.T
+        d = R - BR @ m
         return float(-0.5 * (d @ jnp.linalg.solve(C, d) + jnp.linalg.slogdet(C)[1] + 2 * jnp.log(2 * jnp.pi)))
 
     cv = None
     if sigma_f_rel is None:
         K = max(2, int(cv_folds))
         folds = [all_idx[k::K] for k in range(K)]
+        if cv_data is not None:      # separate validation steps: fit on all training steps, score these reactions
+            v_F = jnp.asarray(cv_data["f3x3"], dtype=jnp.float64)
+            v_R = jnp.asarray(cv_data["R"])
+            v_sR = jnp.maximum(jnp.asarray(cv_data["sigma_R"]), 1e-3)
+            v_lab = [int(x) for x in cv_data.get("labels", range(v_F.shape[0]))]
+            if v_F.shape[0] == 0:
+                raise ValueError("cv_data has no validation steps")
+            v_BR = []
+            for v in range(v_F.shape[0]):
+                B = force_fn(v_F[v])
+                v_BR.append(jnp.stack([B[rx].sum(0), B[ry].sum(0)]))
+            folds = []
+            log_fn(f"[HSGP] cross-validation: fit on training steps {labels}, score validation steps {v_lab}")
 
         def cv_score(s):
+            if cv_data is not None:
+                res = solve(all_idx, s)
+                if res is None:
+                    return -np.inf
+                return sum(heldout_score(res["mean"], res["factor"], None, v_BR[v], v_R[v], v_sR[v])
+                           for v in range(len(v_BR)))
             total = 0.0
             for hold in folds:
                 res = solve([t for t in all_idx if t not in hold], s)
@@ -340,7 +364,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             g_best = min(g for g, v in scores.items() if v >= scores[s_best_score] - cv_tol)
             log_fn(f"[HSGP] cross-validation: best s = {s_best_score:.3g}; smallest s within {cv_tol:g} nats: {g_best:.3g}")
         sigma_f_rel = g_best
-        cv = dict(method="cross-validation", s=g_best, s_best_score=s_best_score, tol=float(cv_tol),
+        cv = dict(method="cross-validation", holdout="validation" if cv_data is not None else "folds",
+                  validation_steps=v_lab if cv_data is not None else None, s=g_best, s_best_score=s_best_score, tol=float(cv_tol),
                   folds=[[labels[t] for t in f] for f in folds], curve={f"{k:.6g}": v for k, v in sorted(scores.items())})
         log_fn(f"[HSGP] cross-validation: selected s = {g_best:.3g}")
 

@@ -369,7 +369,10 @@ if __name__ == "__main__" :
 
     # Set up ground truth stress function
     if true_material_model is not None:
-        if stress_mode == "plane_stress":
+        if stress_mode == "plane_stress_incompressible":
+            from core.fem_engine import make_incompressible_plane_stress_piola
+            true_piola_stress_func, solve_lambda3_true = make_incompressible_plane_stress_piola(true_material_model)
+        elif stress_mode == "plane_stress":
             from core.fem_engine import make_plane_stress_piola
             true_piola_stress_func, solve_lambda3_true = make_plane_stress_piola(true_material_model)
         else:
