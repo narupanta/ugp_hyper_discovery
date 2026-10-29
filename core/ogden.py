@@ -92,12 +92,12 @@ def ogden_dev_energy_torch(F, mus, alphas):
 
 
 # --- position of the Ogden terms in the full distilled parameter vector -------------------------------------
-# [C10..C03, E (10) | D1..D3 (3) | anisotropic (6) | mu1, alpha1, mu2, alpha2, mu3, alpha3 (6)] = 25
-OGDEN_SLICE = slice(19, 25)
-N_FULL = 25
+# [C10..C03, E (10) | D1..D3 (3) | anisotropic (6) | mu1, alpha1, ..., mu8, alpha8 (16)] = 35 (core/material_library.py)
+from core.material_library import N_FULL, OGDEN_NAMES, OGDEN_START  # noqa: E402
+OGDEN_SLICE = slice(OGDEN_START, OGDEN_START + len(OGDEN_NAMES))
 
 
 def ogden_terms_from_vector(p):
     """(mus, alphas) of the Ogden block of a full parameter vector (zeros if the vector is shorter)."""
-    o = p[OGDEN_SLICE] if p.shape[-1] >= N_FULL else jnp.zeros(6)
+    o = p[OGDEN_SLICE] if p.shape[-1] >= N_FULL else jnp.zeros(len(OGDEN_NAMES))
     return o[0::2], o[1::2]

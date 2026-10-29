@@ -13,7 +13,8 @@ import yaml
 from plots.theme import apply_style, save_figure, MODE_COLORS, COMPONENT_COLORS
 
 # Default candidate parameters in GMR model discovery
-OGDEN_CANDIDATE_PARAMS = ["mu1", "alpha1", "mu2", "alpha2", "mu3", "alpha3"]
+from core.material_library import OGDEN_NAMES as _OGDEN_NAMES  # noqa: E402
+OGDEN_CANDIDATE_PARAMS = list(_OGDEN_NAMES)
 ALL_CANDIDATE_PARAMS = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E", "D1", "D2", "D3"] + OGDEN_CANDIDATE_PARAMS
 DEV_PARAMS_SET = {"C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E"} | set(OGDEN_CANDIDATE_PARAMS)
 VOL_PARAMS_SET = {"D1", "D2", "D3"}

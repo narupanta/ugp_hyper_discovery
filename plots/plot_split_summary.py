@@ -107,6 +107,9 @@ def get_comp_color(name):
         "mu1": "#5e3c99", "alpha1": "#9e86c8",                   # Ogden terms: purple shades
         "mu2": "#7b3294", "alpha2": "#c2a5cf",
         "mu3": "#40004b", "alpha3": "#d9c6e8",
+        "mu4": "#8073ac", "alpha4": "#b2abd2", "mu5": "#542788", "alpha5": "#d8daeb",
+        "mu6": "#6a51a3", "alpha6": "#bcbddc", "mu7": "#3f007d", "alpha7": "#dadaeb",
+        "mu8": "#807dba", "alpha8": "#efedf5",
     }
     vol_palette = {
         "D1": "#d95f02",   # vivid rust orange
@@ -334,6 +337,8 @@ def main():
         )
     
     # Generate Data according to stress_mode ("plane_strain" vs "plane_stress")
+    if getattr(learned_gp, "incompressible_plane_stress", False):
+        stress_mode = "plane_stress_incompressible"   # modes at J = 1, as the GP and a deviatoric-only distillation
     F_all, gamma = generate_standard_modes(
         num_points=100, max_gamma=1.0,
         stress_mode=stress_mode,
@@ -388,7 +393,7 @@ def main():
         aniso_raw = np.load(os.path.join(distilled_dir, "aniso_flow_samples.npy")) if has_aniso else None
         
         # Pad filtered-out parameters with 0.0
-        dev_samples = dev16(dev_raw[:num_samples], dev_library)       # [GMR 10 | Ogden 6]
+        dev_samples = dev16(dev_raw[:num_samples], dev_library)       # [GMR 10 | Ogden 2 x 8]
         
         vol_samples = np.zeros((min(num_samples, vol_raw.shape[0]), 3))
         vol_samples[:, :vol_raw.shape[1]] = vol_raw[:num_samples, :3]
@@ -430,7 +435,7 @@ def main():
             if len(theta_dev) < 16:
                 return 0.0, 0.0
             from core.ogden import ogden_dev_energy_jax
-            og = jnp.asarray(theta_dev)[10:16]
+            og = jnp.asarray(theta_dev)[10:]
             e = lambda f: ogden_dev_energy_jax(f, og[0::2], og[1::2])
             return jax.vmap(e)(F_chunk), jax.vmap(jax.grad(e))(F_chunk)
 

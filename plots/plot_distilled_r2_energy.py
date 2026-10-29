@@ -293,7 +293,7 @@ def main():
         
         n_eval_samples = min(args.num_samples, dev_raw.shape[0], vol_raw.shape[0])
         from core.material_library import dev16, distilled_library
-        dev_samples = dev16(dev_raw[:n_eval_samples], distilled_library(distilled_dir))   # [GMR 10 | Ogden 6]
+        dev_samples = dev16(dev_raw[:n_eval_samples], distilled_library(distilled_dir))   # [GMR 10 | Ogden 2 x 8]
         
         vol_samples = np.zeros((n_eval_samples, 3))
         vol_samples[:, :vol_raw.shape[1]] = vol_raw[:n_eval_samples, :3]
@@ -301,10 +301,10 @@ def main():
         from core.utils import C_func, I1_func, I2_func, I3_func
 
         def _ogden(p, F_3d):
-            if p.shape[-1] < 16:
+            if p.shape[-1] <= 10:
                 return 0.0
             from core.ogden import ogden_dev_energy_jax
-            return ogden_dev_energy_jax(F_3d, p[10:16][0::2], p[10:16][1::2])
+            return ogden_dev_energy_jax(F_3d, p[10:][0::2], p[10:][1::2])
 
         def psi_dev_formula(p, F_3d):
             C = C_func(F_3d)

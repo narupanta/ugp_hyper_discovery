@@ -421,9 +421,9 @@ if __name__ == "__main__" :
                 w_aniso += aniso_p[3] * I6_m1**2 + aniso_p[4] * I6_m1**3 + aniso_p[5] * I6_m1**4
 
         w_ogden = 0.0
-        if p.shape[-1] >= 25:          # Ogden block of the full vector (core/material_library.py)
+        if p.shape[-1] > 19:           # Ogden block of the full vector (core/material_library.py)
             from core.ogden import ogden_dev_energy_jax
-            w_ogden = ogden_dev_energy_jax(F_3d, p[19:25][0::2], p[19:25][1::2])
+            w_ogden = ogden_dev_energy_jax(F_3d, p[19:][0::2], p[19:][1::2])
 
         return w_dev + w_vol + w_aniso + w_ogden
 
@@ -659,9 +659,10 @@ if __name__ == "__main__" :
         a1 = getattr(true_material_model, "a1", None)
 
         # Helper to convert parameter sequence to fixed 19-vector (10 dev + 3 vol + 6 aniso)
-        def to_19_param_vec(p_seq):      # full layout incl. the Ogden block (core/material_library.py): 25 entries
-            p_arr = np.zeros(25, dtype=np.float64)
-            p_len = min(len(p_seq), 25)
+        def to_19_param_vec(p_seq):      # full layout incl. the Ogden block (core/material_library.py): N_FULL entries
+            from core.material_library import N_FULL
+            p_arr = np.zeros(N_FULL, dtype=np.float64)
+            p_len = min(len(p_seq), N_FULL)
             p_arr[:p_len] = p_seq[:p_len]
             return jnp.array(p_arr)
 

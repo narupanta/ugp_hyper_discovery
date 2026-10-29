@@ -820,7 +820,8 @@ def plot_stress_validation(gp_model, true_model, save_path):
     plt.close(fig)
 
 
-def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 1.0, n_gamma: int = 400):
+def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 1.0, n_gamma: int = 400,
+                               picked=None, picked_label="picked states", filename="invariant_space_modes.pdf"):
     """
     Deviatoric GP input space (I1_bar - 3, I2_bar - 3): the training invariants, their convex hull (the interpolation
     region of the energy plots) and the paths of the six standard modes for gamma in [0, gamma_max], with a cross and
@@ -828,6 +829,8 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
     against the ratio (I2_bar - 3) / (I1_bar - 3) (< 1: uniaxial-type stretch, > 1: biaxial-type; all paths share the
     diagonal in plain (I1, I2)); (b) linear zoom on the data in (I1_bar - 3, I2_bar - 3). For a
     compressible model, (c) J along each mode against the observed J range.
+    picked: optional (N, 3) GP inputs (I1_bar, I2_bar, J) of selected states (e.g. the distillation export points),
+    drawn on top of the data in (a), (b) and as a J histogram in (c).
     """
     from scipy.spatial import ConvexHull, QhullError
     from plots.theme import MODE_SHORT_NAMES
@@ -864,6 +867,10 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
         if tf is to_b:
             ax.fill(hx, hy, color="#4caf50", alpha=0.12, lw=0)
         ax.plot(hx, hy, color="#2e7d32", lw=1.2, label="interpolation region (hull)")
+        if picked is not None:
+            pk = np.asarray(picked).reshape(-1, np.asarray(picked).shape[-1])
+            ax.scatter(*tf(pk[:, 0], pk[:, 1]), s=22, marker="x", c="#111111", lw=1.0, zorder=6,
+                       label=f"{picked_label} (N = {len(pk)})")
     for m in range(6):
         feats = jax.vmap(learned_gp.feature_extractor.extract)(F_all[m])
         dev_m, vol_m = np.asarray(feats[0]), np.asarray(feats[1])
@@ -905,11 +912,14 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
     if not incompressible:
         ax = axes[2]
         ax.axhspan(vol_obs.min(), vol_obs.max(), color="#4caf50", alpha=0.12, label="observed J range")
+        if picked is not None and pk.shape[1] > 2:   # J of the picked states as a rug on the right edge
+            ax.plot(np.full(len(pk), gamma_max), pk[:, 2], "_", color="#111111", ms=10, mew=1.2, clip_on=False,
+                    label=f"{picked_label} J")
         ax.set_xlabel(r"$\gamma$"); ax.set_ylabel("J (volumetric GP input)"); ax.grid(alpha=0.3)
         ax.set_title("(c) Volumetric input along the modes"); ax.legend(fontsize=7.5, frameon=False)
     fig.suptitle("Invariant space: data, interpolation region and standard deformation modes", fontsize=12)
     fig.tight_layout()
-    save_figure(fig, os.path.join(save_path, "invariant_space_modes.pdf"))
+    save_figure(fig, os.path.join(save_path, filename))
     plt.close(fig)
     return summary
 

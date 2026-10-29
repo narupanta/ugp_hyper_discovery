@@ -375,19 +375,22 @@ class PyTorchGMRModel(BasePyTorchMaterialModel):
         return energy.unsqueeze(-1)
 
 
-OGDEN_PARAM_NAMES = ("$\\mu_{1}$", "$\\alpha_{1}$", "$\\mu_{2}$", "$\\alpha_{2}$", "$\\mu_{3}$", "$\\alpha_{3}$")
+from core.material_library import N_OGDEN_TERMS, OGDEN_ALPHA_INIT  # noqa: E402
+OGDEN_PARAM_NAMES = tuple(n for k in range(1, N_OGDEN_TERMS + 1) for n in (f"$\\mu_{{{k}}}$", f"$\\alpha_{{{k}}}$"))
+OGDEN_MU_NAMES, OGDEN_ALPHA_NAMES = OGDEN_PARAM_NAMES[0::2], OGDEN_PARAM_NAMES[1::2]
 
 
 class PyTorchGMRDevModel(BasePyTorchMaterialModel):
     """
     Deviatoric candidate library. library = "gmr": polynomial terms in (I1_bar - 3, I2_bar - 3) (+ E log(I2_bar/3));
-    "ogden": three Ogden terms 2 mu_k / alpha_k^2 (sum_i lam_bar_i^alpha_k - 3) (standard convention, core/ogden.py;
-    parameters mu_1, alpha_1, ..., alpha_3); "gmr_ogden": both, polynomial terms first. All flow outputs are positive
-    (exponential output of the flow): the coefficients and mu_k > 0 (mu_k is the term's shear modulus contribution, so
-    every term is stable). The exponent is real: alpha_k = ln a_k from the flow's positive output a_k (a_k = exp(z) of
-    the flow's unconstrained z, so alpha_k = z takes either sign; a pruned a_k = 0 gives alpha_k = 0, the finite limit
-    mu_k sum_i ln^2 lam_bar_i). Saved samples hold the physical (mu_k, alpha_k) (physical_samples). The Ogden terms are
-    interchangeable (no ordering is imposed).
+    "ogden": N_OGDEN_TERMS (8) Ogden terms 2 mu_k / alpha_k^2 (sum_i lam_bar_i^alpha_k - 3) (standard convention,
+    core/ogden.py; parameters mu_1, alpha_1, ..., alpha_8); "gmr_ogden": both, polynomial terms first. All flow outputs
+    are positive (exponential output of the flow): the coefficients and mu_k > 0 (mu_k is the term's shear modulus
+    contribution, so every term is stable). The exponent is real and measured from the term's start exponent
+    alpha0_k (OGDEN_ALPHA_INIT = -4, -3, -2, -1, 1, 2, 3, 4): alpha_k = alpha0_k + ln a_k with the flow's positive output
+    a_k (= exp(z), so the shift z takes either sign and a fresh flow starts around alpha0_k); an inactive a_k (masked to
+    0) gives alpha_k = alpha0_k exactly, which is how stage 1 fits the mu_k at the fixed exponents. Saved samples hold
+    the physical (mu_k, alpha_k) (physical_samples).
     """
     def __init__(self, num_points, device, include_log_terms=False, distill_target="sef", library="gmr"):
         super().__init__()
@@ -430,15 +433,15 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
     def parameter_scales(self, val): self._parameter_scales = val
     @staticmethod
     def physical_samples(samples, names):
-        """Flow samples (mu_k > 0, a_k >= 0) -> physical (mu_k, alpha_k = ln a_k; a_k = 0 -> 0), columns by name."""
+        """Flow samples (mu_k > 0, a_k >= 0) -> physical (mu_k, alpha_k = alpha0_k + ln a_k; a_k = 0 -> alpha0_k)."""
         out = np.array(samples, dtype=float, copy=True)
         names = list(names)
-        for k in range(1, 4):
+        for k in range(1, N_OGDEN_TERMS + 1):
             al_n = f"$\\alpha_{{{k}}}$"
             if al_n not in names:
                 continue
             a = out[:, names.index(al_n)]
-            alpha = np.where(a > 0, np.log(np.where(a > 0, a, 1.0)), 0.0)
+            alpha = OGDEN_ALPHA_INIT[k - 1] + np.where(a > 0, np.log(np.where(a > 0, a, 1.0)), 0.0)
             out[:, names.index(al_n)] = alpha
         return out
 
@@ -449,7 +452,8 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
             from core.ogden import ogden_dev_energy_torch
             og = full_parameters[self._num_poly:]
             a = og[1::2]
-            alphas = torch.where(a > 0, torch.log(torch.where(a > 0, a, torch.ones_like(a))), torch.zeros_like(a))
+            alpha0 = torch.as_tensor(OGDEN_ALPHA_INIT[:a.shape[0]], dtype=a.dtype, device=a.device)
+            alphas = alpha0 + torch.where(a > 0, torch.log(torch.where(a > 0, a, torch.ones_like(a))), torch.zeros_like(a))
             W_ogden = ogden_dev_energy_torch(inputs, og[0::2], alphas)
             if not self.use_poly:
                 return W_ogden.unsqueeze(-1)
@@ -712,6 +716,13 @@ def main():
     parser.add_argument("--do_sensitivity", action="store_true", default=True, help="Perform Sobol sensitivity analysis and re-distill with sensitive parameters")
     parser.add_argument("--no_sensitivity", dest="do_sensitivity", action="store_false", help="Skip sensitivity analysis")
     parser.add_argument("--sobol_threshold", type=float, default=1e-4, help="Total Sobol index threshold for selecting sensitive parameters")
+    parser.add_argument("--ogden_fixed_alpha_stage", type=int, default=1,
+                        help="Ogden libraries: 1 (default) = stage 1 fits the coefficients at the fixed exponents "
+                             "alpha0 = -4..4, the Sobol analysis selects the terms, then the kept terms are re-distilled "
+                             "with mu and alpha together; 0 = mu and alpha jointly from the start")
+    parser.add_argument("--include_log_term", type=int, default=0,
+                        help="1: fit the GMR log term E ln(I2_bar / 3); default 0: E stays in the layout but is fixed "
+                             "at 0 (also implied by --material_model gmr_log)")
     parser.add_argument("--sobol_samples_factor", type=int, default=1024, help="Saltelli sample factor for sensitivity analysis")
     parser.add_argument("--sample_mode", type=str, default="dataset_f", choices=["standard", "standard_interp", "dataset_f", "dataset_f_random", "dataset_f_stratified", "dataset_f_uniform_energy", "dataset_all", "inducing_points"], help="Sample deformation inputs from extraction dataset directly (with standard FPS, stratified high-strain FPS, or uniform energy spectrum sampling) or standard modes")
     parser.add_argument("--num_points", type=int, default=192, help="Number of points for GP joint evaluation and distillation")
@@ -973,11 +984,42 @@ def main():
         for idx in args.aniso_params_disabled:
             global_disabled.add(num_dev + num_vol + idx)
             
+    # GMR log term E ln(I2_bar / 3): kept as a column of the layout (fixed at 0) unless asked for
+    keep_log = bool(args.include_log_term) or "_log" in str(args.material_model).lower()
+    if not keep_log and "$E$" in model.parameter_names:
+        global_disabled.add(list(model.parameter_names).index("$E$"))
+        print("GMR log term E is not part of the library (fixed at 0; --include_log_term 1 or gmr_log to fit it)")
+
     full_param_names_master = list(model.parameter_names)
     if global_disabled:
         model.deactivate_parameters(list(global_disabled))
         model.reduce_to_activated_parameters()
         print(f"Disabled parameters {list(global_disabled)}. Reduced active parameters ({model.num_parameters}): {model.parameter_names}")
+
+    # Ogden library, staged: stage 1 fits the coefficients (mu_k, and polynomial terms) at the fixed start exponents
+    # alpha0 = OGDEN_ALPHA_INIT (the alpha columns are inactive, i.e. a_k = 0 -> alpha_k = alpha0_k); the Sobol analysis
+    # then selects the terms; the final stage re-distils the kept terms with mu_k and alpha_k together.
+    ogden_staged = (getattr(model, "use_ogden", False) and bool(args.ogden_fixed_alpha_stage)
+                    and not (args.load_distilled_dir and os.path.exists(args.load_distilled_dir)))
+    base_state = None
+    if ogden_staged:
+        base_state = (model._parameter_population_matrix.clone(), tuple(model.parameter_names),
+                      model.parameter_scales.clone())
+        model.reduce_model_to_parameter_names([n for n in model.parameter_names if n not in OGDEN_ALPHA_NAMES])
+        print(f"Ogden stage 1: exponents fixed at {OGDEN_ALPHA_INIT}; fitting ({model.num_parameters}): {model.parameter_names}")
+
+    def expand_to_joint(selected_names):
+        """Back to the full (post-disable) parameter set, keeping the selected names and the exponent of every kept mu_k."""
+        pop, names, scales = base_state
+        model._parameter_population_matrix = pop.clone()
+        model.parameter_names = names
+        model.num_parameters = len(names)
+        model.parameter_scales = scales.clone()
+        model.reset_parameter_deactivations()
+        sel = set(selected_names)
+        keep = [n for n in names if n in sel or (n in OGDEN_ALPHA_NAMES and OGDEN_MU_NAMES[OGDEN_ALPHA_NAMES.index(n)] in sel)]
+        model.reduce_model_to_parameter_names(keep)
+        print(f"Ogden joint stage: mu and alpha of the kept terms together ({model.num_parameters}): {model.parameter_names}")
 
     output_selector = EnergyOutputSelector(num_outputs=mean_psi.shape[0])
     CHECKPOINTS.update(iters={int(k) for k in args.checkpoints if 0 < int(k) < args.n_iterations}, model=model)
@@ -1327,7 +1369,7 @@ def main():
             # an Ogden term is kept only as a pair: a pruned exponent (alpha = 0) would leave mu sum ln^2 lam_bar, and a
             # pruned mu leaves a free exponent without effect
             names_now, active_idx = list(model.parameter_names), set(model.get_active_parameter_indices())
-            for k in range(1, 4):
+            for k in range(1, N_OGDEN_TERMS + 1):
                 mu_n, al_n = f"$\\mu_{{{k}}}$", f"$\\alpha_{{{k}}}$"
                 if mu_n in names_now and al_n in names_now:
                     pair = [names_now.index(mu_n), names_now.index(al_n)]
@@ -1339,12 +1381,16 @@ def main():
         if len(active_names) == 0:
             print("Warning: No parameters exceeded Sobol threshold! Keeping all parameters active.")
             model.activate_parameters(list(range(model.num_parameters)))
-        elif len(active_names) < model.num_parameters:
+            active_names = model.get_active_parameter_names()
+        if len(active_names) < model.num_parameters or ogden_staged:
             print("\n========================================================================")
             model_type_str = f"({args.component.upper()} Split Model)" if args.distill_target == "sef_split" else "(Sparse Model)"
             print(f"=== Stage 2: Target Sub-Parameter Distillation {model_type_str} ===")
             print("========================================================================\n")
-            model.reduce_to_activated_parameters()
+            if ogden_staged:
+                expand_to_joint(active_names)
+            else:
+                model.reduce_to_activated_parameters()
             print(f"Reduced model active parameters ({model.num_parameters}): {model.parameter_names}")
             t0_stage3 = time.time()
             set_all_seeds(effective_seed)
@@ -1389,6 +1435,16 @@ def main():
                 )
         else:
             print("All material parameters were determined to be sensitive! No model reduction needed.")
+
+    if ogden_staged and not args.do_sensitivity:   # no term selection: all terms, mu and alpha together
+        expand_to_joint(list(model.parameter_names))
+        set_all_seeds(effective_seed)
+        distribution = distill_parameter_distribution_from_gp(
+            gp=mock_gp, model=model, output_selector=output_selector, distribution_type="normalizing flow",
+            inputs=f3x3, test_cases=test_cases, num_func_samples=args.num_func_samples,
+            lipschitz_penalty_coefficient=10.0, num_iters_wasserstein=args.n_iterations, num_layers_lipschitz_nn=3,
+            relative_width_lipschitz_nn=1.0, num_iters_lipschitz=10, output_subdirectory=args.component,
+            project_directory=project_dir, device=device, stage_tag=pfx("after_sensitivity"))
 
     # Save the PyTorch Normalizing Flow model weights
     save_normalizing_flow_parameter_distribution(

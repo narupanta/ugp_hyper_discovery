@@ -3,8 +3,9 @@
 Coverage study of the distilled material parameters over noise realisations and normalizing-flow initialisations.
 
 For an HSGP experiment (synthetic, with a ground truth) with extractions <exp>/<s>/extracted for the noise seeds s:
-  for each noise seed s and initialisation m = 0..M-1 (in this order: seed 1 init 0, seed 1 init 1, ..., last seed
-  last init; dev and vol of a pair run at the same time), the distillation (dev, and vol unless deviatoric-only) is run with
+  for each noise seed s and initialisation m = 0..M-1 (in this order: init 0 of every seed, then init 1 of every seed,
+  ...; the noise seeds dominate the spread, so an interrupted study still covers all seeds; dev and vol of a pair run
+  at the same time), the distillation (dev, and vol unless deviatoric-only) is run with
   seed s + 1000 m into <exp>/coverage_study_<states>/seed<s>/init<m>/ (m = 0 uses the same seed as the standard
   pipeline run). <states> names the distillation states like the GP export folder: e.g. dataset_f_n512,
   dataset_f_random_n256, standard_interp, standard_g1.0 (--sample_mode / --num_points override the recipe);
@@ -46,6 +47,10 @@ def parse_args():
     p.add_argument("--n_noise_seeds", type=int, default=None, help="use noise seeds 1..N")
     p.add_argument("--noise_seeds", type=int, nargs="*", default=None, help="explicit noise seeds (overrides --n_noise_seeds)")
     p.add_argument("--n_inits", type=int, default=5, help="normalizing-flow initialisations per noise seed")
+    p.add_argument("--inits", type=int, nargs="*", default=None,
+                   help="explicit initialisations to run (overrides --n_inits; e.g. one init per call)")
+    p.add_argument("--no_evaluate", action="store_true",
+                   help="run the distillations only, no summary (parallel workers; evaluate once at the end)")
     p.add_argument("--n_iterations", type=int, default=None, help="Wasserstein iterations (default: recipe value)")
     p.add_argument("--checkpoints", type=int, nargs="*", default=[], help="also evaluate after these iterations")
     p.add_argument("--level", type=float, default=0.95, help="nominal level of the central interval")
@@ -156,7 +161,7 @@ def main():
     exp = os.path.abspath(args.experiment_dir)
     cfg = yaml.safe_load(open(os.path.join(exp, "config.yaml")))
     seeds = args.noise_seeds if args.noise_seeds else list(range(1, (args.n_noise_seeds or len(cfg.get("seeds", [1]))) + 1))
-    inits = list(range(args.n_inits))
+    inits = list(args.inits) if args.inits else list(range(args.n_inits))
     n_iter = args.n_iterations or int(cfg.get("dev_vol_distillation_n_iterations", cfg.get("distillation_n_iterations", 5000)))
     checkpoints = sorted({int(k) for k in args.checkpoints if 0 < int(k) <= n_iter})
     eval_points = checkpoints if checkpoints else [n_iter]
@@ -199,12 +204,11 @@ def main():
         subprocess.run(["bash", "scripts/run_hsgp_pipeline.sh", exp, "--seeds", " ".join(map(str, missing))],
                        cwd=ROOT, check=True)
 
-    # --- distillations, in order: seed s / init m with its dev and vol distillation run together, then the next init,
-    # then the next seed. A missing shared GP export is created first (dev and vol would otherwise both create it).
+    # --- distillations, in order: init m of every seed s (dev and vol of a pair run together), then the next init. A missing shared GP export is created first (dev and vol would otherwise both create it).
     if not args.evaluate_only:
         pairs = []
-        for s in seeds:
-            for m in inits:
+        for m in inits:
+            for s in seeds:
                 run_dir = os.path.join(study, f"seed{s}", f"init{m}")
                 jobs = []
                 for comp in (["dev"] if dev_only else ["dev", "vol"]):
@@ -237,6 +241,9 @@ def main():
                                    cwd=ROOT, stdout=f, stderr=subprocess.STDOUT)
 
     # --- evaluation
+    if args.no_evaluate:
+        print("Distillations done (--no_evaluate: no summary)", flush=True)
+        return
     rows, summary = [], {"experiment": exp, "noise_seeds": seeds, "n_inits": len(inits), "level": args.level,
                          "n_iterations": n_iter, "library": library, "parameters": names,
                          "truth": truth[:len(names)].tolist(), "checkpoints": {}}
@@ -272,9 +279,9 @@ def main():
             entry["true_moduli"] = dict(mu=true_moduli[0], kappa=None if dev_only else true_moduli[1])
         # spread between initialisations (per noise seed, averaged) and drift of the means towards the final iteration
         means = {key: r["mean"] for key, r in res.items()}
-        between = np.mean([np.std([means[(s, m)] for m in inits if (s, m) in means], axis=0)
-                           for s in seeds if sum((s, m) in means for m in inits) > 1], axis=0) \
-            if len(inits) > 1 else np.full(len(names), np.nan)
+        per_seed = [np.std([means[(s, m)] for m in inits if (s, m) in means], axis=0)
+                    for s in seeds if sum((s, m) in means for m in inits) > 1]
+        between = np.mean(per_seed, axis=0) if per_seed else np.full(len(names), np.nan)   # none yet: only init 0 done
         entry["between_init_std"] = dict(zip(names, np.atleast_1d(between).tolist()))
         if k == max(eval_points):
             final_means = means

@@ -2,11 +2,13 @@
 Candidate libraries of the distillation and the full parameter vector shared by the FEM validation and the plots.
 
 Full vector layout (positions are fixed; shorter vectors mean the later blocks are zero):
-    [C10, C01, C20, C11, C02, C30, C21, C12, C03, E | D1, D2, D3 | anisotropic (6) | mu1, alpha1, mu2, alpha2, mu3, alpha3]
-     0 ............................................ 9  10 ..... 12  13 ......... 18  19 ......................... 24
+    [C10, C01, C20, C11, C02, C30, C21, C12, C03, E | D1, D2, D3 | anisotropic (6) | mu1, alpha1, ..., mu8, alpha8]
+     0 ............................................ 9  10 ..... 12  13 ......... 18  19 ......................... 34
 
-Deviatoric libraries (the distilled dev samples): "gmr" polynomial (+ log) terms (10 columns), "ogden" three Ogden terms
-(6 columns: mu1, alpha1, ...), "gmr_ogden" both (16 columns, polynomial first). The volumetric samples are D1..D3.
+Deviatoric libraries (the distilled dev samples): "gmr" polynomial terms (10 columns; the log term E is a column but is
+only fitted for "gmr_log"), "ogden" N_OGDEN_TERMS Ogden terms (2 N columns: mu1, alpha1, ...), "gmr_ogden" both
+(polynomial first). The volumetric samples are D1..D3. Older runs with 3 Ogden terms (6 columns) still load: the
+missing terms are zero.
 """
 import json
 import os
@@ -16,9 +18,13 @@ import numpy as np
 GMR_DEV_NAMES = ["C10", "C01", "C20", "C11", "C02", "C30", "C21", "C12", "C03", "E"]
 VOL_NAMES = ["D1", "D2", "D3"]
 ANISO_NAMES = ["C42", "C43", "C44", "C62", "C63", "C64"]
-OGDEN_NAMES = ["mu1", "alpha1", "mu2", "alpha2", "mu3", "alpha3"]
-FULL_NAMES = GMR_DEV_NAMES + VOL_NAMES + ANISO_NAMES + OGDEN_NAMES      # 25
+N_OGDEN_TERMS = 8
+# exponents the Ogden distillation starts from (stage 1 keeps them fixed and fits the mu_k only; core of the library)
+OGDEN_ALPHA_INIT = [-4.0, -3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 4.0]
+OGDEN_NAMES = [n for k in range(1, N_OGDEN_TERMS + 1) for n in (f"mu{k}", f"alpha{k}")]
+FULL_NAMES = GMR_DEV_NAMES + VOL_NAMES + ANISO_NAMES + OGDEN_NAMES      # 35
 OGDEN_START = 19
+N_FULL = len(FULL_NAMES)
 
 
 def is_dev_only(material_model):
@@ -51,7 +57,7 @@ def dev_names(library):
 
 def full_param_vectors(dev, vol, library="gmr"):
     """(S, n_dev), (S, 3) distilled samples -> full parameter vectors. "gmr" keeps the former [dev, vol] layout
-    (13 columns); libraries with Ogden terms give the 25-column layout."""
+    (13 columns); libraries with Ogden terms give the N_FULL-column layout."""
     dev, vol = np.atleast_2d(dev), np.atleast_2d(vol)
     if library == "gmr":
         return np.concatenate([dev, vol], axis=1)
@@ -84,9 +90,10 @@ def true_full_vector(material_params):
 
 
 def dev16(dev, library="gmr"):
-    """Distilled dev samples -> (S, 16) [C10..E (10) | mu1, alpha1, ..., alpha3 (6)] for energy evaluation."""
+    """Distilled dev samples -> (S, 10 + 2 N_OGDEN_TERMS) [C10..E (10) | mu1, alpha1, ...] for energy evaluation
+    (the name is historical: 16 columns with 3 Ogden terms)."""
     dev = np.atleast_2d(dev)
-    out = np.zeros((dev.shape[0], 16))
+    out = np.zeros((dev.shape[0], len(GMR_DEV_NAMES) + len(OGDEN_NAMES)))
     if library == "ogden":
         out[:, 10:10 + dev.shape[1]] = dev
     elif library == "gmr_ogden":
@@ -115,7 +122,7 @@ def sort_ogden_terms(dev, library="gmr", mu_tol=1e-6):
 
 
 def effective_moduli(full):
-    """Small-strain moduli of full parameter vectors (S, 13 | 25): mu = 2 (C10 + C01 + E/3) + sum mu_k (Ogden,
+    """Small-strain moduli of full parameter vectors (S, 13 | N_FULL): mu = 2 (C10 + C01 + E/3) + sum mu_k (Ogden,
     convention 2 mu_k / alpha_k^2) and kappa = 2 D1 (psi_vol = D1 (J-1)^2 + ...). Same definition as the HSGP
     (mu = 2 (dpsi/dI1_bar + dpsi/dI2_bar), kappa = d2psi/dJ2 at F = I); fibre terms are not included."""
     full = np.atleast_2d(np.asarray(full, dtype=float))

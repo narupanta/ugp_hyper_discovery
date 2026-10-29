@@ -158,6 +158,11 @@ def main():
     
     # 4. Generate Data
     F_all, gamma = generate_standard_modes(num_points=100, max_gamma=1.0)
+    if getattr(learned_gp, "incompressible_plane_stress", False):
+        # incompressible plane stress: the modes at J = 1 (F33 = 1/det F_2D), where the truth, the GP (which sets
+        # F33 = 1/det F_2D itself) and a deviatoric-only distillation describe the same deformation
+        from core.utils import generate_standard_deformation_modes
+        F_all, gamma = generate_standard_deformation_modes(100, 1.0, stress_mode="plane_stress_incompressible")
     mode_names = ["Uniaxial Tension", "Equibiaxial Tension", "Pure Shear", 
                   "Uniaxial Compression", "Equibiaxial Compression", "Simple Shear"]
 
@@ -271,7 +276,7 @@ def main():
         def _ogden_split(theta_dev, F_chunk):
             """Energy and Piola stress of the Ogden block (dev columns 10..15)."""
             from core.ogden import ogden_dev_energy_jax
-            og = jnp.asarray(theta_dev)[10:16]
+            og = jnp.asarray(theta_dev)[10:]
             e = lambda f: ogden_dev_energy_jax(f, og[0::2], og[1::2])
             return jax.vmap(e)(F_chunk), jax.vmap(jax.grad(e))(F_chunk)
 
@@ -349,6 +354,19 @@ def main():
             dist_psi_samples.append(s_psi)
             dist_p_samples.append(s_p)
         
+    if getattr(learned_gp, "incompressible_plane_stress", False) and dist_p_samples:
+        # incompressible plane stress: compare the stress of the reduced energy Psi(F_2D, 1/det F_2D) (what the FEM
+        # data and the GP use), not the 3D dPsi/dF. Chain rule with F33 = 1/det F_2D, dF33/dF_2D = -F33 F_2D^-T:
+        # P_red = P_2D - P33 F33 F_2D^-T (out-of-plane entries 0)
+        def _reduce(P, F):
+            P, F = jnp.asarray(P), jnp.broadcast_to(jnp.asarray(F), jnp.shape(P))
+            F2inv_T = jnp.swapaxes(jnp.linalg.inv(F[..., :2, :2]), -1, -2)
+            red = P[..., :2, :2] - (P[..., 2, 2] * F[..., 2, 2])[..., None, None] * F2inv_T
+            return jnp.zeros_like(P).at[..., :2, :2].set(red)
+        if P_true is not None:
+            P_true = _reduce(P_true, F_all)
+        dist_p_samples = [_reduce(dist_p_samples[m], F_all[m]) for m in range(len(dist_p_samples))]
+
     # 7. Plotting Setup
     fig_width = 8
     fig_height = 12

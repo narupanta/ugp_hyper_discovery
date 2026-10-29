@@ -75,6 +75,11 @@ def main():
                    help="reference models to draw (default: euclid)")
     p.add_argument("--lambda_max", type=float, default=None, help="largest stretch (default: 1.2 x the data range)")
     p.add_argument("--n_points", type=int, default=300)
+    p.add_argument("--ylim_from_mean", type=int, default=1,
+                   help="1 (default): y limits from the GP mean and reference curves + margin (band clipped); 0: auto")
+    p.add_argument("--y_margin", type=float, default=0.15, help="margin as a fraction of the mean curves' range")
+    p.add_argument("--ylim_range", choices=["data", "all"], default="data",
+                   help="stretches the y limits are taken over: inside the data range (default) or the whole plot")
     args = p.parse_args()
     apply_style()
 
@@ -149,10 +154,12 @@ def main():
         for ax, y, s, what in rows:
             ax.fill_between(lam, y - 1.96 * s, y + 1.96 * s, color=gp_col, alpha=0.22, lw=0, label="GP 95%")
             ax.plot(lam, y, color=gp_col, lw=1.8, label="GP mean")
+            curves = [y]
             for k in refs:
                 Wr, dWr = ref_W_along(k, mode, lam)
                 yr = Wr if what == "W" else dWr / fac
                 ax.plot(lam, yr, label=REFERENCES[k][0], **style[k])
+                curves.append(yr)
                 msk = lam <= lam_data[mode]
                 rel = np.abs(y[msk] - yr[msk]).max() / max(np.abs(yr[msk]).max(), 1e-12)
                 cover = float(np.mean(np.abs(y[msk] - yr[msk]) <= 1.96 * s[msk]))
@@ -160,6 +167,11 @@ def main():
             ax.axvspan(lam_data[mode], lam[-1], color="#9e9e9e", alpha=0.15, lw=0,
                        label="outside data" if j == 0 else None)
             ax.set_xlim(1.0, lam[-1])
+            if args.ylim_from_mean:   # y range from the mean and reference curves; the 95% band is clipped
+                rng = lam <= lam_data[mode] if args.ylim_range == "data" else np.ones_like(lam, bool)
+                lo, hi = min(float(np.min(c[rng])) for c in curves), max(float(np.max(c[rng])) for c in curves)
+                pad = args.y_margin * max(hi - lo, 1e-12)
+                ax.set_ylim(min(lo, 0.0) - pad, hi + pad)
             ax.set_xlabel(r"$\lambda$")
             ax.grid(alpha=0.3)
         axes[0, j].set_title(MODES[mode][0])

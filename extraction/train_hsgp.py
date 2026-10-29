@@ -90,9 +90,10 @@ def external_work_density(prep, node_type, last_step):
     return e if np.isfinite(e) and e > 0 else 1.0
 
 
-def plot_reactions(model, F_steps, prep, train_steps, save_path, has_truth, sigma_R=None):
+def plot_reactions(model, F_steps, prep, train_steps, save_path, has_truth, sigma_R=None, name=None):
     """Reaction forces per load step: epistemic band vs true reactions (synthetic), predictive band vs measured.
-    sigma_R: (n_steps, 2) reaction noise of the likelihood (default: the dataset's load_noise_std_steps)."""
+    sigma_R: (n_steps, 2) reaction noise of the likelihood (default: the dataset's load_noise_std_steps).
+    name: experiment name (several experiments): reaction_force_uncertainty_<name>.pdf."""
     mean, cov = reaction_prediction(model, F_steps, prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"])
     sd_epi = np.sqrt(np.stack([cov[:, 0, 0], cov[:, 1, 1]], axis=1))
     sig_R = np.maximum(np.asarray(prep["load_noise_std_steps"] if sigma_R is None else sigma_R, dtype=float), 1e-3)
@@ -133,8 +134,9 @@ def plot_reactions(model, F_steps, prep, train_steps, save_path, has_truth, sigm
                 ax.legend(fontsize=9)
             out[f"{kind}_{comp}"] = dict(coverage=float(cov_all), coverage_val=float(cov_val), r2=float(r2),
                                          z=((r - m) / s).tolist())
-    fig.suptitle("Reaction forces at the measured displacements")
-    save_figure(fig, os.path.join(save_path, "reaction_force_uncertainty.pdf"))
+    fig.suptitle("Reaction forces at the measured displacements" + (f": {name}" if name else ""))
+    save_figure(fig, os.path.join(save_path, f"reaction_force_uncertainty{'_' + name if name else ''}.pdf"))
+    plt.close(fig)
     return out
 
 
@@ -172,41 +174,71 @@ def main():
     save_path = args.batch_dir
     os.makedirs(save_path, exist_ok=True)
 
-    prep = DatasetFactory.create("dataset/precomputed_vfm", data_path=args.dataset_path).get_data()
-    has_truth = bool(rec.get("has_ground_truth", True)) and "reaction_forces_true" in prep
-    mat_p = rec.get("material_params", {}) or {}
-    # true material from the recipe (any family: dev/vol params, Ogden mu/alpha, ...)
-    from core.material_models import get_material_from_config
-    mat = get_material_from_config(dict(rec, material_model_name=rec.get("material_model_name", "isihara"))) if has_truth else None
-    F_all = load_f3x3_from_dataset(prep, material_model=mat)                       # (n_steps, C, 3, 3) observed
-    # incompressible plane stress (recipe or dataset): F33 = 1/det F_2D inside the model, no volumetric part
-    ps_mode = str(rec.get("plane_stress_mode", prep.get("plane_stress_mode", "")) or "")
-    incompressible_ps = str(prep.get("stress_mode", rec.get("stress_mode", ""))) == "plane_stress" and ps_mode == "incompressible"
-    if incompressible_ps and mat is not None:   # truth stress = gradient of the reduced energy (as the data and the GP)
-        from core.material_models import IncompressiblePlaneStressView
-        mat = IncompressiblePlaneStressView(mat)
-    # reaction components with a load cell (e.g. [0] for a uniaxial machine): the others get no weight in the likelihood
-    sigma_R_steps = np.array(prep["load_noise_std_steps"], dtype=float)
-    if rec.get("reaction_components") is not None:
-        unmeasured = [i for i in range(sigma_R_steps.shape[1]) if i not in [int(c) for c in rec["reaction_components"]]]
-        sigma_R_steps[:, unmeasured] = 1e12
-    if rec.get("reaction_noise_rel") is not None:      # load-cell noise relative to the reading (+ optional floor)
-        R_abs = np.abs(np.asarray(prep["reaction_forces"], dtype=float))
-        rel = np.maximum(float(rec["reaction_noise_rel"]) * R_abs, float(rec.get("reaction_noise_floor", 0.0)))
-        meas = [int(c) for c in rec.get("reaction_components", range(sigma_R_steps.shape[1]))]
-        sigma_R_steps[:, meas] = rel[:, meas]
-    zero_comps = [int(c) for c in rec.get("reaction_zero_components", [])]
-    if zero_comps:     # components known to vanish (e.g. R_y of a tensile test): observed 0, noise from the measured force
-        rf = np.array(prep["reaction_forces"], dtype=float)
-        rf[:, zero_comps] = 0.0
-        prep["reaction_forces"] = rf
-        meas = [int(c) for c in rec.get("reaction_components", range(rf.shape[1])) if int(c) not in zero_comps]
-        scale = np.linalg.norm(rf[:, meas], axis=1)
-        rel_z = float(rec.get("reaction_noise_rel", 0.01))
-        sigma_R_steps[:, zero_comps] = np.maximum(rel_z * scale, float(rec.get("reaction_noise_floor", 0.0)))[:, None]
-        print(f"[HSGP] reaction components {zero_comps} fitted to 0 with sigma = {rel_z:g} x |measured force| "
-              f"(floor {float(rec.get('reaction_noise_floor', 0.0)):g})", flush=True)
-    energy_scale = external_work_density(prep, prep["node_type"], max(train_steps))
+    def prepare(dataset_path, thickness=1.0):
+        """One experiment: data, observed F (n_steps, C, 3, 3), reaction noise, truth and plane-stress mode.
+        thickness: specimen thickness; the reactions (and their noise floor) are divided by it, so experiments of
+        different thickness share one energy per unit volume (the 2D model has unit thickness)."""
+        prep = DatasetFactory.create("dataset/precomputed_vfm", data_path=dataset_path).get_data()
+        if float(thickness) != 1.0:
+            prep = dict(prep)
+            prep["reaction_forces"] = np.asarray(prep["reaction_forces"], dtype=float) / float(thickness)
+            prep["load_noise_std_steps"] = np.asarray(prep["load_noise_std_steps"], dtype=float) / float(thickness)
+            print(f"[HSGP] {dataset_path}: reactions divided by the thickness {float(thickness):g}", flush=True)
+        floor = float(rec.get("reaction_noise_floor", 0.0)) / float(thickness)
+        has_truth = bool(rec.get("has_ground_truth", True)) and "reaction_forces_true" in prep
+        mat_p = rec.get("material_params", {}) or {}
+        # true material from the recipe (any family: dev/vol params, Ogden mu/alpha, ...)
+        from core.material_models import get_material_from_config
+        mat = get_material_from_config(dict(rec, material_model_name=rec.get("material_model_name", "isihara"))) if has_truth else None
+        F_all = load_f3x3_from_dataset(prep, material_model=mat)                       # (n_steps, C, 3, 3) observed
+        # incompressible plane stress (recipe or dataset): F33 = 1/det F_2D inside the model, no volumetric part
+        ps_mode = str(rec.get("plane_stress_mode", prep.get("plane_stress_mode", "")) or "")
+        incompressible_ps = str(prep.get("stress_mode", rec.get("stress_mode", ""))) == "plane_stress" and ps_mode == "incompressible"
+        if incompressible_ps and mat is not None:   # truth stress = gradient of the reduced energy (as the data and the GP)
+            from core.material_models import IncompressiblePlaneStressView
+            mat = IncompressiblePlaneStressView(mat)
+        # reaction components with a load cell (e.g. [0] for a uniaxial machine): the others get no weight in the likelihood
+        sigma_R_steps = np.array(prep["load_noise_std_steps"], dtype=float)
+        if rec.get("reaction_components") is not None:
+            unmeasured = [i for i in range(sigma_R_steps.shape[1]) if i not in [int(c) for c in rec["reaction_components"]]]
+            sigma_R_steps[:, unmeasured] = 1e12
+        if rec.get("reaction_noise_rel") is not None:      # load-cell noise relative to the reading (+ optional floor)
+            R_abs = np.abs(np.asarray(prep["reaction_forces"], dtype=float))
+            rel = np.maximum(float(rec["reaction_noise_rel"]) * R_abs, floor)
+            meas = [int(c) for c in rec.get("reaction_components", range(sigma_R_steps.shape[1]))]
+            sigma_R_steps[:, meas] = rel[:, meas]
+        zero_comps = [int(c) for c in rec.get("reaction_zero_components", [])]
+        if zero_comps:     # components known to vanish (e.g. R_y of a tensile test): observed 0, noise from the measured force
+            rf = np.array(prep["reaction_forces"], dtype=float)
+            rf[:, zero_comps] = 0.0
+            prep["reaction_forces"] = rf
+            meas = [int(c) for c in rec.get("reaction_components", range(rf.shape[1])) if int(c) not in zero_comps]
+            scale = np.linalg.norm(rf[:, meas], axis=1)
+            rel_z = float(rec.get("reaction_noise_rel", 0.01))
+            sigma_R_steps[:, zero_comps] = np.maximum(rel_z * scale, floor)[:, None]
+            print(f"[HSGP] reaction components {zero_comps} fitted to 0 with sigma = {rel_z:g} x |measured force| "
+                  f"(floor {float(rec.get('reaction_noise_floor', 0.0)):g})", flush=True)
+        return prep, F_all, sigma_R_steps, mat, has_truth, incompressible_ps
+
+    # several experiments (recipe 'experiments': [{name, dataset_path}, ...]): one GP fitted to all of them
+    experiments = rec.get("experiments") or [dict(name=None, dataset_path=args.dataset_path)]
+    exps = []
+    for k, e in enumerate(experiments):
+        name = e.get("name") or (f"exp{k}" if len(experiments) > 1 else None)
+        exps.append(dict(zip(("prep", "F_all", "sigma_R", "mat", "has_truth", "incompressible_ps"),
+                             prepare(e["dataset_path"], e.get("thickness", 1.0))), name=name, dataset_path=e["dataset_path"]))
+    multi = len(exps) > 1
+    if multi and len({x["incompressible_ps"] for x in exps}) > 1:
+        raise ValueError("all experiments need the same kinematic assumption (incompressible plane stress or not)")
+    for x in exps:
+        if max(train_steps) >= x["F_all"].shape[0]:
+            raise ValueError(f"experiment {x['name']}: training step {max(train_steps)} beyond its {x['F_all'].shape[0]} steps")
+    # the first experiment provides the single-experiment names used below (and the truth plots)
+    prep, F_all, sigma_R_steps, mat, has_truth, incompressible_ps = (exps[0][k] for k in (
+        "prep", "F_all", "sigma_R", "mat", "has_truth", "incompressible_ps"))
+    if multi:
+        print(f"[HSGP] {len(exps)} experiments fitted together: " + ", ".join(f"{x['name']} ({x['dataset_path']})" for x in exps), flush=True)
+    energy_scale = float(np.mean([external_work_density(x["prep"], x["prep"]["node_type"], max(train_steps)) for x in exps]))
     angles = (rec.get("material_params") or {}).get("angles", rec.get("angles"))
     fibers = fiber_vectors(angles) if angles and str(rec.get("model_mode", "anisotropic")) != "isotropic" else None
     if fibers is not None:
@@ -218,6 +250,8 @@ def main():
     if cv_mode not in ("folds", "val"):
         raise ValueError(f"hsgp_cv_holdout must be 'folds' or 'val' (got {cv_mode!r})")
     cv_data = None
+    if cv_mode == "val" and multi:
+        raise ValueError("hsgp_cv_holdout: val is not supported for several experiments; use folds")
     if cv_mode == "val":
         cv_steps = [int(t) for t in val_steps if 0 <= int(t) < F_all.shape[0]]
         if len(cv_steps) < len(val_steps):
@@ -232,23 +266,33 @@ def main():
 
     if args.phase in ("fit", "all"):
         t0 = time.time()
+        tr = jnp.array(train_steps)
+        data_args = ([x["F_all"][tr] for x in exps], [np.asarray(x["prep"]["reaction_forces"])[train_steps] for x in exps],
+                     [x["sigma_R"][train_steps] for x in exps], [x["prep"]["cells"] for x in exps],
+                     [x["prep"]["node_type"] for x in exps], [x["prep"]["dNdX"] for x in exps], [x["prep"]["dA"] for x in exps])
+        labels = [[f"{x['name']}:{t}" for t in train_steps] for x in exps]
+        if not multi:
+            data_args, labels = tuple(a[0] for a in data_args), train_steps
         model, hist = fit_hsgp(
-            F_all[jnp.array(train_steps)], np.asarray(prep["reaction_forces"])[train_steps],
-            sigma_R_steps[train_steps], prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"],
+            *data_args,
             energy_scale=energy_scale, num_basis_dev=opt["hsgp_num_basis_dev"], num_basis_vol=opt["hsgp_num_basis_vol"],
             box_factor=opt["hsgp_box_factor"], sigma_cap=opt["hsgp_sigma_cap"],
             amplitude_prior_scale=opt["hsgp_amplitude_prior_scale"], lengthscale_prior_scale=opt["hsgp_lengthscale_prior_scale"],
             hyper_restarts=bool(opt["hsgp_hyper_restarts"]), incompressible_plane_stress=incompressible_ps,
             sigma_f_rel=float(opt["hsgp_force_noise_rel"]) or None, cv_folds=int(opt["hsgp_cv_folds"]),
             cv_tol=float(opt["hsgp_cv_tol"]),
-            cv_data=cv_data, step_labels=train_steps, fibers=fibers,
+            cv_data=cv_data, step_labels=labels, fibers=fibers,
             num_basis_aniso=int(opt["hsgp_num_basis_aniso"]) or None)
         fit_time = time.time() - t0
         model.save(post_path)
-        feats = jax.vmap(model.feature_extractor.extract)(F_all[jnp.array(train_steps)].reshape(-1, 3, 3))
+        F_train_states = jnp.concatenate([x["F_all"][tr].reshape(-1, 3, 3) for x in exps])
+        feats = jax.vmap(model.feature_extractor.extract)(F_train_states)
         I_obs = np.concatenate([np.asarray(x) for x in feats], axis=-1)   # dev (2), vol (1)[, aniso (3)]
         np.save(os.path.join(save_path, "I_obs_all.npy"), I_obs)
-        cfg_out = dict(rec, extraction_method="hsgp", dataset_path=args.dataset_path, seed=args.seed, batch_dir=save_path,
+        if multi:   # pooled training states of all experiments (the export's distillation states read these)
+            np.save(os.path.join(save_path, "train_states_f3x3.npy"), np.asarray(F_train_states))
+        cfg_out = dict(rec, extraction_method="hsgp", dataset_path=exps[0]["dataset_path"], seed=args.seed, batch_dir=save_path,
+                       experiments=[dict(name=x["name"], dataset_path=x["dataset_path"]) for x in exps] if multi else None,
                        train_load_steps_indices=train_steps, val_load_steps_indices=val_steps,
                        test_load_steps_indices=test_steps, data_energy_scale=energy_scale, hsgp_options=opt,
                        hsgp=dict(model.info, hyper={k: np.asarray(v).tolist() for k, v in model.hyper.items()}))
@@ -264,8 +308,13 @@ def main():
 
     t0 = time.time()
     plot_force_noise_cv(model, save_path)
-    reac = plot_reactions(model, F_all, prep, train_steps, save_path, has_truth, sigma_R=sigma_R_steps)
-    _, frac = ellipticity_penalty(model.psi_det, F_all[jnp.array(train_steps)], 8)
+    if multi:   # one reaction-force figure per experiment
+        reac = {x["name"]: plot_reactions(model, x["F_all"], x["prep"], train_steps, save_path, x["has_truth"],
+                                          sigma_R=x["sigma_R"], name=x["name"]) for x in exps}
+    else:
+        reac = plot_reactions(model, F_all, prep, train_steps, save_path, has_truth, sigma_R=sigma_R_steps)
+    _, frac = ellipticity_penalty(model.psi_det, jnp.concatenate([x["F_all"][jnp.array(train_steps)].reshape(-1, 3, 3)
+                                                                  for x in exps]), 8)
     metrics = dict(seed=args.seed, extraction_method="hsgp", extraction_time=fit_time, train_steps=train_steps,
                    val_steps=val_steps, log_evidence=model.info["log_evidence"], converged=model.info["converged"],
                    small_strain_moduli=model.small_strain_moduli(),

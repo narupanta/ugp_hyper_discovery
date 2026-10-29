@@ -116,6 +116,10 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              step_labels=None, hyper_steps: int = 300, verbose: bool = True, log_fn=print):
     """
     f3x3_steps: (T, C, 3, 3) measured deformation gradients of the training steps; R_obs, sigma_R: (T, 2).
+    Several experiments (specimens with their own meshes) at once: pass f3x3_steps, R_obs, sigma_R, cells, node_type,
+    dNdX, dA and step_labels as LISTS with one entry per experiment. The likelihood is a sum over load steps, so the
+    steps of all experiments are simply pooled (one GP, one s; the folds interleave the pooled steps); step labels
+    become '<experiment index>:<step>' unless given as strings.
     sigma_f_rel: free-residual scale s (sigma_free,t = s |R_t|); None = chosen by cross-validation:
       cv_folds interleaved folds of the training steps; log grid cv_grid (default 1e-5..1, 11 points) refined around
       the best score; cv_tol > 0: the smallest s within cv_tol nats of the best held-out score (plateau rule).
@@ -129,16 +133,32 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     Returns (HSGPHyperelasticity with the posterior, history: one record of the final solve).
     """
     t0 = time.time()
-    f3x3_steps = jnp.asarray(f3x3_steps, dtype=jnp.float64)
-    cells_j, dNdX, dA = jnp.asarray(cells), jnp.asarray(dNdX), jnp.asarray(dA)
-    node_type, cells = np.asarray(node_type), np.asarray(cells)
-    n_nodes = node_type.shape[0]
-    idx = build_eiv_indices(node_type, cells)
-    free, rx, ry = idx["dof_free"], idx["dof_rx"], idx["dof_ry"]
-    n_free = len(free)
-    R_obs, sigma_R = jnp.asarray(R_obs), jnp.maximum(jnp.asarray(sigma_R), 1e-3)
-    T = f3x3_steps.shape[0]
-    labels = list(map(int, step_labels)) if step_labels is not None else list(range(T))
+    multi = isinstance(cells, (list, tuple))
+    if not multi:
+        f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA = ([x] for x in (f3x3_steps, R_obs, sigma_R, cells,
+                                                                               node_type, dNdX, dA))
+        step_labels = None if step_labels is None else [step_labels]
+    if multi and cv_data is not None:
+        raise ValueError("cv_data (validation-step selection of s) is not supported for several experiments; use the folds")
+    meshes = []                      # per experiment: mesh arrays and the DOF index sets
+    for c, nt, dn, da in zip(cells, node_type, dNdX, dA):
+        nt, c = np.asarray(nt), np.asarray(c)
+        ix = build_eiv_indices(nt, c)
+        meshes.append(dict(cells=jnp.asarray(c), n_nodes=nt.shape[0], dNdX=jnp.asarray(dn), dA=jnp.asarray(da),
+                           free=ix["dof_free"], rx=ix["dof_rx"], ry=ix["dof_ry"]))
+    step_exp, step_F, labels = [], [], []        # pooled steps: experiment index, F (C_e, 3, 3), label
+    for e, Fe in enumerate(f3x3_steps):
+        Fe = jnp.asarray(Fe, dtype=jnp.float64)
+        lab_e = list(step_labels[e]) if step_labels is not None and step_labels[e] is not None else list(range(Fe.shape[0]))
+        for t in range(Fe.shape[0]):
+            step_exp.append(e)
+            step_F.append(Fe[t])
+            labels.append((lab_e[t] if isinstance(lab_e[t], str) else f"{e}:{int(lab_e[t])}") if multi else int(lab_e[t]))
+    R_obs = jnp.concatenate([jnp.asarray(r) for r in R_obs])
+    sigma_R = jnp.maximum(jnp.concatenate([jnp.asarray(s) for s in sigma_R]), 1e-3)
+    # single experiment: the names used below
+    free, rx, ry, n_free = meshes[0]["free"], meshes[0]["rx"], meshes[0]["ry"], len(meshes[0]["free"])
+    T = len(step_F)
     all_idx = list(range(T))
 
     # basis boxes from the training features (+ reference)
@@ -149,7 +169,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                                                 a1=None if fibers[1] is None else jnp.asarray(fibers[1], dtype=jnp.float64))
     else:
         extractor = make_feature_extractor(incompressible_plane_stress)
-    feats = jax.vmap(extractor.extract)(f3x3_steps.reshape(-1, 3, 3))
+    feats = jax.vmap(extractor.extract)(jnp.concatenate([F.reshape(-1, 3, 3) for F in step_F]))
     dev_x, vol_x = np.asarray(feats[0]), np.asarray(feats[1])
     an_x = np.asarray(feats[2])[:, :2] if aniso_on else None
     dev_box = make_box(dev_x, DEV_REFERENCE, box_factor, num_basis_dev)
@@ -232,17 +252,25 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         return lp
 
     # per-step statistics at unit s (computed once): free Gram B_f^T B_f / |R_t|^2, reaction Gram and right-hand side
-    force_fn = jax.jit(lambda f: basis_force_matrix(model, f, cells_j, n_nodes, dNdX, dA))
+    force_fns = [jax.jit(lambda f, m=m: basis_force_matrix(model, f, m["cells"], m["n_nodes"], m["dNdX"], m["dA"]))
+                 for m in meshes]
+    force_fn = force_fns[0]
     B_R_steps, step_stats = [], []
     for t in all_idx:
-        B = force_fn(f3x3_steps[t])
-        Bf, BR = B[free], jnp.stack([B[rx].sum(0), B[ry].sum(0)])
+        m = meshes[step_exp[t]]
+        B = force_fns[step_exp[t]](step_F[t])
+        Bf, BR = B[m["free"]], jnp.stack([B[m["rx"]].sum(0), B[m["ry"]].sum(0)])
+        nf = len(m["free"])
         r2 = jnp.maximum(jnp.sum(R_obs[t] ** 2), 1e-30)
         w = 1.0 / sigma_R[t] ** 2
-        step_stats.append(dict(Gf=Bf.T @ Bf / r2, logdetW_f=-n_free * jnp.log(r2), GR=BR.T @ (w[:, None] * BR),
-                               bR=BR.T @ (w * R_obs[t]), yWy=jnp.sum(w * R_obs[t] ** 2), logdetW_R=jnp.sum(jnp.log(w))))
+        step_stats.append(dict(Gf=Bf.T @ Bf / r2, logdetW_f=-nf * jnp.log(r2), GR=BR.T @ (w[:, None] * BR),
+                               bR=BR.T @ (w * R_obs[t]), yWy=jnp.sum(w * R_obs[t] ** 2), logdetW_R=jnp.sum(jnp.log(w)),
+                               n_free=float(nf)))
         B_R_steps.append(BR)
-    log_fn(f"[HSGP] residual likelihood: {T} load steps, {n_free} free DOFs, P = {P} weights "
+    if multi:
+        log_fn(f"[HSGP] {len(meshes)} experiments pooled: steps per experiment "
+               f"{[step_exp.count(e) for e in range(len(meshes))]}, free DOFs {[len(m['free']) for m in meshes]}")
+    log_fn(f"[HSGP] residual likelihood: {T} load steps, {'+'.join(str(len(m['free'])) for m in meshes)} free DOFs, P = {P} weights "
            f"(dev {dev_box.num_basis}, vol {vol_box.num_basis}" + (f", aniso {an_box.num_basis}" if aniso_on else "")
            + f"); basis forces assembled in {time.time() - t0:.0f}s")
 
@@ -253,9 +281,10 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     def stats_for(active, s):
         """Summed statistics of the active steps at free-residual scale s, with square-root factors of the Grams."""
         st = {k: sum(step_stats[t][k] for t in active) for k in step_stats[0]}
-        st["Gf"], st["logdetW_f"] = st["Gf"] / s ** 2, st["logdetW_f"] - n_free * len(active) * np.log(s ** 2)
+        nf_tot = st.pop("n_free")                          # free DOFs summed over the active steps (per mesh)
+        st["Gf"], st["logdetW_f"] = st["Gf"] / s ** 2, st["logdetW_f"] - nf_tot * np.log(s ** 2)
         st["Rf"], st["RR"] = sqrt_factor(st["Gf"]), sqrt_factor(st["GR"])
-        st["n_obs"] = float((n_free + 2) * len(active))
+        st["n_obs"] = float(nf_tot + 2 * len(active))
         return st
 
     def posterior_factors(eta, st):

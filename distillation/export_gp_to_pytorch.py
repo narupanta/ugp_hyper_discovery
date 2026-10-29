@@ -569,6 +569,11 @@ def main():
             dataset_F_flat_3d = F_train_full_3d.reshape(-1, 3, 3) if F_train_full_3d is not None else None
     except Exception as e:
         print(f"Could not load background dataset for plotting: {e}")
+    pooled = os.path.join(args.saved_model_dir, "train_states_f3x3.npy") if args.saved_model_dir else ""
+    if pooled and os.path.exists(pooled):   # extraction on several experiments: the pooled training states of all of them
+        dataset_F_flat_3d = np.load(pooled)
+        dataset_F_flat_2x2 = dataset_F_flat_3d[:, :2, :2]
+        print(f"[EXPORT] several experiments: {len(dataset_F_flat_3d)} pooled training states from {pooled}")
 
     f3x3_flat = None
 
@@ -881,6 +886,19 @@ def main():
         fig.savefig(os.path.join(out_dir, "export_invariant_space.pdf"), dpi=150)
         fig.savefig(os.path.join(out_dir, "export_invariant_space.png"), dpi=150)
         plt.close(fig)
+        if hsgp_teacher is not None and os.path.exists(os.path.join(args.saved_model_dir, "I_obs_all.npy")):
+            try:   # picked states on the invariant_space_modes figure (mode-separating coordinates)
+                from plots.plot_export_invariant_space import plot_export
+                plot_export(out_dir, args.saved_model_dir, gp=hsgp_teacher,
+                            label=f"export: {args.sample_mode} n{len(f3x3_flat)}")
+            except Exception as e:
+                print(f"Failed to plot export_invariant_space_modes.pdf: {e}")
+            try:   # ratio (I2_bar - 3) / (I1_bar - 3) of the exported states against the training data, coloured by J
+                from plots.plot_export_ratio_distribution import plot_ratio_distribution
+                plot_ratio_distribution(args.saved_model_dir, export_dirs=[out_dir], gp=hsgp_teacher,
+                                        out=os.path.join(out_dir, "export_ratio_distribution.pdf"), verbose=False)
+            except Exception as e:
+                print(f"Failed to plot export_ratio_distribution.pdf: {e}")
         
         # 2. Distribution Plot
         feats_all = jax.vmap(gp_model.feature_extractor.extract)(f3x3_flat)

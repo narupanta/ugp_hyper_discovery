@@ -492,7 +492,12 @@ def generate_standard_deformation_modes(
         gamma: (num_points,) array of stretch / shear increments
     """
     gamma = jnp.linspace(0.0, max_gamma, num_points)
-    
+    if stress_mode in ("plane_stress_incompressible", "incompressible"):
+        # incompressible plane stress (J = 1, F33 = 1/det F_2D): in-plane stretches chosen so that every mode has its
+        # 3D stretches (with the plane-strain F_2D, uniaxial tension/compression would be pure shear)
+        from plots.training import standard_mode_F
+        return standard_mode_F(type("IPS", (), {"incompressible_plane_stress": True})(), gamma), gamma
+
     # 1. Construct 2D deformation gradients (num_points, 2, 2)
     def set_F2(f11, f22, f12=0.0, f21=0.0):
         arr = jnp.zeros((num_points, 2, 2))
