@@ -11,7 +11,7 @@ set -e
 # Prevent JAX from pre-allocating all GPU memory to avoid OOM
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export OMP_NUM_THREADS=3
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.45
+export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.45}   # set lower when several runs share a GPU
 # Flush Python prints immediately so SLURM logs show progress (jax_fem's per-iteration logging is off,
 # see core/fem_engine.py; set JAX_FEM_LOG_LEVEL=INFO to see Newton iterations again)
 export PYTHONUNBUFFERED=1

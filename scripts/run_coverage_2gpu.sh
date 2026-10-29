@@ -17,7 +17,8 @@
 #   --experiment_dir DIR   existing experiment (continued); or --recipe FILE to create a new one
 #   --n_seeds N            noise seeds 1..N (default 10); or --seeds "1 2 5" for an explicit list
 #   --n_inits M            initialisations 0..M-1 (default 5)
-#   --gpus "0 1"           GPU ids of the slots (default: "0 1")
+#   --gpus "0 1"           GPU id of each slot (default: "0 1"); a repeated id puts several slots on one GPU, e.g.
+#                          --gpus "0 0 0" = 3 seeds at a time on one GPU (each slot gets a share of its memory)
 #   --hsgp_<opt> <value>   passed to the extraction (e.g. --hsgp_cv_folds 3)
 #   anything else          passed to validation/distillation_coverage_study.py (e.g. --sample_mode, --num_points,
 #                          --n_iterations, --checkpoints ..., --no_plots, --no_sensitivity)
@@ -50,6 +51,10 @@ done
 [ -n "$SEEDS" ] || SEEDS=$(seq -s ' ' 1 "$N_SEEDS")
 read -r -a SLOTS <<< "$GPUS"
 NS=${#SLOTS[@]}
+# JAX memory cap per process: a GPU shared by k slots gives each 0.9 / k (0.45 when a GPU has one slot)
+mem_frac() { local k=0; for x in "${SLOTS[@]}"; do [ "$x" = "${SLOTS[$1]}" ] && k=$((k + 1)); done
+             python3 -c "print(round(min(0.45, 0.9 / $k), 3))"; }
+tag() { echo "slot$1-gpu${SLOTS[$1]}"; }
 
 # --- experiment directory (a recipe creates a new one, named as in scripts/run_hsgp_pipeline.sh)
 if [ -z "$EXP" ]; then
@@ -66,7 +71,7 @@ fi
 EXP="$(cd "$EXP" && pwd)"
 LOGS="$EXP/coverage_logs"
 mkdir -p "$LOGS"
-echo "=== coverage study on ${NS} slot(s) (GPUs ${GPUS}) | $EXP | seeds: $SEEDS | inits: $N_INITS | $(date)"
+echo "=== coverage study on ${NS} slot(s) (GPU per slot: ${GPUS}) | $EXP | seeds: $SEEDS | inits: $N_INITS | $(date)"
 
 extracted() { [ -f "$EXP/$1/extracted/hsgp_posterior.npz" ] && [ -f "$EXP/$1/extracted/extraction_metrics.json" ]; }
 
@@ -84,9 +89,10 @@ if [ ${#MISSING[@]} -gt 0 ]; then
                 for _ in $(seq 1 720); do [ -f "$EXP/${MISSING[0]}/dataset_train.spec" ] && break; sleep 5; done
             fi
             for s in "${MINE[@]}"; do
-                echo "[gpu ${SLOTS[$g]}] seed $s extraction ($(date))"
-                CUDA_VISIBLE_DEVICES=${SLOTS[$g]} bash scripts/run_hsgp_pipeline.sh "$EXP" --seeds "$s" "${HSGP_ARGS[@]}" \
-                    > "$LOGS/extract_seed${s}.log" 2>&1 || echo "[gpu ${SLOTS[$g]}] seed $s extraction FAILED (see $LOGS/extract_seed${s}.log)"
+                echo "[$(tag "$g")] seed $s extraction ($(date))"
+                CUDA_VISIBLE_DEVICES=${SLOTS[$g]} XLA_PYTHON_CLIENT_MEM_FRACTION=$(mem_frac "$g") \
+                    bash scripts/run_hsgp_pipeline.sh "$EXP" --seeds "$s" "${HSGP_ARGS[@]}" \
+                    > "$LOGS/extract_seed${s}.log" 2>&1 || echo "[$(tag "$g")] seed $s extraction FAILED (see $LOGS/extract_seed${s}.log)"
             done
         ) &
         PIDS+=($!)
@@ -103,15 +109,16 @@ for m in $(seq 0 $((N_INITS - 1))); do
     for g in $(seq 0 $((NS - 1))); do
         MINE=(); for s in "${READY[@]}"; do [ $(((s - 1) % NS)) -eq "$g" ] && MINE+=("$s"); done
         [ ${#MINE[@]} -gt 0 ] || continue
-        echo "[gpu ${SLOTS[$g]}] init $m seeds ${MINE[*]}"
-        CUDA_VISIBLE_DEVICES=${SLOTS[$g]} python3 validation/distillation_coverage_study.py --experiment_dir "$EXP" \
+        echo "[$(tag "$g")] init $m seeds ${MINE[*]}"
+        CUDA_VISIBLE_DEVICES=${SLOTS[$g]} XLA_PYTHON_CLIENT_MEM_FRACTION=$(mem_frac "$g") \
+            python3 validation/distillation_coverage_study.py --experiment_dir "$EXP" \
             --noise_seeds "${MINE[@]}" --inits "$m" --no_evaluate "${STUDY_ARGS[@]}" \
-            > "$LOGS/distill_init${m}_gpu${SLOTS[$g]}.log" 2>&1 &
+            > "$LOGS/distill_init${m}_$(tag "$g").log" 2>&1 &
         PIDS+=($!)
     done
     FAIL=0
     for p in "${PIDS[@]}"; do wait "$p" || FAIL=1; done
-    [ "$FAIL" -eq 0 ] || echo "init $m: a slot failed (see $LOGS/distill_init${m}_gpu*.log); continuing"
+    [ "$FAIL" -eq 0 ] || echo "init $m: a slot failed (see $LOGS/distill_init${m}_slot*.log); continuing"
 done
 
 # --- 3. summary over all seeds and inits
