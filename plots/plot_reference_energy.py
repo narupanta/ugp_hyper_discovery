@@ -50,6 +50,50 @@ REFERENCES = {
     "ogden2": ("2-term Ogden", lambda c: 0.0006 * (_sum_pow(c, 5.9364) - 3) + 10.9138 * (_sum_pow(c, 0.3435) - 3)),
 }
 REF_STYLES = {"euclid": dict(color="#c62828", lw=2.0, ls="--")}
+
+
+# --- the references as material objects (JAX, incompressible: isochoric invariants, no volumetric part), for plots
+# that take a "true" material (e.g. plots/plot_distilled_validation.py --reference euclid)
+def _jax_W(key):
+    import jax.numpy as jnp
+    from core.ogden import ogden_dev_energy_jax
+    inv = {   # W(I1_bar, I2_bar)
+        "euclid": lambda I1, I2: (0.0814 + 0.0917) * (I1 - 3) + 0.0006 * (I1 - 3) ** 3 + 0.4682 * jnp.log(I2 / 3),
+        "gmr1": lambda I1, I2: 0.2938 * (I1 - 3),
+        "gmr2": lambda I1, I2: 0.2842 * (I1 - 3) + 0.0016 * (I1 - 3) ** 2,
+        "gmr3": lambda I1, I2: (0.1354 * (I1 - 3) + 0.1528 * (I2 - 3) + 3.7369e-6 * (I1 - 3) ** 2 * (I2 - 3)
+                                + 8.6685e-5 * (I1 - 3) ** 2 + 6.5870e-4 * (I1 - 3) ** 3),
+        "gt": lambda I1, I2: 0.2842 * (I1 - 3) + 0.0445 * jnp.log(I2 / 3),
+    }
+    # Ogden references c_k (sum lam^a_k - 3) = 2 mu_k / a_k^2 (...) -> mu_k = c_k a_k^2 / 2 (core/ogden.py convention)
+    og = {"ogden1": ([0.2881], [2.0160]), "ogden2": ([0.0006, 10.9138], [5.9364, 0.3435])}
+    if key in og:
+        c, a = (jnp.asarray(v) for v in og[key])
+        return lambda F: ogden_dev_energy_jax(F, c * a ** 2 / 2, a)
+
+    def W(F):
+        C = F.T @ F
+        J23 = jnp.linalg.det(F) ** (2.0 / 3.0)
+        I1 = jnp.trace(C) / J23
+        I2 = 0.5 * (jnp.trace(C) ** 2 - jnp.trace(C @ C)) / J23 ** 2
+        return inv[key](I1, I2)
+    return W
+
+
+class ReferenceMaterial:
+    """psi / P / psi_dev / psi_vol (= 0) of a reference model of REFERENCES (3D F, incompressible: isochoric part)."""
+    def __init__(self, key):
+        import jax
+        self.key, self.label = key, REFERENCES[key][0]
+        w = _jax_W(key)
+
+        def batched(fn):          # (..., 3, 3) like the material models
+            def f(F):
+                return fn(F) if F.ndim == 2 else jax.vmap(f)(F)
+            return f
+        self.psi = self.psi_dev = batched(w)
+        self.P = batched(jax.grad(w))
+        self.psi_vol = batched(lambda F: 0.0 * F[0, 0])
 OTHER_COLORS = ["#6d4c41", "#00897b", "#8e24aa", "#f9a825", "#546e7a", "#3949ab"]
 
 # in-plane stretches (lambda1, lambda2) of each mode; lambda3 = 1 / (lambda1 lambda2); P11 = dW/dlambda / factor

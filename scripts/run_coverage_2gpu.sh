@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
         --n_inits) N_INITS="$2"; shift 2 ;;
         --gpus) GPUS="$2"; shift 2 ;;
         --hsgp_*) HSGP_ARGS+=("$1" "$2"); shift 2 ;;
-        --checkpoints)                      # list-valued: everything up to the next option
+        --checkpoints|--dev_params_disabled|--vol_params_disabled)   # list-valued: everything up to the next option
             STUDY_ARGS+=("$1"); shift
             while [[ $# -gt 0 && "$1" != --* ]]; do STUDY_ARGS+=("$1"); shift; done ;;
         --no_plots|--no_sensitivity|--force) STUDY_ARGS+=("$1"); shift ;;

@@ -49,6 +49,10 @@ def parse_args():
     p.add_argument("--n_inits", type=int, default=5, help="normalizing-flow initialisations per noise seed")
     p.add_argument("--inits", type=int, nargs="*", default=None,
                    help="explicit initialisations to run (overrides --n_inits; e.g. one init per call)")
+    p.add_argument("--dev_params_disabled", type=int, nargs="*", default=None,
+                   help="override config.yaml: library columns fixed at 0 in the dev distillation (e.g. 3 6 7 = the mixed "
+                        "terms C11 C21 C12); own study folder (..._devoff3-6-7-9)")
+    p.add_argument("--vol_params_disabled", type=int, nargs="*", default=None, help="override config.yaml (vol)")
     p.add_argument("--no_evaluate", action="store_true",
                    help="run the distillations only, no summary (parallel workers; evaluate once at the end)")
     p.add_argument("--n_iterations", type=int, default=None, help="Wasserstein iterations (default: recipe value)")
@@ -180,9 +184,15 @@ def main():
         print(f"effective moduli not evaluated ({type(e).__name__}: {e})", flush=True)
         true_moduli = None
     names = FULL_NAMES[:13] if library == "gmr" else FULL_NAMES
-    for key, val in (("sample_mode", args.sample_mode), ("num_points", args.num_points), ("max_gamma", args.max_gamma)):
+    for key, val in (("sample_mode", args.sample_mode), ("num_points", args.num_points), ("max_gamma", args.max_gamma),
+                     ("dev_params_disabled", args.dev_params_disabled), ("vol_params_disabled", args.vol_params_disabled)):
         if val is not None:
             cfg[key] = val
+    # the GMR log term E (column 9) is fixed at 0 by the distillation unless asked for: record it in the disabled list,
+    # so the study folder differs from older studies that fitted E (their runs are not interchangeable)
+    keep_log = bool(cfg.get("include_log_term", 0)) or "_log" in dist_model.lower()
+    if library in ("gmr", "gmr_ogden") and not keep_log:
+        cfg["dev_params_disabled"] = sorted({int(x) for x in np.atleast_1d(cfg.get("dev_params_disabled") or [])} | {9})
     states = os.path.basename(export_cmd(cfg, "")[1])[len("pytorch_export_"):]   # same naming as the GP export
     for comp in ("dev", "vol", "aniso"):     # disabled library terms: own study folder (runs are not interchangeable)
         off = [int(x) for x in np.atleast_1d(cfg.get(f"{comp}_params_disabled") or [])]

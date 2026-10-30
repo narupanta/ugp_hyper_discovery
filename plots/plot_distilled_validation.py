@@ -13,6 +13,7 @@ from core.model import SparseHyperelasticityGP
 from core.dataclass import GPRawParams
 from core.material_models import get_material
 from core.features import IsotropicFeatureExtractor
+GT_LABEL = "Ground Truth"
 from core.utils import infer_material_model_name, generate_standard_deformation_modes as generate_standard_modes
 
 def main():
@@ -22,6 +23,9 @@ def main():
     parser.add_argument("--distilled_dir", type=str, required=True)
     parser.add_argument("--material_model", type=str, default=None, choices=["ogden", "gmr_ogden", "gmr_dev", "ogden_dev", "gmr_ogden_dev", "gmr", "gmr_log", "gmr_nolog", "isihara", "gmr_aniso", "aniso_gmr"])
     parser.add_argument("--distill_target", type=str, default="sef_split", choices=["sef", "sef_stress", "sef_cauchy", "sef_split"])
+    parser.add_argument("--reference", type=str, default=None,
+                        help="experimental data (no ground truth): draw a published reference model instead, e.g. euclid "
+                             "(keys of plots/plot_reference_energy.REFERENCES); output files get the suffix _ref<key>")
     args = parser.parse_args()
     
     distilled_dir = os.path.abspath(args.distilled_dir)
@@ -52,6 +56,14 @@ def main():
             true_model = get_material_from_dir(distilled_dir, jit_P=False)
         except Exception:
             true_model = None
+    global GT_LABEL
+    REF_SFX = f"_ref{args.reference}" if args.reference else ""
+    if args.reference:
+        if true_model is not None:
+            print(f"[reference] the data have a ground truth; --reference {args.reference} replaces it in the plots")
+        from plots.plot_reference_energy import ReferenceMaterial
+        true_model = ReferenceMaterial(args.reference)
+        GT_LABEL = f"{true_model.label} (reference)"
     try:
         true_model_name = infer_material_model_name(saved_model_dir)
     except Exception:
@@ -381,7 +393,7 @@ def main():
             has_gt = true_psi_list is not None and i < len(true_psi_list) and true_psi_list[i] is not None
             # 1. Plot ground truth if available
             if has_gt:
-                ax_psi.plot(gamma, true_psi_list[i], 'k--', lw=1.5, label="Ground Truth", zorder=5)
+                ax_psi.plot(gamma, true_psi_list[i], 'k--', lw=1.5, label=GT_LABEL, zorder=5)
             
             # 2. Plot GP posterior if provided
             if gp_mean_list is not None and gp_var_list is not None:
@@ -467,7 +479,7 @@ def main():
 
         handles_psi, labels_psi = axes_psi[0, 0].get_legend_handles_labels()
         by_label = dict(zip(labels_psi, handles_psi))
-        ordered_labels = ["Ground Truth", "GP mean", "GP 95% CI", "Distilled Mean", "Distilled 95%CI", "Distilled Samples"]
+        ordered_labels = [GT_LABEL, "GP mean", "GP 95% CI", "Distilled Mean", "Distilled 95%CI", "Distilled Samples"]
         final_handles = []
         final_labels = []
         for l in ordered_labels:
@@ -514,11 +526,11 @@ def main():
         aniso_psi_dist_mean = [learned_gp.aniso_psi_dist(F_all[mode]).mean for mode in range(len(mode_names))]
         aniso_psi_dist_var = [learned_gp.aniso_psi_dist(F_all[mode]).var for mode in range(len(mode_names))]
 
-        generate_energy_plot(dist_psi_dev_samples, psi_true_dev, "DEV Energy", f"distilled_validation_energy_dev_{args.material_model}.pdf", dev_psi_dist_mean, dev_psi_dist_var, ylabel=r"Deviatoric SEF ($\Psi_{\mathrm{dev}}$)", dist_color="#0072B2")
-        generate_energy_plot(dist_psi_vol_samples, psi_true_vol, "VOL Energy", f"distilled_validation_energy_vol_{args.material_model}.pdf", vol_psi_dist_mean, vol_psi_dist_var, ylabel=r"Volumetric SEF ($\Psi_{\mathrm{vol}}$)", dist_color="#D55E00")
+        generate_energy_plot(dist_psi_dev_samples, psi_true_dev, "DEV Energy", f"distilled_validation_energy_dev_{args.material_model}{REF_SFX}.pdf", dev_psi_dist_mean, dev_psi_dist_var, ylabel=r"Deviatoric SEF ($\Psi_{\mathrm{dev}}$)", dist_color="#0072B2")
+        generate_energy_plot(dist_psi_vol_samples, psi_true_vol, "VOL Energy", f"distilled_validation_energy_vol_{args.material_model}{REF_SFX}.pdf", vol_psi_dist_mean, vol_psi_dist_var, ylabel=r"Volumetric SEF ($\Psi_{\mathrm{vol}}$)", dist_color="#D55E00")
         if has_aniso:
-            generate_energy_plot(dist_psi_aniso_samples, psi_true_aniso, "ANISO Energy", f"distilled_validation_energy_aniso_{args.material_model}.pdf", aniso_psi_dist_mean, aniso_psi_dist_var, ylabel=r"Anisotropic SEF ($\Psi_{\mathrm{aniso}}$)", dist_color="#CC79A7")
-        generate_energy_plot(dist_psi_samples, psi_true, "TOTAL Energy", f"distilled_validation_energy_total_{args.material_model}.pdf", psi_dist_mean, psi_dist_var, dist_color="#009E73")
+            generate_energy_plot(dist_psi_aniso_samples, psi_true_aniso, "ANISO Energy", f"distilled_validation_energy_aniso_{args.material_model}{REF_SFX}.pdf", aniso_psi_dist_mean, aniso_psi_dist_var, ylabel=r"Anisotropic SEF ($\Psi_{\mathrm{aniso}}$)", dist_color="#CC79A7")
+        generate_energy_plot(dist_psi_samples, psi_true, "TOTAL Energy", f"distilled_validation_energy_total_{args.material_model}{REF_SFX}.pdf", psi_dist_mean, psi_dist_var, dist_color="#009E73")
         
         # Save split_parameters plot
         try:
@@ -617,7 +629,7 @@ def main():
         # --- ENERGY PLOT (ax_psi) ---
         has_gt_psi = psi_true is not None and i < len(psi_true) and psi_true[i] is not None
         if has_gt_psi:
-            ax_psi.plot(gamma, psi_true[i], 'k--', lw=1.5, label="Ground Truth", zorder=5)
+            ax_psi.plot(gamma, psi_true[i], 'k--', lw=1.5, label=GT_LABEL, zorder=5)
         
         gp_psi_lower = psi_dist_mean[i] - 1.96 * jnp.sqrt(psi_dist_var[i])
         gp_psi_upper = psi_dist_mean[i] + 1.96 * jnp.sqrt(psi_dist_var[i])
@@ -683,7 +695,7 @@ def main():
         has_gt_p = P_true is not None and i < len(P_true)
         if has_gt_p:
             p_true_comp = P_true[i, :, idx_comp[0], idx_comp[1]]
-            ax_p.plot(gamma, p_true_comp, 'k--', lw=1.5, label="Ground Truth", zorder=5)
+            ax_p.plot(gamma, p_true_comp, 'k--', lw=1.5, label=GT_LABEL, zorder=5)
 
             gp_cov_p = jnp.mean((p_true_comp >= gp_p_lower) & (p_true_comp <= gp_p_upper))
             nf_cov_p = jnp.mean((p_true_comp >= nf_p_lower) & (p_true_comp <= nf_p_upper))
@@ -754,7 +766,7 @@ def main():
         handles_psi, labels_psi = axes_psi[0, 0].get_legend_handles_labels()
         fig_psi.legend(handles_psi, labels_psi, loc='lower center', ncol=2, bbox_to_anchor=(0.5, 0.0), fontsize=10, framealpha=1.0)
         fig_psi.tight_layout(rect=[0, 0.05, 1, 1])
-        save_file_psi = os.path.join(distilled_dir, f"distilled_validation_energy_{args.material_model}.pdf")
+        save_file_psi = os.path.join(distilled_dir, f"distilled_validation_energy_{args.material_model}{REF_SFX}.pdf")
         fig_psi.savefig(save_file_psi, bbox_inches='tight', dpi=200)
         plt.close(fig_psi)
         print(f"Validation Energy plot saved to: {save_file_psi}")
@@ -765,7 +777,7 @@ def main():
     handles_p, labels_p = axes_p[0, 0].get_legend_handles_labels()
     fig_p.legend(handles_p, labels_p, loc='lower center', ncol=2, bbox_to_anchor=(0.5, 0.0), fontsize=10, framealpha=1.0)
     fig_p.tight_layout(rect=[0, 0.05, 1, 1])
-    save_file_p = os.path.join(distilled_dir, f"distilled_validation_stress_{args.material_model}.pdf")
+    save_file_p = os.path.join(distilled_dir, f"distilled_validation_stress_{args.material_model}{REF_SFX}.pdf")
     fig_p.savefig(save_file_p, bbox_inches='tight', dpi=200)
     plt.close(fig_p)
     print(f"Validation Stress plot saved to: {save_file_p}")

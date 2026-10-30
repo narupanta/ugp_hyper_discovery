@@ -345,8 +345,13 @@ def plot_node_distributions(u_true, u_pred_samples, u_pred_piola_traction_sample
 # plot_global_analysis(u_true, u_pred_samples, node_coords, "plots/")
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, mode_str="", filename_base="displacement_analysis", banner_prefix="", is_clean=False):
+def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_p_mean, u_p_lower_bound, u_p_upper_bound, save_path, mode_str="", filename_base="displacement_analysis", banner_prefix="", is_clean=False,
+                    extra_rows=None, main_label=None):
+    """extra_rows: optional list of dict(label, u_step (n_nodes, 2) at the plotted step, u_val_flat (validation states,
+    2)) of single deterministic predictions (e.g. a published reference model solved with the same FEM), each drawn
+    as one more row (same colour scales as the first row; no band in the parity panel)."""
     apply_style()
+    extra_rows = list(extra_rows or [])
 
     # --- Data Preparation ---
     coords_true = node_coords + u_true
@@ -358,11 +363,18 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     # Nodal RMSE between true and predicted displacement
     error = np.sqrt(np.mean((u_true - u_pred_mean)**2, axis=-1))
 
-    fig, axes = plt.subplots(1, 3, figsize=(13.5, 3.8), gridspec_kw={"width_ratios": [1, 1, 1.15]})
+    nrows = 1 + len(extra_rows)
+    fig, axes_all = plt.subplots(nrows, 3, figsize=(13.5, 3.8 * nrows), gridspec_kw={"width_ratios": [1, 1, 1.15]},
+                                 squeeze=False)
+    axes = axes_all[0]
+    for row in extra_rows:
+        row["mag"] = get_mag(row["u_step"])
+        row["err"] = np.sqrt(np.mean((u_true - row["u_step"]) ** 2, axis=-1))
 
-    # Shared limits for disp magnitude
-    vmin_disp = min(mag_true.min(), mag_pred.min())
-    vmax_disp = max(mag_true.max(), mag_pred.max())
+    # Shared limits for disp magnitude (and the nodal RMSE) over all rows
+    vmin_disp = min([mag_true.min(), mag_pred.min()] + [r["mag"].min() for r in extra_rows])
+    vmax_disp = max([mag_true.max(), mag_pred.max()] + [r["mag"].max() for r in extra_rows])
+    err_max = max([error.max()] + [r["err"].max() for r in extra_rows])
 
     # --- 1. Predicted Displacement Magnitude with Observed/Clean Domain Underlay ---
     tri_obs = tri.Triangulation(coords_true[:, 0], coords_true[:, 1], cells)
@@ -393,7 +405,7 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     cbar1.update_ticks()
 
     # --- 2. Nodal RMSE (Oranges) ---
-    im2 = axes[1].tripcolor(tri_pred, error, cmap="Oranges")
+    im2 = axes[1].tripcolor(tri_pred, error, cmap="Oranges", vmin=0.0, vmax=err_max)
     axes[1].set_aspect("equal")
     axes[1].axis("off")
     div2 = make_axes_locatable(axes[1])
@@ -462,7 +474,48 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     fig.text(0.57, 0.035, stats_banner, ha="center", va="center", fontsize=9.0,
              bbox=dict(boxstyle="round,pad=0.35", facecolor="#f5f5f5", edgecolor="#bbbbbb", lw=0.6))
 
-    plt.subplots_adjust(left=0.03, right=0.97, wspace=0.18, bottom=0.20, top=0.96)
+    # --- extra rows: deterministic predictions (e.g. a published reference model) ---
+    for r_i, row in enumerate(extra_rows, start=1):
+        ax = axes_all[r_i]
+        coords_r = node_coords + row["u_step"]
+        tri_r = tri.Triangulation(coords_r[:, 0], coords_r[:, 1], cells)
+        ax[0].tripcolor(tri_obs, mag_true, cmap="Blues", alpha=0.30, vmin=vmin_disp, vmax=vmax_disp, zorder=1)
+        ax[0].triplot(tri_obs, color="#444444", linestyle=":", linewidth=0.7, alpha=0.75, zorder=2)
+        im_r = ax[0].tripcolor(tri_r, row["mag"], cmap="Blues", alpha=0.88, vmin=vmin_disp, vmax=vmax_disp, zorder=3)
+        ax[0].triplot(tri_r, color="#002b4d", linestyle="-", linewidth=0.35, alpha=0.45, zorder=4)
+        im_e = ax[1].tripcolor(tri_r, row["err"], cmap="Oranges", vmin=0.0, vmax=err_max)
+        for a_, im_, lab in ((ax[0], im_r, r"$\|\mathbf{u}_{\mathrm{pred}}\|$"), (ax[1], im_e, r"$\mathrm{RMSE}$")):
+            a_.set_aspect("equal")
+            a_.axis("off")
+            cb = fig.colorbar(im_, cax=make_axes_locatable(a_).append_axes("right", size="5%", pad=0.08))
+            cb.set_label(lab, fontsize=10, fontweight="bold")
+            cb.ax.tick_params(labelsize=8.5)
+            cb.locator = ticker.MaxNLocator(nbins=4)
+            cb.update_ticks()
+        uv = row["u_val_flat"]
+        r2x, r2y = r2_score(ux_true, uv[:, 0]), r2_score(uy_true, uv[:, 1])
+        rmx, rmy = np.sqrt(np.mean((uv[:, 0] - ux_true) ** 2)), np.sqrt(np.mean((uv[:, 1] - uy_true) ** 2))
+        ax[2].plot(ux_true, uv[:, 0], "x", color="#0072B2", alpha=0.35, markersize=4, label=r"$u_x$")
+        ax[2].plot(uy_true, uv[:, 1], "o", color="#D55E00", alpha=0.35, markersize=3, label=r"$u_y$")
+        ax[2].plot(limits, limits, "k--", linewidth=1.2, label="Isoline", zorder=5)
+        ax[2].set_xlabel(ref_axis_label, fontsize=11, labelpad=5)
+        ax[2].set_ylabel(r"$u_{\mathrm{pred}}$", fontsize=11, labelpad=3)
+        ax[2].tick_params(axis="both", which="major", labelsize=8.5)
+        ax[2].grid(True, linestyle=":", alpha=0.6)
+        ax[2].legend(loc="lower right", bbox_to_anchor=(0.98, 0.04), frameon=True, facecolor="white", framealpha=0.9,
+                     edgecolor="#cccccc", fontsize=8.0)
+        ax[2].xaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
+        ax[2].yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
+        ax[2].set_box_aspect(1)
+        ax[0].set_title(row["label"] + "\n" + rf"$r^2_{{u_x}} = {r2x:.4f},\; r^2_{{u_y}} = {r2y:.4f}$   "
+                        + rf"$\mathrm{{RMSE}}_{{u_x}} = {rmx:.4f},\; \mathrm{{RMSE}}_{{u_y}} = {rmy:.4f}$",
+                        fontsize=10, loc="left")
+        row.update(r2_x=float(r2x), r2_y=float(r2y), rmse_x=float(rmx), rmse_y=float(rmy))
+    if extra_rows:
+        axes[0].set_title(main_label or "Distilled (mean of the FEM samples)", fontsize=10, loc="left")
+
+    plt.subplots_adjust(left=0.03, right=0.97, wspace=0.18, hspace=0.35, bottom=0.20 if nrows == 1 else 0.13,
+                        top=0.96 if nrows == 1 else 0.95)
     os.makedirs(save_path, exist_ok=True)
     pdf_file = os.path.join(save_path, f"{filename_base}.pdf")
     png_file = os.path.join(save_path, f"{filename_base}.png")
@@ -891,6 +944,19 @@ if __name__ == "__main__" :
     # ---------------------------------------------------------
     # Generate Before-Scaling (Raw) and After-Scaling (Conformal)
     # ---------------------------------------------------------
+    # published reference models solved with the same FEM (validation/forward_fem_distilled_piola_sample.py
+    # --reference <key> -> gt/u_ref_<key>.npz): one more row each in the observed-displacement figure
+    ref_rows = []
+    for ref_file in sorted((pred_dir_name / "gt").glob("u_ref_*.npz")) if (pred_dir_name / "gt").exists() else []:
+        rd = np.load(ref_file, allow_pickle=True)
+        if rd["u"].shape[1:] != (mesh_node_coords.shape[0], 2):
+            continue
+        lab = str(rd["label"]) if "label" in rd.files else ref_file.stem.replace("u_ref_", "")
+        ref_rows.append(dict(label=f"{lab} (reference)", u_step=np.asarray(rd["u"][step]),
+                             u_val_flat=np.asarray(rd["u"][valid_val_step_indices]).reshape(-1, 2)))
+    if ref_rows:
+        print(f"Reference model rows: {[r['label'] for r in ref_rows]}")
+
     # 1. Observed Displacement Visualizations (with DIC noise)
     if has_u_exp and u_obs_val_flat is not None:
         plot_disp_field(
@@ -899,8 +965,11 @@ if __name__ == "__main__" :
             save_path, mode_str=mode_display,
             filename_base="displacement_analysis_raw",
             banner_prefix="[Uncalibrated (Observed)]",
-            is_clean=False
+            is_clean=False, extra_rows=ref_rows
         )
+        if ref_rows:
+            json.dump({r["label"]: {k: r[k] for k in ("r2_x", "r2_y", "rmse_x", "rmse_y")} for r in ref_rows},
+                      open(os.path.join(save_path, "reference_displacement_metrics.json"), "w"), indent=2)
         # Also save as standard displacement_analysis for backwards compatibility
         plot_disp_field(
             mesh_node_coords, mesh_cells, u_obs_step, u_pred_piola_samples.mean(axis=0),

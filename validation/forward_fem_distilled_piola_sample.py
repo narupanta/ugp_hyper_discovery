@@ -199,6 +199,10 @@ def parse_args():
     parser.add_argument('--total_workers', type=int, default=1, help="Total number of parallel workers")
     parser.add_argument('--sample_offset', type=int, default=0, help="Starting index in candidate samples pool")
     parser.add_argument('--output_suffix', type=str, default="", help="Optional suffix for worker output file")
+    parser.add_argument('--reference', type=str, default=None,
+                        help="solve ONLY a published reference model (keys of plots/plot_reference_energy.REFERENCES, e.g. "
+                             "euclid) with the same mesh, boundary data and stress state; writes <output_dir>/gt/u_ref_<key>.npz "
+                             "and exits (no distilled samples)")
     parser.add_argument('--output_dir', type=str, default=None, help="Direct output directory for FEM validation")
     parser.add_argument('--dataset_path', type=str, default="", help="Explicit path to precomputed dataset npz file")
     parser.add_argument('--num_steps', type=int, default=None, help="Number of load steps (defaults to dataset load shape or 10)")
@@ -243,11 +247,20 @@ if __name__ == "__main__" :
         save_path = Path(args.distilled_dir) / args.subfolder
     save_path.mkdir(parents=True, exist_ok=True)
     from core.material_models import get_material_from_dir
-    try:
-        true_material_model = get_material_from_dir(args.distilled_dir)
-    except Exception as e:
-        print(f"[VAL] Notice: Ground truth material model not found ({e}). Running without analytical GT.")
-        true_material_model = None
+    if args.reference:      # reference-only run: the published model takes the place of the true material
+        import importlib.util as _ilu   # load by path: validation/ has its own plots module
+        _spec = _ilu.spec_from_file_location("plot_reference_energy", os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plots", "plot_reference_energy.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        true_material_model = _mod.ReferenceMaterial(args.reference)
+        print(f"[VAL] Reference-only FEM run: {true_material_model.label}")
+    else:
+        try:
+            true_material_model = get_material_from_dir(args.distilled_dir)
+        except Exception as e:
+            print(f"[VAL] Notice: Ground truth material model not found ({e}). Running without analytical GT.")
+            true_material_model = None
 
     geometry_flag = args.geometry
 
@@ -602,6 +615,8 @@ if __name__ == "__main__" :
             print(f"[VAL] Could not inspect merged file {merged_file}: {e}")
 
     n_needed = target_total_samples - num_existing
+    if args.reference:     # reference-only run: independent of the distilled samples already solved
+        n_needed = 1
     if n_needed <= 0:
         print(f"Target sample count ({target_total_samples}) already reached (current count: {num_existing}). Exiting.")
         n_sample = 0
@@ -693,6 +708,15 @@ if __name__ == "__main__" :
         }
         gt_dir = os.path.join(save_path, "gt")
         gt_file = os.path.join(gt_dir, "u_gt.npz")
+        if args.reference:
+            ref_file = os.path.join(gt_dir, f"u_ref_{args.reference}.npz")
+            os.makedirs(gt_dir, exist_ok=True)
+            print(f"[VAL] Solving FEM with the reference model {args.reference} ({num_steps} steps)...")
+            u_ref = solve_adaptive_fem(problem_true, bc_config, schedule_solve, petsc_options, u_boundary_steps=u_exp)
+            np.savez_compressed(ref_file, u=np.asarray(u_ref), cells=cells, node_coords=node_coords, node_type=node_type,
+                                reference=args.reference, label=true_material_model.label)
+            print(f"[VAL] Reference displacements saved to {ref_file}")
+            sys.exit(0)
         u_true_cached = None
         if os.path.exists(gt_file):
             try:
