@@ -177,7 +177,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     if aniso_on:
         from .features import AnisotropicFeatureExtractor
         extractor = AnisotropicFeatureExtractor(jnp.asarray(fibers[0], dtype=jnp.float64),
-                                                a1=None if fibers[1] is None else jnp.asarray(fibers[1], dtype=jnp.float64))
+                                                a1=None if fibers[1] is None else jnp.asarray(fibers[1], dtype=jnp.float64),
+                                                incompressible_plane_stress=incompressible_plane_stress)
     else:
         extractor = make_feature_extractor(incompressible_plane_stress)
     feats = jax.vmap(extractor.extract)(jnp.concatenate([F.reshape(-1, 3, 3) for F in step_F]))

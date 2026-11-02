@@ -71,11 +71,10 @@ class HSGPHyperelasticity:
         from .features import make_feature_extractor, AnisotropicFeatureExtractor
         self.is_anisotropic = aniso_box is not None
         if self.is_anisotropic:
-            if self.incompressible_plane_stress:
-                raise ValueError("anisotropic HSGP with incompressible plane stress is not implemented")
             self.a0 = jnp.asarray(a0, dtype=jnp.float64)
             self.a1 = None if a1 is None else jnp.asarray(a1, dtype=jnp.float64)
-            self.feature_extractor = AnisotropicFeatureExtractor(self.a0, a1=self.a1)   # (dev, vol, [I4, I6, I8])
+            self.feature_extractor = AnisotropicFeatureExtractor(   # (dev, vol, [I4, I6, I8]); J = 1 if incompressible
+                self.a0, a1=self.a1, incompressible_plane_stress=self.incompressible_plane_stress)
         else:
             self.a0 = self.a1 = None
             self.feature_extractor = make_feature_extractor(self.incompressible_plane_stress)

@@ -942,8 +942,8 @@ def main():
     # deviatoric library: "gmr" polynomial (+log) terms, "ogden" three Ogden terms, "gmr_ogden" both
     from core.material_library import library_from_material_model, is_dev_only
     dev_library = library_from_material_model(args.material_model)
-    if is_dev_only(args.material_model) and args.component != "dev":
-        raise ValueError(f"--material_model {args.material_model} distills the deviatoric part only (--component dev)")
+    if is_dev_only(args.material_model) and args.component == "vol":
+        raise ValueError(f"--material_model {args.material_model} has no volumetric part (--component dev or aniso)")
     if dev_library != "gmr" and args.distill_target != "sef_split":
         raise ValueError(f"--material_model {args.material_model} requires --distill_target sef_split")
     if args.material_model in ["gmr_aniso", "aniso_gmr"] or args.component == "aniso":

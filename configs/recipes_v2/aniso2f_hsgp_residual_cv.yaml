@@ -1,0 +1,93 @@
+# ==============================================================================
+# Recipe v2 (HSGP extraction): anisotropic, two fibre families at +30 and -30 deg (symmetric about the x axis, the
+# arterial-type case: under x/y stretching both fibres stretch alike, so the two families are separated only through
+# the shear in the field; fibres vs matrix stay separable, unlike orthogonal fibres with I4 + I6 + C33_bar = I1_bar)
+# on a neo-Hookean matrix (C10 = 0.5); fibre energy 0.7 (I4-1)^2 + 0.5 (I4-1)^4 + 0.4 (I6-1)^2 + 0.3 (I6-1)^4.
+# Incompressible plane stress (F33 = 1 / det F_2D, J = 1): no volumetric part.
+# HSGP: psi = psi_dev(I1_bar, I2_bar) + psi_aniso(I4_bar, I6_bar), the fibre GP conditioned on zero energy and stress
+# at F = I. Residual likelihood, sigma_free by cross-validation.
+# Distillation: GMR dev (no vol: J = 1) + the 6 polynomial fibre terms (component aniso, model_mode: anisotropic).
+# ==============================================================================
+
+# --- Material and data generation --------------------------------------------
+material_model_name: aniso2f
+material_params:
+  dev_params: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  vol_params: [1.0, 0.0, 0.0]
+  aniso_params: [1.0, 0.0, 0.0, 0.8, 0.0, 0.4]
+  angles: [30.0, -30.0]
+geometry_train: block
+geometry_val: holes
+mesh_size: 0.08
+control_mode: displacement
+stress_mode: plane_stress
+plane_stress_mode: incompressible   # lambda3 = 1 / det F_2D; dev + fibre GP, no volumetric part
+n_loadsteps: 20
+target_load_true_top: 1.0
+target_load_holes: 1.0
+asym_factor: 0.5
+disp_noise: 0.0001
+load_noise: 0.02
+
+# --- Load steps and seeds ----------------------------------------------------
+train_load_steps_indices:
+- 1
+- 3
+- 5
+- 7
+- 9
+- 11
+- 13
+- 15
+- 17
+- 19
+val_load_steps_indices:
+- 2
+- 4
+- 6
+- 8
+- 10
+- 12
+- 14
+- 16
+- 18
+- 20
+seeds:
+- 1
+
+# --- Extraction (HSGP) -------------------------------------------------------
+hsgp_likelihood: residual_exact
+hsgp_force_noise_rel: 0.0       # 0: s chosen by cross-validation
+hsgp_cv_folds: 2
+hsgp_cv_tol: 2.0
+hsgp_num_basis_dev: 8
+hsgp_num_basis_vol: 8
+hsgp_num_basis_aniso: 0         # functions per fibre invariant (I4_bar, I6_bar); 0 = same as hsgp_num_basis_dev
+hsgp_box_factor: 8.0
+hsgp_amplitude_prior_scale: 0.0
+hsgp_lengthscale_prior_scale: 0.0
+hsgp_sigma_cap: 10.0
+hsgp_hyper_restarts: 1
+
+# --- Distillation ------------------------------------------------------------
+distilled_material_model: gmr_dev    # deviatoric GMR only (J = 1); the fibre terms are the aniso component
+distill_target: sef_split
+distillation_n_iterations: 10000
+dev_vol_distillation_n_iterations: 10000
+aniso_distillation_n_iterations: 10000
+sample_mode: dataset_f_random       # uniform random training states (FPS over-weights the large-strain tail)
+num_points: 128
+num_func_samples: 512
+max_gamma: 1.0
+do_sensitivity: 1
+sobol_threshold: 0.0001
+sobol_samples_factor: 4096
+dev_params_disabled: [3, 6, 7]   # no mixed terms: C11, C21, C12 (GMR order C10 C01 C20 C11 C02 C30 C21 C12 C03 E)
+
+# --- FEM forward validation --------------------------------------------------
+run_validation: 1
+val_number_samples: 1024
+val_workers: 4
+
+# --- Other -------------------------------------------------------------------
+model_mode: anisotropic

@@ -128,8 +128,9 @@ def samples_path(run_dir, component, k, final_iter):
     return os.path.join(run_dir, name)
 
 
-def evaluate(run_dir, k, final_iter, library, dev_only, truth, level, true_moduli=None):
-    """Interval check of one permutation at checkpoint k: dict or None if the samples are missing."""
+def evaluate(run_dir, k, final_iter, library, dev_only, truth, level, true_moduli=None, aniso_iter=None):
+    """Interval check of one permutation at checkpoint k: dict or None if the samples are missing. aniso_iter: final
+    iteration of the fibre distillation (anisotropic study: the 6 fibre terms go to columns 13..18); None: isotropic."""
     p_dev = samples_path(run_dir, "dev", k, final_iter)
     if not os.path.exists(p_dev):
         return None
@@ -141,8 +142,18 @@ def evaluate(run_dir, k, final_iter, library, dev_only, truth, level, true_modul
         if not os.path.exists(p_vol):
             return None
         vol = np.load(p_vol)
-    n = min(len(dev), len(vol))
+    aniso = None
+    if aniso_iter is not None:
+        p_an = samples_path(run_dir, "aniso", k, aniso_iter)
+        if not os.path.exists(p_an):
+            return None
+        aniso = np.load(p_an)
+    n = min(len(dev), len(vol), len(aniso) if aniso is not None else len(dev))
     full = full_param_vectors(dev[:n], vol[:n], library)
+    if aniso is not None:      # fibre terms C42 C43 C44 C62 C63 C64 at columns 13..18 of the full layout
+        if full.shape[1] < 19:
+            full = np.concatenate([full, np.zeros((n, 19 - full.shape[1]))], axis=1)
+        full[:, 13:13 + min(6, aniso.shape[1])] = aniso[:n, :6]
     t = truth[:full.shape[1]]
     a = 0.5 * (1.0 - level)
     lo, hi = np.quantile(full, a, axis=0), np.quantile(full, 1.0 - a, axis=0)
@@ -189,7 +200,15 @@ def main():
     except Exception as e:
         print(f"effective moduli not evaluated ({type(e).__name__}: {e})", flush=True)
         true_moduli = None
-    names = FULL_NAMES[:13] if library == "gmr" else FULL_NAMES
+    # anisotropic study (fibre angles in the material and model_mode not isotropic): the fibre terms are distilled
+    # too (component aniso, aniso_distillation_n_iterations) and evaluated in columns 13..18
+    aniso_on = bool((cfg.get("material_params") or {}).get("angles")) and str(cfg.get("model_mode", "anisotropic")) != "isotropic"
+    n_iter_aniso = (args.n_iterations or int(cfg.get("aniso_distillation_n_iterations", n_iter))) if aniso_on else None
+    names = (FULL_NAMES[:19] if aniso_on else FULL_NAMES[:13]) if library == "gmr" else FULL_NAMES
+    if aniso_on and true_moduli is not None:
+        # the distilled moduli (effective_moduli) leave the fibre terms out, the true ones (simple shear) include them
+        print("effective moduli not compared for an anisotropic material (fibre contribution)", flush=True)
+        true_moduli = None
     for key, val in (("sample_mode", args.sample_mode), ("num_points", args.num_points), ("max_gamma", args.max_gamma),
                      ("dev_params_disabled", args.dev_params_disabled), ("vol_params_disabled", args.vol_params_disabled)):
         if val is not None:
@@ -227,12 +246,13 @@ def main():
             for s in seeds:
                 run_dir = os.path.join(study, f"seed{s}", f"init{m}")
                 jobs = []
-                for comp in (["dev"] if dev_only else ["dev", "vol"]):
-                    if not args.force and os.path.exists(samples_path(run_dir, comp, None, n_iter)) and all(
-                            os.path.exists(samples_path(run_dir, comp, k, n_iter)) for k in checkpoints):
+                for comp in (["dev"] if dev_only else ["dev", "vol"]) + (["aniso"] if aniso_on else []):
+                    it = n_iter_aniso if comp == "aniso" else n_iter
+                    if not args.force and os.path.exists(samples_path(run_dir, comp, None, it)) and all(
+                            os.path.exists(samples_path(run_dir, comp, k, it)) for k in checkpoints):
                         continue
                     jobs.append((distill_cmd(cfg, os.path.join(exp, str(s), "extracted"), run_dir, comp, s + 1000 * m,
-                                             n_iter, checkpoints),
+                                             it, checkpoints),
                                  os.path.join(run_dir, f"{comp}_study.log"), f"seed {s} init {m} {comp}"))
                 if jobs:
                     pairs.append((s, m, jobs))
@@ -269,7 +289,7 @@ def main():
         for s in seeds:
             for m in inits:
                 r = evaluate(os.path.join(study, f"seed{s}", f"init{m}"), k, n_iter, library, dev_only, truth, args.level,
-                             true_moduli)
+                             true_moduli, aniso_iter=n_iter_aniso)
                 if r is not None:
                     res[(s, m)] = r
                     rows.append(dict(iteration=k, noise_seed=s, init=m, covered_true=int(r["covered_true"]),

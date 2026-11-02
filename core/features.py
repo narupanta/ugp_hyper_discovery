@@ -47,7 +47,11 @@ def make_feature_extractor(incompressible_plane_stress: bool = False) -> Feature
 
 
 class AnisotropicFeatureExtractor(FeatureExtractor):
-    def __init__(self, a0: jnp.ndarray, a1: jnp.ndarray = None, cap_compression: bool = False):
+    def __init__(self, a0: jnp.ndarray, a1: jnp.ndarray = None, cap_compression: bool = False,
+                 incompressible_plane_stress: bool = False):
+        # incompressible plane stress: F33 = 1 / det F_2D (J = 1) before any invariant, as in
+        # IncompressiblePlaneStressFeatureExtractor (the input's out-of-plane entries are ignored)
+        self.incompressible_plane_stress = bool(incompressible_plane_stress)
         self.a0 = jnp.asarray(a0, dtype=jnp.float64)
         if a1 is not None:
             self.a1 = jnp.asarray(a1, dtype=jnp.float64)
@@ -68,9 +72,13 @@ class AnisotropicFeatureExtractor(FeatureExtractor):
         and ARD pruning naturally flattens lengthscales for I6_bar and I8_bar.
         Returns: (dev, vol, aniso)
         """
+        if self.incompressible_plane_stress:
+            f2 = f[..., :2, :2]
+            f = jnp.zeros(f2.shape[:-2] + (3, 3), dtype=f2.dtype).at[..., :2, :2].set(f2)
+            f = f.at[..., 2, 2].set(1.0 / jnp.linalg.det(f2))
         invariants, _ = invariants_and_derivatives(f)
         dev, vol = transform_input_features(invariants)
-        
+
         C = C_func(f)
         I3 = jnp.clip(I3_func(C), 1.0e-8, 1.0e8)
         C_bar = (I3**(-1/3))[..., None, None] * C
