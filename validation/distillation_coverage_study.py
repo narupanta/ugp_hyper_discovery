@@ -53,6 +53,8 @@ def parse_args():
                    help="override config.yaml: library columns fixed at 0 in the dev distillation (e.g. 3 6 7 = the mixed "
                         "terms C11 C21 C12); own study folder (..._devoff3-6-7-9)")
     p.add_argument("--vol_params_disabled", type=int, nargs="*", default=None, help="override config.yaml (vol)")
+    p.add_argument("--aniso_params_disabled", type=int, nargs="*", default=None,
+                   help="override config.yaml (fibre terms, order C42 C43 C44 C62 C63 C64; e.g. 1 4 = no third order)")
     p.add_argument("--no_evaluate", action="store_true",
                    help="run the distillations only, no summary (parallel workers; evaluate once at the end)")
     p.add_argument("--n_iterations", type=int, default=None, help="Wasserstein iterations (default: recipe value)")
@@ -210,7 +212,8 @@ def main():
         print("effective moduli not compared for an anisotropic material (fibre contribution)", flush=True)
         true_moduli = None
     for key, val in (("sample_mode", args.sample_mode), ("num_points", args.num_points), ("max_gamma", args.max_gamma),
-                     ("dev_params_disabled", args.dev_params_disabled), ("vol_params_disabled", args.vol_params_disabled)):
+                     ("dev_params_disabled", args.dev_params_disabled), ("vol_params_disabled", args.vol_params_disabled),
+                     ("aniso_params_disabled", args.aniso_params_disabled)):
         if val is not None:
             cfg[key] = val
     # the GMR log term E (column 9) is fixed at 0 by the distillation unless asked for: record it in the disabled list,
