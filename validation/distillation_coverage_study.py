@@ -148,9 +148,15 @@ def evaluate(run_dir, k, final_iter, library, dev_only, truth, level, true_modul
     lo, hi = np.quantile(full, a, axis=0), np.quantile(full, 1.0 - a, axis=0)
     tol = 1e-12                                                    # pruned parameters are exactly 0
     inside = (t >= lo - tol) & (t <= hi + tol)
-    active = t != 0.0
-    out = dict(inside=inside, covered_true=bool(np.all(inside[active])), covered_all=bool(np.all(inside)),
-               mean=full.mean(0), std=full.std(0), lo=lo, hi=hi)
+    used = np.ones(len(t), bool)
+    if dev_only:                     # J = 1 (incompressible / dev-only): D1..D3 are not distilled, not evaluated
+        used[10:13] = False
+    active = (t != 0.0) & used
+    # spurious terms: not in the true model (true value 0) but their interval excludes 0 (pruned terms are exactly 0)
+    spurious = used & (t == 0.0) & ((lo > tol) | (hi < -tol))
+    out = dict(inside=inside, covered_true=bool(np.all(inside[active])), covered_all=bool(np.all(inside[used])),
+               mean=full.mean(0), std=full.std(0), lo=lo, hi=hi, used=used, spurious=spurious,
+               n_spurious=int(spurious.sum()))
     if true_moduli is not None:          # effective small-strain moduli (identifiable even when C10/C01 are not)
         for name, x, t in zip(("mu", "kappa"), effective_moduli(full), true_moduli):
             if name == "kappa" and dev_only:
@@ -257,7 +263,7 @@ def main():
     rows, summary = [], {"experiment": exp, "noise_seeds": seeds, "n_inits": len(inits), "level": args.level,
                          "n_iterations": n_iter, "library": library, "parameters": names,
                          "truth": truth[:len(names)].tolist(), "checkpoints": {}}
-    final_means = {}
+    final_means, final_res = {}, {}
     for k in sorted(eval_points, reverse=True):          # final first: drift is measured against it
         res = {}
         for s in seeds:
@@ -274,10 +280,13 @@ def main():
                                      **{f"mean_{n}": float(v) for n, v in zip(names, r["mean"])}))
         if not res:
             continue
+        if k == max(eval_points):
+            final_res = res
         n_perm = len(res)
         cov_true = 100.0 * sum(r["covered_true"] for r in res.values()) / n_perm
         cov_all = 100.0 * sum(r["covered_all"] for r in res.values()) / n_perm
-        per_param = {n: 100.0 * np.mean([r["inside"][i] for r in res.values()]) for i, n in enumerate(names)}
+        per_param = {n: 100.0 * np.mean([r["inside"][i] for r in res.values()]) for i, n in enumerate(names)
+                     if next(iter(res.values()))["used"][i]}
         entry = dict(n_permutations=n_perm, coverage_true_params=cov_true, coverage_all_params=cov_all,
                      per_parameter=per_param)
         for q in ("mu", "kappa"):
@@ -309,10 +318,12 @@ def main():
             w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             w.writeheader()
             w.writerows(sorted(rows, key=lambda r: (r["iteration"], r["noise_seed"], r["init"])))
-    active = [n for n, t in zip(names, truth) if t != 0.0]
+    used_names = [n for i, n in enumerate(names) if not (dev_only and 10 <= i < 13)]
+    active = [n for n, t in zip(names, truth) if t != 0.0 and n in used_names]
     lines = [f"# Distillation coverage study ({os.path.basename(exp)})", "",
              f"Noise seeds {seeds} x {len(inits)} initialisations; nominal level {100 * args.level:.0f}% (central interval).",
-             f"True parameters: " + ", ".join(f"{n} = {t:g}" for n, t in zip(names, truth) if t != 0.0), "",
+             f"True parameters: " + ", ".join(f"{n} = {t:g}" for n, t in zip(names, truth) if t != 0.0 and n in used_names)
+             + (" (deviatoric-only distillation: D1..D3 not evaluated)" if dev_only else ""), "",
              "| Iteration | Permutations | Coverage, true params (%) | Coverage, all params (%) | "
              + " | ".join(f"{n} (%)" for n in active) + " |",
              "|" + "---|" * (4 + len(active))]
@@ -338,6 +349,32 @@ def main():
             e = summary["checkpoints"][k]
             lines.append(f"| {k} | {e['coverage_mu']:.0f} | {e['mean_mu']:.4g} | "
                          + (f"{e['coverage_kappa']:.0f} | {e['mean_kappa']:.4g} |" if "coverage_kappa" in e else "- | - |"))
+    if final_res:      # one row per seed/init: mean [lo, hi] of every fitted parameter, and the spurious terms
+        idx = [i for i, n in enumerate(names) if n in used_names
+               and any(abs(r["lo"][i]) > 1e-12 or abs(r["hi"][i]) > 1e-12 for r in final_res.values())]
+        tr = truth[:len(names)]
+        lines += ["", f"Discovered parameters per run (final iteration; mean [{100 * args.level:.0f}% interval]; "
+                      "parameters pruned or disabled in every run are left out). Spurious = true value 0 but the "
+                      "interval excludes 0 (an interval containing 0 counts as absent).", "",
+                  "| Seed | Init | " + " | ".join(f"{names[i]} (true {tr[i]:g})" for i in idx)
+                  + " | Spurious | True params covered |",
+                  "|" + "---|" * (len(idx) + 4)]
+        for (s, m) in sorted(final_res):
+            r = final_res[(s, m)]
+            cells = []
+            for i in idx:
+                if abs(r["lo"][i]) <= 1e-12 and abs(r["hi"][i]) <= 1e-12:
+                    cells.append("0 (pruned)")
+                else:
+                    c = f"{r['mean'][i]:.3g} [{r['lo'][i]:.3g}, {r['hi'][i]:.3g}]"
+                    cells.append(f"**{c}**" if r["spurious"][i] else c)
+            sp = [names[i] for i in np.where(r["spurious"])[0]]
+            lines.append(f"| {s} | {m} | " + " | ".join(cells) + f" | {len(sp)}" + (f" ({', '.join(sp)})" if sp else "")
+                         + f" | {'yes' if r['covered_true'] else 'no'} |")
+        n_sp = [r["n_spurious"] for r in final_res.values()]
+        per = {names[i]: sum(bool(r["spurious"][i]) for r in final_res.values()) for i in idx if tr[i] == 0.0}
+        lines += ["", f"Spurious terms: {sum(1 for x in n_sp if x > 0)} of {len(n_sp)} runs have at least one "
+                      f"(total {sum(n_sp)}); per term: " + ", ".join(f"{n} {c}" for n, c in per.items())]
     open(os.path.join(study, "coverage_summary.md"), "w").write("\n".join(lines) + "\n")
     print("\n".join(lines))
     print(f"\nSaved {study}/coverage_summary.md, coverage_summary.json, coverage_permutations.csv")

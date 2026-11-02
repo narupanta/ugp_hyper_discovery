@@ -13,6 +13,10 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_cv_holdout: "folds"        # "val": fit on the training steps, choose s by the reactions of the validation
                                     # steps (val_load_steps_indices; hsgp_cv_folds ignored); "folds" = interleaved folds
     hsgp_cv_tol: 0.0                # > 0: smallest s within this many nats of the best held-out score (plateau rule)
+    hsgp_global_equilibrium: 0.0    # > 0: per step and direction, sum of the free internal forces = 0 with sigma
+                                    # = this x |R_t| (global equilibrium of the free residuals); 0 = off
+    hsgp_opposite_reactions: 0      # 1: the supports opposite the loaded edges (left/bottom, the clamped end) are
+                                    # reaction rows too: sum of their internal forces = -R_t with the same sigma_R
     hsgp_num_basis_dev: 24          # eigenfunctions per deviatoric dimension
     hsgp_num_basis_vol: 32
     hsgp_num_basis_aniso: 0         # anisotropic recipes (material_params.angles): functions per fibre invariant
@@ -54,7 +58,8 @@ from plots.theme import apply_style, save_figure
 
 HSGP_DEFAULTS = dict(hsgp_force_noise_rel=0.0, hsgp_cv_folds=2, hsgp_cv_holdout="folds", hsgp_cv_tol=0.0,
                      hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_num_basis_aniso=0, hsgp_box_factor=8.0, hsgp_sigma_cap=10.0,
-                     hsgp_amplitude_prior_scale=0.0, hsgp_lengthscale_prior_scale=0.0, hsgp_hyper_restarts=1)
+                     hsgp_amplitude_prior_scale=0.0, hsgp_lengthscale_prior_scale=0.0, hsgp_hyper_restarts=1,
+                     hsgp_global_equilibrium=0.0, hsgp_opposite_reactions=0)
 
 
 def parse_args():
@@ -280,7 +285,8 @@ def main():
             amplitude_prior_scale=opt["hsgp_amplitude_prior_scale"], lengthscale_prior_scale=opt["hsgp_lengthscale_prior_scale"],
             hyper_restarts=bool(opt["hsgp_hyper_restarts"]), incompressible_plane_stress=incompressible_ps,
             sigma_f_rel=float(opt["hsgp_force_noise_rel"]) or None, cv_folds=int(opt["hsgp_cv_folds"]),
-            cv_tol=float(opt["hsgp_cv_tol"]),
+            cv_tol=float(opt["hsgp_cv_tol"]), global_equilibrium=float(opt["hsgp_global_equilibrium"]),
+            opposite_reactions=bool(int(float(opt["hsgp_opposite_reactions"]))),
             cv_data=cv_data, step_labels=labels, fibers=fibers,
             num_basis_aniso=int(opt["hsgp_num_basis_aniso"]) or None)
         fit_time = time.time() - t0

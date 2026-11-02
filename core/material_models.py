@@ -94,6 +94,19 @@ class IncompressiblePlaneStressView:
         return getattr(self._model, name)
 
 
+def reduce_incompressible_plane_stress_P(P, F):
+    """
+    3D dPsi/dF (..., 3, 3) at F with F33 = 1 / det F_2D -> the incompressible-plane-stress Piola stress, i.e. the
+    gradient of the reduced energy Psi(F_2D, 1 / det F_2D) (what the FEM data, the HSGP and IncompressiblePlaneStressView
+    use). Chain rule with dF33/dF_2D = -F33 F_2D^-T: P_red = P_2D - P33 F33 F_2D^-T; the out-of-plane entries are 0.
+    """
+    P = jnp.asarray(P)
+    F = jnp.broadcast_to(jnp.asarray(F), jnp.shape(P))
+    F2inv_T = jnp.swapaxes(jnp.linalg.inv(F[..., :2, :2]), -1, -2)
+    red = P[..., :2, :2] - (P[..., 2, 2] * F[..., 2, 2])[..., None, None] * F2inv_T
+    return jnp.zeros_like(P).at[..., :2, :2].set(red)
+
+
 def get_material_from_dir(dir_path: str, **kwargs) -> "BaseMaterialModel":
     """
     Instantiate a material model by loading the configuration from a saved model directory.

@@ -350,6 +350,10 @@ def main():
 
     psi_true = jax.vmap(true_model.psi)(F_all) if true_model is not None else None
     P_true = jax.vmap(jax.vmap(true_model.P))(F_all) if true_model is not None else None
+    ips = stress_mode == "plane_stress_incompressible"
+    if ips and P_true is not None:   # plane-stress stress of the reduced energy, as the GP (not the 3D dPsi/dF)
+        from core.material_models import reduce_incompressible_plane_stress_P
+        P_true = reduce_incompressible_plane_stress_P(P_true, F_all)
     psi_dist_mean = [learned_gp.psi_dist(F_all[mode]).mean for mode in range(len(mode_names))]
     psi_dist_var = [learned_gp.psi_dist(F_all[mode]).var for mode in range(len(mode_names))]
     P_dist_mean = [learned_gp.piola_dist(F_all[mode]).mean for mode in range(len(mode_names))]
@@ -471,6 +475,9 @@ def main():
             else:
                 s_psi, s_p = jax.vmap(lambda td, tv: get_distilled_energy_stress_split(td, tv, F_all[mode]))(dev_samples, vol_samples)
             dist_psi_samples.append(s_psi)
+            if ips:
+                from core.material_models import reduce_incompressible_plane_stress_P
+                s_p = reduce_incompressible_plane_stress_P(s_p, F_all[mode])
             dist_p_samples.append(s_p)
             # Convert (samples, num_points, 3, 3) to Cauchy
             s_sigma = jax.vmap(lambda p_samp: p_to_cauchy(p_samp, F_all[mode]))(s_p)

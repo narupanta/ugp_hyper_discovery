@@ -161,6 +161,25 @@ def main():
     F_all_steps_2x2 = prep_data["F"]  # [num_steps, num_elements, 2, 2]
     total_steps = F_all_steps_2x2.shape[0]
 
+    # out-of-plane stretch of the 2D states: plane strain F33 = 1; incompressible plane stress F33 = 1 / det F_2D (J = 1,
+    # as the data, the GP and a deviatoric-only distillation); compressible plane stress: the dataset's lambda_3
+    _stress = str(prep_data.get("stress_mode", "plane_strain"))
+    _ps_mode = str(prep_data.get("plane_stress_mode", "") or "")
+    _lam3_all = prep_data.get("lam3", None)
+
+    def promote_3d(F2, step=None, lam3_true=None):
+        F2 = np.asarray(F2, dtype=np.float64)
+        out = np.zeros(F2.shape[:-2] + (3, 3), dtype=np.float64)
+        out[..., :2, :2] = F2
+        if _stress == "plane_stress" and _ps_mode == "incompressible":
+            out[..., 2, 2] = 1.0 / np.linalg.det(F2)
+        elif _stress == "plane_stress" and (lam3_true is not None or (_lam3_all is not None and step is not None)):
+            out[..., 2, 2] = np.asarray(lam3_true if lam3_true is not None else _lam3_all[step]).reshape(F2.shape[:-2])
+        else:
+            out[..., 2, 2] = 1.0
+        return out
+    print(f"[R2 energy] states promoted to 3D as {_stress}{' (' + _ps_mode + ')' if _ps_mode else ''}", flush=True)
+
     # Look for clean (noiseless) FEM ground truth
     u_fem_gt = None
     F_fem_gt_2x2 = None
@@ -411,18 +430,15 @@ def main():
         F_step_2x2 = F_all_steps_2x2[step_idx]
         n_elems = F_step_2x2.shape[0]
         
-        # Promote to 3x3 plane strain
-        F_step_3x3 = np.zeros((n_elems, 3, 3), dtype=np.float64)
-        F_step_3x3[:, :2, :2] = F_step_2x2
-        F_step_3x3[:, 2, 2] = 1.0
+        # Promote to 3x3 (plane strain / plane stress, see promote_3d)
+        F_step_3x3 = promote_3d(F_step_2x2, step=step_idx)
         F_step_3x3_jnp = jnp.array(F_step_3x3)
 
         # Evaluate Ground Truth from noiseless FEM simulation if available, else from dataset F
         if F_fem_gt_2x2 is not None and step_idx < F_fem_gt_2x2.shape[0]:
             F_gt_step_2x2 = F_fem_gt_2x2[step_idx]
-            F_gt_step_3x3 = np.zeros((F_gt_step_2x2.shape[0], 3, 3), dtype=np.float64)
-            F_gt_step_3x3[:, :2, :2] = F_gt_step_2x2
-            F_gt_step_3x3[:, 2, 2] = 1.0
+            lam3_t = prep_data["lam3_true"][step_idx] if "lam3_true" in prep_data else None
+            F_gt_step_3x3 = promote_3d(F_gt_step_2x2, step=step_idx, lam3_true=lam3_t)
             F_gt_step_3x3_jnp = jnp.array(F_gt_step_3x3)
         else:
             F_gt_step_3x3_jnp = F_step_3x3_jnp
@@ -790,9 +806,7 @@ def main():
 
             # 1. Observed / Noisy kinematic invariants
             F_obs_2x2 = F_all_steps_2x2[rep_step]
-            F_obs_3x3 = np.zeros((F_obs_2x2.shape[0], 3, 3), dtype=np.float64)
-            F_obs_3x3[:, :2, :2] = F_obs_2x2
-            F_obs_3x3[:, 2, 2] = 1.0
+            F_obs_3x3 = promote_3d(F_obs_2x2, step=rep_step)
             feats_obs = jax.vmap(extractor.extract)(jnp.array(F_obs_3x3))
             i1_obs = np.array(feats_obs[0][:, 0])
             i2_obs = np.array(feats_obs[0][:, 1])

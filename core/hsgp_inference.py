@@ -113,7 +113,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              sigma_cap: float = 10.0, hyper_restarts: bool = True, incompressible_plane_stress: bool = False,
              sigma_f_rel: Optional[float] = None, cv_folds: int = 2, cv_grid=None, cv_tol: float = 0.0,
              cv_data: Optional[dict] = None, fibers=None, num_basis_aniso: Optional[int] = None,
-             step_labels=None, hyper_steps: int = 300, verbose: bool = True, log_fn=print):
+             step_labels=None, hyper_steps: int = 300, global_equilibrium: float = 0.0,
+             opposite_reactions: bool = False, verbose: bool = True, log_fn=print):
     """
     f3x3_steps: (T, C, 3, 3) measured deformation gradients of the training steps; R_obs, sigma_R: (T, 2).
     Several experiments (specimens with their own meshes) at once: pass f3x3_steps, R_obs, sigma_R, cells, node_type,
@@ -128,6 +129,15 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
       they never enter the fit.
     fibers: (a0, a1) in-plane fibre vectors (a1 may be None) for the anisotropic GP over (I4_bar, I6_bar), with
     num_basis_aniso functions per fibre invariant (default num_basis_dev); None: isotropic.
+    global_equilibrium c > 0: per step and direction one more observation, sum of the free-DOF internal forces = 0
+    with sigma_eq,t = c |R_t| (the body is in equilibrium, so the free residuals cannot all push one way; with one load
+    cell this is "support reaction = -load-cell reaction" without counting the load cell twice). The free residuals
+    are otherwise independent with sigma_f = s |R_t|, whose sum is only bounded by sqrt(n_free) s |R_t|; this row is an
+    extra Gaussian observation of the same rows (an approximation of a zero-sum residual model). 0: off.
+    opposite_reactions: the supports opposite the loaded edges (node types fixed-x / fixed-y, e.g. left and bottom of the
+    block, the clamped end of TTc) are used like the loaded edges: sum of their internal forces = -R_t (the same
+    measured force, opposite direction) with the same sigma_R, as two more reaction rows per step. The rows reuse the
+    load-cell reading, so they are not independent of the loaded-edge rows (the load-cell noise enters twice).
     amplitude_factor x energy_scale: prior centre of the amplitudes; sigma_cap: amplitudes capped at sigma_cap x that
     centre (<= 0: no cap); amplitude/lengthscale_prior_scale > 0: log-normal hyperpriors of that width (log units).
     Returns (HSGPHyperelasticity with the posterior, history: one record of the final solve).
@@ -145,7 +155,8 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         nt, c = np.asarray(nt), np.asarray(c)
         ix = build_eiv_indices(nt, c)
         meshes.append(dict(cells=jnp.asarray(c), n_nodes=nt.shape[0], dNdX=jnp.asarray(dn), dA=jnp.asarray(da),
-                           free=ix["dof_free"], rx=ix["dof_rx"], ry=ix["dof_ry"]))
+                           free=ix["dof_free"], rx=ix["dof_rx"], ry=ix["dof_ry"],
+                           fx=2 * np.where(nt[:, 1] == 1)[0], fy=2 * np.where(nt[:, 2] == 1)[0] + 1))
     step_exp, step_F, labels = [], [], []        # pooled steps: experiment index, F (C_e, 3, 3), label
     for e, Fe in enumerate(f3x3_steps):
         Fe = jnp.asarray(Fe, dtype=jnp.float64)
@@ -255,24 +266,47 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     force_fns = [jax.jit(lambda f, m=m: basis_force_matrix(model, f, m["cells"], m["n_nodes"], m["dNdX"], m["dA"]))
                  for m in meshes]
     force_fn = force_fns[0]
-    B_R_steps, step_stats = [], []
+    def reaction_rows(B, m):
+        """Reaction rows: loaded edges (x, y) [+ opposite supports (x, y)]."""
+        rows = [B[m["rx"]].sum(0), B[m["ry"]].sum(0)]
+        if opposite_reactions:
+            rows += [B[m["fx"]].sum(0), B[m["fy"]].sum(0)]
+        return jnp.stack(rows)
+
+    def reaction_targets(R, sR):
+        """Measured reactions and their noise for the rows of reaction_rows (supports: -R, same sigma)."""
+        return (jnp.concatenate([R, -R]), jnp.concatenate([sR, sR])) if opposite_reactions else (R, sR)
+    n_R = 4 if opposite_reactions else 2
+
+    B_R_steps, RT_steps, step_stats = [], [], []
     for t in all_idx:
         m = meshes[step_exp[t]]
         B = force_fns[step_exp[t]](step_F[t])
-        Bf, BR = B[m["free"]], jnp.stack([B[m["rx"]].sum(0), B[m["ry"]].sum(0)])
+        Bf, BR = B[m["free"]], reaction_rows(B, m)
         nf = len(m["free"])
         r2 = jnp.maximum(jnp.sum(R_obs[t] ** 2), 1e-30)
-        w = 1.0 / sigma_R[t] ** 2
-        step_stats.append(dict(Gf=Bf.T @ Bf / r2, logdetW_f=-nf * jnp.log(r2), GR=BR.T @ (w[:, None] * BR),
-                               bR=BR.T @ (w * R_obs[t]), yWy=jnp.sum(w * R_obs[t] ** 2), logdetW_R=jnp.sum(jnp.log(w)),
-                               n_free=float(nf)))
+        Rt, sRt = reaction_targets(R_obs[t], sigma_R[t])
+        w = 1.0 / sRt ** 2
+        GR, logdetW_R, n_eq = BR.T @ (w[:, None] * BR), jnp.sum(jnp.log(w)), 0.0
+        if global_equilibrium > 0:     # sum of the free internal forces per direction = 0 (target 0: no rhs term)
+            fr = np.asarray(m["free"])
+            Bg = jnp.stack([B[fr[fr % 2 == 0]].sum(0), B[fr[fr % 2 == 1]].sum(0)])
+            w_eq = 1.0 / (float(global_equilibrium) ** 2 * r2)
+            GR, logdetW_R, n_eq = GR + w_eq * (Bg.T @ Bg), logdetW_R + 2 * jnp.log(w_eq), 2.0
+        step_stats.append(dict(Gf=Bf.T @ Bf / r2, logdetW_f=-nf * jnp.log(r2), GR=GR,
+                               bR=BR.T @ (w * Rt), yWy=jnp.sum(w * Rt ** 2), logdetW_R=logdetW_R,
+                               n_free=float(nf), n_eq=n_eq))
         B_R_steps.append(BR)
+        RT_steps.append((Rt, sRt))
     if multi:
         log_fn(f"[HSGP] {len(meshes)} experiments pooled: steps per experiment "
                f"{[step_exp.count(e) for e in range(len(meshes))]}, free DOFs {[len(m['free']) for m in meshes]}")
     log_fn(f"[HSGP] residual likelihood: {T} load steps, {'+'.join(str(len(m['free'])) for m in meshes)} free DOFs, P = {P} weights "
            f"(dev {dev_box.num_basis}, vol {vol_box.num_basis}" + (f", aniso {an_box.num_basis}" if aniso_on else "")
-           + f"); basis forces assembled in {time.time() - t0:.0f}s")
+           + f"); basis forces assembled in {time.time() - t0:.0f}s"
+           + (f"; global equilibrium rows sigma = {global_equilibrium:g} |R_t|" if global_equilibrium > 0 else "")
+           + (f"; opposite supports as reactions (-R_t): {len(meshes[0]['fx'])} x / {len(meshes[0]['fy'])} y DOFs"
+              if opposite_reactions else ""))
 
     def sqrt_factor(G):
         d, U = jnp.linalg.eigh(0.5 * (G + G.T))
@@ -282,9 +316,10 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         """Summed statistics of the active steps at free-residual scale s, with square-root factors of the Grams."""
         st = {k: sum(step_stats[t][k] for t in active) for k in step_stats[0]}
         nf_tot = st.pop("n_free")                          # free DOFs summed over the active steps (per mesh)
+        n_eq = st.pop("n_eq")                              # global-equilibrium rows (0 when off)
         st["Gf"], st["logdetW_f"] = st["Gf"] / s ** 2, st["logdetW_f"] - nf_tot * np.log(s ** 2)
         st["Rf"], st["RR"] = sqrt_factor(st["Gf"]), sqrt_factor(st["GR"])
-        st["n_obs"] = float(nf_tot + 2 * len(active))
+        st["n_obs"] = float(nf_tot + n_R * len(active) + n_eq)
         return st
 
     def posterior_factors(eta, st):
@@ -338,7 +373,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     def heldout_score(m, Fc, t, BR=None, R=None, sR=None):
         """log N(R_t; B_R m, Sigma_R,t + B_R S B_R^T), S = Fc Fc^T (held-out reactions only); BR/R/sR: a step
         outside the training set."""
-        BR, R, sR = (B_R_steps[t], R_obs[t], sigma_R[t]) if BR is None else (BR, R, sR)
+        BR, (R, sR) = (B_R_steps[t], RT_steps[t]) if BR is None else (BR, reaction_targets(R, sR))
         UR = BR @ Fc
         C = jnp.diag(sR ** 2) + UR @ UR.T
         d = R - BR @ m
@@ -358,7 +393,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             v_BR = []
             for v in range(v_F.shape[0]):
                 B = force_fn(v_F[v])
-                v_BR.append(jnp.stack([B[rx].sum(0), B[ry].sum(0)]))
+                v_BR.append(reaction_rows(B, meshes[0]))
             folds = []
             log_fn(f"[HSGP] cross-validation: fit on training steps {labels}, score validation steps {v_lab}")
 
@@ -418,6 +453,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                + (f" | aniso sig {rec['aniso_sig']:.3g} l {np.round(rec['aniso_ls'], 3)}" if aniso_on else "")
                + f" ({rec['time']:.0f}s)")
     info = dict(likelihood="residual_exact", sigma_f_rel=float(sigma_f_rel), force_noise_cv=cv, converged=True,
+                global_equilibrium=float(global_equilibrium), opposite_reactions=bool(opposite_reactions),
                 outer_iterations=1, log_evidence=res["log_z"], valid_load_steps=labels, truncated=False,
                 sigma_cap=sigma_cap, hyper_restarts=hyper_restarts, box_factor=box_factor,
                 num_basis_dev=num_basis_dev, num_basis_vol=num_basis_vol,
