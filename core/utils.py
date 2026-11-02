@@ -576,7 +576,7 @@ def infer_material_model_name(path: str) -> str:
     known_models = [
         "full_isotropic", "full_iso", "iso_full", "poly_iso",
         "symnonortho60", "neohookean4", "neohookean2", "c20_d10_d05", "c20d10d05",
-        "gentthomas", "ortho45", "ortho090", "ortho900", "aniso30", "aniso45", "isihara", "nh4", "nh2", "nh"
+        "gentthomas", "ortho45", "ortho090", "ortho900", "aniso2f", "aniso30", "aniso45", "isihara", "nh4", "nh2", "nh"
     ]
     abs_path = os.path.abspath(path)
     # Check optimization_log.txt first if it exists in the directory, parent, or extraction subfolder

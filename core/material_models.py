@@ -491,6 +491,16 @@ class Aniso30(HyperelasticModel):
         super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
 
 
+@register_material("aniso2f")
+class Aniso2F(HyperelasticModel):
+    """Two fibre families at the recipe's angles (any pair, e.g. +-30 deg) on a GMR matrix: the general anisotropic
+    test material (configs/recipes_v2/aniso2f_hsgp_residual_cv.yaml). Same energy as HyperelasticModel."""
+    def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, **kwargs):
+        if dev_params is None or vol_params is None or aniso_params is None or angles is None:
+            raise ValueError("Aniso2F requires 'dev_params', 'vol_params', 'aniso_params', and 'angles' from configuration.")
+        super().__init__(dev_params=dev_params, vol_params=vol_params, aniso_params=aniso_params, angles=angles, **kwargs)
+
+
 @register_material("aniso45")
 class Aniso45(HyperelasticModel):
     def __init__(self, dev_params=None, vol_params=None, aniso_params=None, angles=None, **kwargs):
