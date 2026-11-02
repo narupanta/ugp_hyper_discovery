@@ -212,6 +212,12 @@ get_cfg_default() {
 
 CUSTOM_DATASET_PATH=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('dataset_path', ''))" 2>/dev/null || echo "")
 HAS_GT=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('has_ground_truth', True))" 2>/dev/null || echo "True")
+# experimental data: published reference model for comparison plots and an extra FEM solve (recipe reference_model,
+# default euclid when has_ground_truth is false; "none" = off). Only the first key is used for the FEM solve.
+REF_MODEL=$(python3 -c "
+import yaml; d = yaml.safe_load(open('$CONFIG_YAML'))
+r = d.get('reference_model', 'euclid' if str(d.get('has_ground_truth', True)).lower() == 'false' else None)
+print('' if r in (None, 'none', '') else (r[0] if isinstance(r, list) else r))" 2>/dev/null || echo "")
 if [ -n "$CUSTOM_DATASET_PATH" ] || [ "$HAS_GT" == "False" ] || [ "$HAS_GT" == "false" ]; then
     RUN_GEN=false
 fi
@@ -647,6 +653,13 @@ for SEED in $SEEDS_LIST; do
             --saved_model_dir "$EXTRACT_DIR" \
             --material_model "$DIST_MODEL" \
             --distill_target "$DIST_TARGET" || true
+        if [ -n "$REF_MODEL" ]; then   # same mode plots against the reference model (files *_ref<key>.pdf)
+            python3 plots/plot_distilled_validation.py \
+                --distilled_dir "$DISTILL_DIR" \
+                --saved_model_dir "$EXTRACT_DIR" \
+                --material_model "$DIST_MODEL" \
+                --distill_target "$DIST_TARGET" --reference "$REF_MODEL" || true
+        fi
 
         python3 plots/plot_split_summary.py \
             --distilled_dir "$DISTILL_DIR" \
@@ -709,21 +722,23 @@ for SEED in $SEEDS_LIST; do
         export XLA_PYTHON_CLIENT_PREALLOCATE=false
         export XLA_PYTHON_CLIENT_MEM_FRACTION=0.40
 
-        if [ "$GEOMETRY_TRAIN" == "ttc" ] || [ "$GEOMETRY_VAL" == "ttc" ]; then
-            mkdir -p "$VAL_DIR/ttc"
+        SPEC_GEOM=""   # experimental specimen geometry (FEM on the specimen's own mesh and measured boundary data)
+        for G in ttc tte; do [ "$GEOMETRY_TRAIN" == "$G" ] || [ "$GEOMETRY_VAL" == "$G" ] && SPEC_GEOM=$G; done
+        if [ -n "$SPEC_GEOM" ]; then
+            mkdir -p "$VAL_DIR/$SPEC_GEOM"
             VAL_DATASET_TTC="${TRAIN_DATASET_PATH}"
 
-            echo "Running FEM workers for ttc geometry..."
+            echo "Running FEM workers for $SPEC_GEOM geometry..."
             TTC_PIDS=()
             for ((w=0; w<VAL_WORKERS; w++)); do
-                W_LOG="$VAL_DIR/ttc/worker_${w}.log"
+                W_LOG="$VAL_DIR/$SPEC_GEOM/worker_${w}.log"
                 python3 validation/forward_fem_distilled_piola_sample.py \
                     --distilled_dir "$DISTILL_DIR" \
                     --material_model "$DIST_MODEL" \
                     --dataset_path "$VAL_DATASET_TTC" \
                     --n_sample "$VAL_SAMPLES" \
-                    --output_dir "$VAL_DIR/ttc" \
-                    --geometry "ttc" \
+                    --output_dir "$VAL_DIR/$SPEC_GEOM" \
+                    --geometry "$SPEC_GEOM" \
                     --target_load "$TOP_LOAD" \
                     --asym_factor "$ASYM" \
                     --control_mode "$CONTROL_MODE" \
@@ -739,8 +754,17 @@ for SEED in $SEEDS_LIST; do
             done
 
             if [ "$VAL_WORKERS" -gt 1 ]; then
-                echo "Merging TTC worker outputs..."
-                python3 validation/merge_fem_workers.py --folder "$VAL_DIR/ttc"
+                echo "Merging $SPEC_GEOM worker outputs..."
+                python3 validation/merge_fem_workers.py --folder "$VAL_DIR/$SPEC_GEOM"
+            fi
+            if [ -n "$REF_MODEL" ] && [ ! -f "$VAL_DIR/$SPEC_GEOM/gt/u_ref_${REF_MODEL}.npz" ]; then
+                echo "FEM with the reference model $REF_MODEL on $SPEC_GEOM..."
+                python3 validation/forward_fem_distilled_piola_sample.py \
+                    --distilled_dir "$DISTILL_DIR" --material_model "$DIST_MODEL" \
+                    --dataset_path "$VAL_DATASET_TTC" --n_sample 1 --output_dir "$VAL_DIR/$SPEC_GEOM" \
+                    --geometry "$SPEC_GEOM" --control_mode "$CONTROL_MODE" --stress_mode "$STRESS_MODE" \
+                    --clamp_top_x 0 --reference "$REF_MODEL" > "$VAL_DIR/$SPEC_GEOM/reference_${REF_MODEL}.log" 2>&1 \
+                    || echo "  reference FEM failed (see $VAL_DIR/$SPEC_GEOM/reference_${REF_MODEL}.log)"
             fi
         else
             mkdir -p "$VAL_DIR/block"
@@ -824,7 +848,7 @@ for SEED in $SEEDS_LIST; do
             FEM_VAL_STEPS="${TEST_LOAD_STEPS_INDICES:-$VAL_LOAD_STEPS_INDICES}"
 
             # If worker files exist but consolidated fem_distilled_samples.npz doesn't exist, merge them
-            for GEOM_DIR in "$VAL_DIR/block" "$VAL_DIR/holes" "$VAL_DIR/ttc"; do
+            for GEOM_DIR in "$VAL_DIR/block" "$VAL_DIR/holes" "$VAL_DIR/ttc" "$VAL_DIR/tte"; do
                 if [ -d "$GEOM_DIR" ] && [ ! -f "$GEOM_DIR/fem_distilled_samples.npz" ]; then
                     if ls "$GEOM_DIR"/fem_distilled_samples_worker*.npz 1> /dev/null 2>&1; then
                         echo "Merging worker outputs in $GEOM_DIR..."
@@ -833,13 +857,15 @@ for SEED in $SEEDS_LIST; do
                 fi
             done
 
-            if [ -d "$VAL_DIR/ttc" ] && [ -f "$VAL_DIR/ttc/fem_distilled_samples.npz" ]; then
-                echo "Generating UQ displacement verification plots for TTC (evaluating steps: $FEM_VAL_STEPS)..."
-                python3 plots/uq_verification_disp.py \
-                    --model_path "$VAL_DIR/ttc" \
-                    --validation_load_step_indices $FEM_VAL_STEPS \
-                    --n_sample "$VAL_SAMPLES" || true
-            fi
+            for SG in ttc tte; do      # specimen geometries (reference-model rows are added when gt/u_ref_*.npz exist)
+                if [ -d "$VAL_DIR/$SG" ] && [ -f "$VAL_DIR/$SG/fem_distilled_samples.npz" ]; then
+                    echo "Generating UQ displacement verification plots for $SG (evaluating steps: $FEM_VAL_STEPS)..."
+                    python3 plots/uq_verification_disp.py \
+                        --model_path "$VAL_DIR/$SG" \
+                        --validation_load_step_indices $FEM_VAL_STEPS \
+                        --n_sample "$VAL_SAMPLES" || true
+                fi
+            done
 
             # Block/holes displacement and reaction plots: one 2x2 figure per geometry (plots/plot_fem_validation_2x2.py,
             # run after the validation metrics below so its coverages are added to validation_metrics.json).

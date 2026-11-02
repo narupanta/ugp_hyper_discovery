@@ -95,6 +95,12 @@ for k in ('angles', 'dev_params', 'vol_params', 'aniso_params', 'mu_params', 'al
         out += ['--' + k] + [str(x) for x in (v if isinstance(v, list) else [v])]
 print(' '.join(out))")
 if [ -n "$SEEDS_CLI" ]; then SEEDS_LIST="${SEEDS_CLI//,/ }"; else SEEDS_LIST=$(cfg seeds 42); fi
+# experimental data (has_ground_truth: false): reference model(s) drawn on the plots (recipe reference_model, default
+# euclid; "none" switches it off; keys of plots/plot_reference_energy.REFERENCES)
+REF_MODEL=$(python3 -c "
+import yaml; d = yaml.safe_load(open('$CONFIG_YAML'))
+r = d.get('reference_model', 'euclid' if str(d.get('has_ground_truth', True)).lower() == 'false' else None)
+print('' if r in (None, 'none', '') else (' '.join(r) if isinstance(r, list) else r))")
 
 echo "========================================================================"
 echo "HSGP experiment: $EXPERIMENT_DIR"
@@ -129,6 +135,10 @@ for SEED in $SEEDS_LIST; do
     if [ "$SKIP_PLOTS" = false ]; then
         echo "--- HSGP plots and metrics (seed $SEED)"
         python3 extraction/train_hsgp.py "${COMMON[@]}" --phase plot
+        if [ -n "$REF_MODEL" ]; then   # experimental data: the published reference model on the GP energy plots
+            python3 plots/plot_reference_energy.py --extract_dir "$EXTRACT_DIR" --references $REF_MODEL \
+                > "$EXTRACT_DIR/reference_energy.log" 2>&1 || echo "  reference energy plot failed (see $EXTRACT_DIR/reference_energy.log)"
+        fi
     fi
     echo "Seed $SEED done -> $EXTRACT_DIR"
 done

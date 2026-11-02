@@ -23,8 +23,11 @@ def plot_export(export_dir, saved_model_dir=None, gp=None, label=None):
     saved_model_dir = saved_model_dir or os.path.dirname(export_dir)
     gp = gp or HSGPHyperelasticity.load(os.path.join(saved_model_dir, "hsgp_posterior.npz"))
     F = jnp.asarray(np.load(os.path.join(export_dir, "f3x3.npy")))
-    dev, vol = jax.vmap(gp.feature_extractor.extract)(F)[:2]
-    picked = np.concatenate([np.asarray(dev), np.asarray(vol)], axis=1)
+    feats = jax.vmap(gp.feature_extractor.extract)(F)
+    cols = [np.asarray(feats[0]), np.asarray(feats[1])]          # I1_bar, I2_bar, J
+    if getattr(gp, "is_anisotropic", False):
+        cols.append(np.asarray(feats[2])[:, :2])                 # I4_bar, I6_bar (fibre panel)
+    picked = np.concatenate(cols, axis=1)
     I_obs = np.load(os.path.join(saved_model_dir, "I_obs_all.npy"))
     label = label or "export: " + os.path.basename(export_dir).replace("pytorch_export_", "")
     plot_invariant_space_modes(gp, export_dir, I_obs, picked=picked, picked_label=label,

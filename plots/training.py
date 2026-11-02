@@ -828,7 +828,9 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
     the gamma value where each path leaves the hull. (a) full range in mode-separating coordinates: I1_bar - 3 (log)
     against the ratio (I2_bar - 3) / (I1_bar - 3) (< 1: uniaxial-type stretch, > 1: biaxial-type; all paths share the
     diagonal in plain (I1, I2)); (b) linear zoom on the data in (I1_bar - 3, I2_bar - 3). For a
-    compressible model, (c) J along each mode against the observed J range.
+    compressible model, (c) J along each mode against the observed J range. For an anisotropic GP (I_obs columns
+    3, 4 = I4_bar, I6_bar), a last panel shows the fibre invariants I4_bar against I6_bar with their hull, and a mode
+    counts as leaving the data when it leaves EITHER the (I1_bar, I2_bar) hull or the (I4_bar, I6_bar) hull.
     picked: optional (N, 3) GP inputs (I1_bar, I2_bar, J) of selected states (e.g. the distillation export points),
     drawn on top of the data in (a), (b) and as a J histogram in (c).
     """
@@ -837,9 +839,9 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
     apply_style()
     I_obs = np.asarray(I_obs).reshape(-1, np.asarray(I_obs).shape[-1])
     dev_obs, vol_obs = I_obs[:, :2], I_obs[:, 2:3]
-    try:
-        hull = ConvexHull(dev_obs)
-        eqs, poly = hull.equations, dev_obs[hull.vertices]
+    try:   # the reference state F = I (I1_bar = I2_bar = 3) is known exactly (zero energy and stress): part of the data
+        hull = ConvexHull(np.vstack([dev_obs, [[3.0, 3.0]]]))
+        eqs, poly = hull.equations, np.vstack([dev_obs, [[3.0, 3.0]]])[hull.vertices]
     except QhullError:
         lo, hi = dev_obs.min(0), dev_obs.max(0)
         eqs = np.array([[-1, 0, lo[0]], [1, 0, -hi[0]], [0, -1, lo[1]], [0, 1, -hi[1]]], dtype=float)
@@ -847,7 +849,18 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
     gamma = jnp.linspace(0.0, gamma_max, n_gamma)
     F_all = standard_mode_F(learned_gp, gamma)
     incompressible = getattr(learned_gp, "incompressible_plane_stress", False)
-    n_panels = 2 if incompressible else 3
+    aniso = bool(getattr(learned_gp, "is_anisotropic", False)) and I_obs.shape[1] >= 5
+    if aniso:                               # fibre invariants (I4_bar, I6_bar) of the training states and their hull
+        an_obs = I_obs[:, 3:5]
+        an_ref = np.vstack([an_obs, [[1.0, 1.0]]])    # with the reference state F = I (I4_bar = I6_bar = 1)
+        try:
+            hull_an = ConvexHull(an_ref)
+            eqs_an, poly_an = hull_an.equations, an_ref[hull_an.vertices]
+        except QhullError:
+            lo_a, hi_a = an_obs.min(0), an_obs.max(0)
+            eqs_an = np.array([[-1, 0, lo_a[0]], [1, 0, -hi_a[0]], [0, -1, lo_a[1]], [0, 1, -hi_a[1]]], dtype=float)
+            poly_an = np.array([[lo_a[0], lo_a[1]], [hi_a[0], lo_a[1]], [hi_a[0], hi_a[1]], [lo_a[0], hi_a[1]]])
+    n_panels = (2 if incompressible else 3) + (1 if aniso else 0)
     fig, axes = plt.subplots(1, n_panels, figsize=(5.2 * n_panels, 4.6))
     rng = np.random.default_rng(0)
     sub = dev_obs[rng.choice(len(dev_obs), min(len(dev_obs), 6000), replace=False)]
@@ -871,11 +884,31 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
             pk = np.asarray(picked).reshape(-1, np.asarray(picked).shape[-1])
             ax.scatter(*tf(pk[:, 0], pk[:, 1]), s=22, marker="x", c="#111111", lw=1.0, zorder=6,
                        label=f"{picked_label} (N = {len(pk)})")
+    if aniso:
+        ax_an = axes[-1]
+        sub_an = an_obs[rng.choice(len(an_obs), min(len(an_obs), 6000), replace=False)]
+        ax_an.scatter(sub_an[:, 0], sub_an[:, 1], s=3, c="#9e9e9e", alpha=0.35, lw=0, label="training invariants")
+        closed_an = np.vstack([poly_an, poly_an[:1]])
+        ax_an.fill(closed_an[:, 0], closed_an[:, 1], color="#4caf50", alpha=0.12, lw=0)
+        ax_an.plot(closed_an[:, 0], closed_an[:, 1], color="#2e7d32", lw=1.2, label="interpolation region (hull)")
+        if picked is not None and np.asarray(picked).reshape(-1, np.asarray(picked).shape[-1]).shape[1] >= 5:
+            pk_an = np.asarray(picked).reshape(-1, np.asarray(picked).shape[-1])[:, 3:5]
+            ax_an.scatter(pk_an[:, 0], pk_an[:, 1], s=22, marker="x", c="#111111", lw=1.0, zorder=6,
+                          label=f"{picked_label} (N = {len(pk_an)})")
+        an_paths = []
     for m in range(6):
         feats = jax.vmap(learned_gp.feature_extractor.extract)(F_all[m])
         dev_m, vol_m = np.asarray(feats[0]), np.asarray(feats[1])
         inside = np.all(dev_m @ eqs[:, :-1].T + eqs[:, -1] <= 1e-3, axis=1)
-        exits = [k for k in range(1, n_gamma) if inside[k - 1] and not inside[k]]
+        if aniso:                           # outside the data if either input pair leaves its hull
+            an_m = np.asarray(feats[2])[:, :2]
+            inside_an = np.all(an_m @ eqs_an[:, :-1].T + eqs_an[:, -1] <= 1e-3, axis=1)
+            inside = inside & inside_an
+            an_paths.append(an_m)
+        # first point after the reference state F = I that is outside the data (F = I itself can lie just outside the
+        # hull, e.g. when every training state stretches a fibre; a path that starts outside then leaves at once)
+        out_k = np.where(~inside[1:])[0]
+        exits = [int(out_k[0]) + 1] if len(out_k) else []
         g_exit = float(gamma[exits[0]]) if exits else None
         summary[MODE_NAMES[m]] = g_exit
         col = MODE_COLORS[m]
@@ -888,6 +921,12 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
                 ax.plot(px, py, "x", color=col, ms=9, mew=2.2)
                 ax.annotate(f"{float(gamma[k]):.2f}", (float(px[0]), float(py[0])), textcoords="offset points",
                             xytext=(5, 4), fontsize=8, color=col)
+        if aniso:
+            ax_an.plot(an_m[:, 0], an_m[:, 1], color=col, lw=1.8)
+            for k in exits:
+                ax_an.plot(an_m[k, 0], an_m[k, 1], "x", color=col, ms=9, mew=2.2)
+                ax_an.annotate(f"{float(gamma[k]):.2f}", (float(an_m[k, 0]), float(an_m[k, 1])),
+                               textcoords="offset points", xytext=(5, 4), fontsize=8, color=col)
         if not incompressible:
             ax = axes[2]
             ax.plot(np.asarray(gamma), vol_m[:, 0], color=col, lw=1.8, label=MODE_SHORT_NAMES[m])
@@ -917,6 +956,24 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
                     label=f"{picked_label} J")
         ax.set_xlabel(r"$\gamma$"); ax.set_ylabel("J (volumetric GP input)"); ax.grid(alpha=0.3)
         ax.set_title("(c) Volumetric input along the modes"); ax.legend(fontsize=7.5, frameon=False)
+    if aniso:
+        lo_d, hi_d = an_obs.min(0), an_obs.max(0)
+        span = np.maximum(hi_d - lo_d, 1e-3)
+        lo_v = np.minimum(lo_d - 0.15 * span, np.min([p.min(0) for p in an_paths], axis=0))
+        lo_v = np.maximum(lo_v, lo_d - 0.6 * span)       # paths can run far; keep the data readable
+        hi_v = hi_d + 0.4 * span
+        lim_lo, lim_hi = float(min(lo_v)), float(max(hi_v))
+        ax_an.plot([lim_lo, lim_hi], [lim_lo, lim_hi], ls="--", color="#555555", lw=0.9, label=r"$\bar I_4 = \bar I_6$")
+        ax_an.axvline(1.0, color="#999999", lw=0.7, ls=":")
+        ax_an.axhline(1.0, color="#999999", lw=0.7, ls=":")
+        ax_an.set_xlim(lim_lo, lim_hi)
+        ax_an.set_ylim(lim_lo, lim_hi)
+        ax_an.set_aspect("equal", adjustable="box")
+        ax_an.set_xlabel(r"$\bar I_4$ (fibre family 1)")
+        ax_an.set_ylabel(r"$\bar I_6$ (fibre family 2)")
+        ax_an.set_title(f"({'abcd'[n_panels - 1]}) Fibre invariants (< 1: fibre compressed)")
+        ax_an.grid(alpha=0.3)
+        ax_an.legend(fontsize=7.5, loc="upper left", frameon=False)
     fig.suptitle("Invariant space: data, interpolation region and standard deformation modes", fontsize=12)
     fig.tight_layout()
     save_figure(fig, os.path.join(save_path, filename))

@@ -75,6 +75,8 @@ def main():
     if learned_gp is not None:
         I_z = None
         dev_z, vol_z, aniso_z = learned_gp.dev_z, learned_gp.vol_z, None
+        # fibre directions of the distilled anisotropic terms: those of the fibre GP
+        feature_extractor = learned_gp.feature_extractor if getattr(learned_gp, "is_anisotropic", False) else None
         min_dev, max_dev = dev_z.min(0), dev_z.max(0)
         min_vol, max_vol = vol_z.min(0), vol_z.max(0)
         min_aniso = max_aniso = None

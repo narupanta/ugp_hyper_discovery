@@ -929,13 +929,29 @@ def main():
     except Exception:
         true_model = None
 
-    theta1 = np.pi / 4.0
-    theta2 = -np.pi / 4.0
-    if true_model is not None and getattr(true_model, "a1", None) is not None and getattr(true_model, "a2", None) is not None:
-        theta1 = float(np.arctan2(true_model.a1[1], true_model.a1[0]))
-        theta2 = float(np.arctan2(true_model.a2[1], true_model.a2[0]))
+    # fibre directions of the anisotropic library: those of the fibre GP (the directions the teacher was fitted with),
+    # else the true material's. Materials name their two families (a0, a1) or (a1, a2).
+    theta1, theta2, theta_src = np.pi / 4.0, -np.pi / 4.0, "default (+-45 deg)"
+    ang = lambda v: float(np.arctan2(float(v[1]), float(v[0])))
+    try:
+        from core.teacher import load_hsgp_teacher
+        _teacher = load_hsgp_teacher(args.saved_model_dir)
+    except Exception:
+        _teacher = None
+    if _teacher is not None and getattr(_teacher, "is_anisotropic", False) and getattr(_teacher, "a0", None) is not None:
+        theta1 = ang(_teacher.a0)
+        a_second = getattr(_teacher, "a1", None)
+        theta2 = ang(a_second) if a_second is not None else theta1 + np.pi / 2.0
+        theta_src = "fibre GP"
+    elif true_model is not None and getattr(true_model, "a1", None) is not None and getattr(true_model, "a2", None) is not None:
+        theta1, theta2, theta_src = ang(true_model.a1), ang(true_model.a2), "true material (a1, a2)"
+    elif true_model is not None and getattr(true_model, "a0", None) is not None and getattr(true_model, "a1", None) is not None:
+        theta1, theta2, theta_src = ang(true_model.a0), ang(true_model.a1), "true material (a0, a1)"
     elif true_model is not None and getattr(true_model, "a0", None) is not None:
-        theta1 = float(np.arctan2(true_model.a0[1], true_model.a0[0]))
+        theta1, theta_src = ang(true_model.a0), "true material (a0; second family default)"
+    if args.component == "aniso" or args.material_model in ["gmr_aniso", "aniso_gmr"]:
+        print(f"Fibre directions of the anisotropic library: {np.degrees(theta1):.2f} and {np.degrees(theta2):.2f} deg "
+              f"({theta_src})")
 
     mock_gp = MockGP(mean_psi, cov_psi, device=device, sampling_mode=sampling_mode, L=L_tensor)
     include_log = args.material_model not in ["gmr_nolog", "gmr_no_log"]

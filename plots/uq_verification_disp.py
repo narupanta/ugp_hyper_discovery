@@ -748,17 +748,20 @@ if __name__ == "__main__" :
     else:
         u_pred_piola_traction_samples = None
 
-    is_ttc = (pred_dir_name.name.lower() == "ttc") or ("ttc" in pred_dir_name.parts)
+    is_ttc = any(g == pred_dir_name.name.lower() or g in pred_dir_name.parts for g in ("ttc", "tte"))   # specimens
     is_holes = (pred_dir_name.name.lower() == "holes") or ("holes" in pred_dir_name.parts)
     is_block = (not is_holes) and (not is_ttc)
 
-    if is_ttc:
+    if is_ttc and "tte" not in pred_dir_name.parts and pred_dir_name.name.lower() != "tte":
         targets = np.array([
             [-80.0, 0.0],
             [-56.0, 0.0],
             [-56.0, 15.0],
             [-30.0, 0.0]
         ])
+    elif is_ttc:   # other specimens: the same relative positions in the mesh's bounding box
+        lo, hi = mesh_node_coords.min(0), mesh_node_coords.max(0)
+        targets = lo + np.array([[0.15, 0.5], [0.5, 0.5], [0.5, 0.75], [0.85, 0.5]]) * (hi - lo)
     else:
         targets = np.array([
             [0.0707, 0.0707],
