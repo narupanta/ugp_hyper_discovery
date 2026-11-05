@@ -4,7 +4,7 @@ the models identified on the same data set by Flaschel et al. (EUCLID and the GM
 
 Panels (top) W along uniaxial tension, pure shear and equibiaxial tension (incompressible, plane stress) with the GP
 mean and 95% band; (bottom) the nominal stress P11 = dW/dlambda along UT and PS (1/2 dW/dlambda for EBT) and the
-energy parity at all observed states. The stretch range the data cover (the convex hull of the observed (I1, I2))
+energy parity at all observed states. The stretch range the data cover (the concave data region of the observed (I1, I2), plots.training.DataRegion)
 is unshaded; beyond it the GP extrapolates.
 
 Usage:
@@ -133,9 +133,9 @@ def main():
     I_obs = np.load(os.path.join(args.extract_dir, "I_obs_all.npy")).reshape(-1, 3)
     dev_obs = I_obs[:, :2]
 
-    from scipy.spatial import ConvexHull
-    hull = ConvexHull(np.vstack([dev_obs, [[3.0, 3.0]]]))
-    inside = lambda d: np.all(d @ hull.equations[:, :-1].T + hull.equations[:, -1] <= 1e-6 * (1 + np.abs(d).max()), axis=1)
+    # data region of the observed (I1, I2): the same concave hull as the extraction plots (plots.training)
+    from plots.training import deviatoric_region
+    inside = deviatoric_region(dev_obs).contains
 
     phi_feat = jax.jit(lambda dev: gp.basis_from_features(dev, jnp.ones(dev.shape[:-1] + (1,))))
     m, Fc = np.asarray(gp.theta_mean), np.asarray(gp.theta_factor)
@@ -175,7 +175,7 @@ def main():
         return float(lam[out[0]]) if len(out) else float(lam[-1])
 
     lam_data = {k: data_lambda_max(k) for k in MODES}
-    print("stretch range inside the data hull:", {k: round(v, 3) for k, v in lam_data.items()})
+    print("stretch range inside the data region:", {k: round(v, 3) for k, v in lam_data.items()})
     refs = list(dict.fromkeys(args.references))
     style = {}
     for i, k in enumerate(r for r in refs if r != "euclid"):

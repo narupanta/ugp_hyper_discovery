@@ -578,24 +578,21 @@ def compute_interpolation_masks(learned_gp, F_all, I_obs=None, dev_tol: float = 
         I_obs = np.concatenate(parts, axis=-1)
     I_obs = np.asarray(I_obs).reshape(-1, np.asarray(I_obs).shape[-1])
     dev_obs, vol_obs, aniso_obs = I_obs[:, :2], I_obs[:, 2:3], I_obs[:, 3:]
-
-    try:
-        hull_eqs = ConvexHull(dev_obs).equations
-    except QhullError:  # degenerate (e.g. collinear) data: fall back to the bounding box
-        lo, hi = dev_obs.min(0), dev_obs.max(0)
-        hull_eqs = np.array([[-1, 0, lo[0]], [1, 0, -hi[0]], [0, -1, lo[1]], [0, 1, -hi[1]]], dtype=float)
+    # data support: concave hulls (DataRegion) including the reference state F = I (zero energy and stress)
+    region_dev = deviatoric_region(dev_obs)
+    region_an = fibre_region(aniso_obs[:, :2]) if aniso_obs.shape[1] >= 2 else None
+    vol_obs = np.vstack([vol_obs, [[1.0]]])
     vol_lo, vol_hi = vol_obs.min() - vol_tol, vol_obs.max() + vol_tol
 
     masks = {"dev": [], "vol": [], "aniso": [], "tot": []}
     for mode in range(F_all.shape[0]):
         feats = jax.vmap(learned_gp.feature_extractor.extract)(F_all[mode])
         dev_m, vol_m = np.asarray(feats[0]), np.asarray(feats[1])
-        in_dev = np.all(dev_m @ hull_eqs[:, :-1].T + hull_eqs[:, -1] <= dev_tol, axis=1)
+        in_dev = region_dev.contains(dev_m)
         in_vol = (vol_m[:, 0] >= vol_lo) & (vol_m[:, 0] <= vol_hi)
         in_aniso = np.ones_like(in_dev)
-        if len(feats) > 2 and aniso_obs.shape[1] > 0:
-            a_m = np.asarray(feats[2])
-            in_aniso = np.all((a_m >= aniso_obs.min(0) - dev_tol) & (a_m <= aniso_obs.max(0) + dev_tol), axis=1)
+        if len(feats) > 2 and region_an is not None:
+            in_aniso = region_an.contains(np.asarray(feats[2])[:, :2])
         masks["dev"].append(in_dev)
         masks["vol"].append(in_vol)
         masks["aniso"].append(in_aniso)
@@ -820,6 +817,119 @@ def plot_stress_validation(gp_model, true_model, save_path):
     plt.close(fig)
 
 
+class DataRegion:
+    """
+    Region of a 2D input space covered by the training states: a concave hull (alpha shape) instead of the convex
+    hull, which over-states sparse data (e.g. the empty area above a narrow band of states).
+      - the points (with an optional reference point, e.g. F = I) are thinned on a grid of `frac` x their range per
+        axis, the thinned points triangulated (Delaunay), and the triangles with circumradius <= k x (95% quantile of
+        the thinned nearest-neighbour spacing) kept;
+      - a point is inside when it lies in a kept triangle or close to a training state (states on a curved edge of
+        the band fall just outside the straight triangle edges): within one grid cell (its diagonal), and with a
+        reference point within 5% of the point's distance from it (near F = I the invariants are small, so an
+        absolute allowance would let every mode count as inside there); points closer to the reference than its 10th
+        nearest training state are inside (the GP is pinned there).
+    near_transform / near_scale: optional map (n, 2) -> (n, 2) and per-axis scale in which "close to a training
+    state" is measured in addition (distance <= 1 after dividing by the scale), e.g. the deviatoric mode-separating
+    coordinates (log10(I1_bar - 3), (I2_bar - 3) / (I1_bar - 3)): similar strain level and mode at any strain size.
+    Falls back to the convex hull when the points are degenerate.
+    """
+    def __init__(self, points, reference=None, k: float = 4.0, frac: float = 0.01, near_transform=None, near_scale=None):
+        from scipy.spatial import Delaunay, cKDTree, QhullError
+        P = np.asarray(points, dtype=float).reshape(-1, 2)
+        self.reference = None if reference is None else np.asarray(reference, dtype=float).reshape(2)
+        if reference is not None:
+            P = np.vstack([P, np.asarray(reference, dtype=float).reshape(1, 2)])
+        self.points = P
+        h = frac * np.maximum(P.max(0) - P.min(0), 1e-12)
+        _, idx = np.unique(np.floor((P - P.min(0)) / h).astype(np.int64), axis=0, return_index=True)
+        T = P[np.sort(idx)]
+        self.delta = float(np.linalg.norm(h))
+        self.tree = cKDTree(P)
+        self.near_transform, self.near_scale = near_transform, None
+        if near_transform is not None:
+            self.near_scale = np.asarray(near_scale, dtype=float)
+            data_t = near_transform(P if self.reference is None else P[np.linalg.norm(P - self.reference, axis=1) > 1e-12])
+            self.tree_t = cKDTree(data_t / self.near_scale)
+        self.r_ref = 0.0
+        if self.reference is not None:
+            d_ref = np.sort(np.linalg.norm(P - self.reference, axis=1))
+            d_ref = d_ref[d_ref > 1e-12]
+            self.r_ref = float(d_ref[min(9, len(d_ref) - 1)]) if len(d_ref) else 0.0
+        try:
+            self.tri = Delaunay(T)
+        except QhullError:
+            self.tri = None
+            return
+        A, B, C = (T[self.tri.simplices[:, i]] for i in range(3))
+        a, b, c = (np.linalg.norm(B - C, axis=1), np.linalg.norm(A - C, axis=1), np.linalg.norm(A - B, axis=1))
+        area = 0.5 * np.abs((B - A)[:, 0] * (C - A)[:, 1] - (B - A)[:, 1] * (C - A)[:, 0])
+        R = a * b * c / np.maximum(4.0 * area, 1e-300)
+        d_nn = cKDTree(T).query(T, k=2)[0][:, 1] if len(T) > 2 else np.ones(1)
+        self.keep = R <= k * float(np.quantile(d_nn, 0.95))
+        if not self.keep.any():
+            self.keep[:] = True
+        self.vertices = T
+        tris = self.tri.simplices[self.keep]
+        E = np.sort(np.vstack([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]]), axis=1)
+        u, cnt = np.unique(E, axis=0, return_counts=True)
+        self.boundary_edges = u[cnt == 1]
+        self.triangles = tris
+
+    def contains(self, Q, tol: float = 0.0):
+        Q = np.asarray(Q, dtype=float).reshape(-1, 2)
+        allow = np.full(len(Q), self.delta)
+        if self.near_transform is not None:
+            # close in the transformed coordinates (similar mode, relative strain size) AND in absolute terms
+            # (within one grid cell: a relative measure alone is too generous at large strain)
+            near = ((self.tree_t.query(self.near_transform(Q) / self.near_scale)[0] <= 1.0)
+                    & (self.tree.query(Q)[0] <= self.delta + tol))
+            if self.reference is not None:
+                near |= np.linalg.norm(Q - self.reference, axis=1) <= self.r_ref
+        elif self.reference is not None:
+            d_ref = np.linalg.norm(Q - self.reference, axis=1)
+            allow = np.minimum(allow, 0.05 * d_ref)
+            near = (self.tree.query(Q)[0] <= allow + tol) | (d_ref <= self.r_ref)
+        else:
+            near = self.tree.query(Q)[0] <= allow + tol
+        if self.tri is None:
+            return near
+        s = self.tri.find_simplex(Q)
+        return near | ((s >= 0) & self.keep[np.maximum(s, 0)])
+
+    def boundary_polylines(self, n: int = 24):
+        """Each boundary edge densified to n points (for drawing in transformed coordinates)."""
+        if self.tri is None:
+            return []
+        V = self.vertices
+        return [np.linspace(V[i], V[j], n) for i, j in self.boundary_edges]
+
+
+def mode_coordinates(dev):
+    """(I1_bar, I2_bar) -> (log10(I1_bar - 3), (I2_bar - 3) / (I1_bar - 3)): strain size and mode type."""
+    dev = np.asarray(dev, dtype=float).reshape(-1, 2)
+    a = np.maximum(dev[:, 0] - 3.0, 1e-12)
+    return np.column_stack([np.log10(a), (dev[:, 1] - 3.0) / a])
+
+
+def deviatoric_region(dev_obs):
+    """Data region of the deviatoric GP inputs: concave hull with F = I; closeness in mode coordinates
+    (within 0.25 decades of strain size and 0.05 in the I2/I1 ratio of a training state)."""
+    return DataRegion(dev_obs, reference=[3.0, 3.0], near_transform=mode_coordinates, near_scale=[0.25, 0.05])
+
+
+def fibre_coordinates(an):
+    """(I4_bar, I6_bar) -> (log10 of the distance from (1, 1), direction angle): strain size and fibre-mode type."""
+    an = np.asarray(an, dtype=float).reshape(-1, 2) - 1.0
+    return np.column_stack([np.log10(np.maximum(np.linalg.norm(an, axis=1), 1e-12)), np.arctan2(an[:, 1], an[:, 0])])
+
+
+def fibre_region(an_obs):
+    """Data region of the fibre GP inputs (I4_bar, I6_bar): concave hull with F = I; closeness within 0.25 decades
+    of distance from (1, 1) and 0.1 rad of direction (and one grid cell absolute)."""
+    return DataRegion(an_obs, reference=[1.0, 1.0], near_transform=fibre_coordinates, near_scale=[0.25, 0.1])
+
+
 def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 1.0, n_gamma: int = 400,
                                picked=None, picked_label="picked states", filename="invariant_space_modes.pdf"):
     """
@@ -839,27 +949,15 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
     apply_style()
     I_obs = np.asarray(I_obs).reshape(-1, np.asarray(I_obs).shape[-1])
     dev_obs, vol_obs = I_obs[:, :2], I_obs[:, 2:3]
-    try:   # the reference state F = I (I1_bar = I2_bar = 3) is known exactly (zero energy and stress): part of the data
-        hull = ConvexHull(np.vstack([dev_obs, [[3.0, 3.0]]]))
-        eqs, poly = hull.equations, np.vstack([dev_obs, [[3.0, 3.0]]])[hull.vertices]
-    except QhullError:
-        lo, hi = dev_obs.min(0), dev_obs.max(0)
-        eqs = np.array([[-1, 0, lo[0]], [1, 0, -hi[0]], [0, -1, lo[1]], [0, 1, -hi[1]]], dtype=float)
-        poly = np.array([[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]])
+    # data region of the deviatoric inputs: concave hull with the reference state F = I (zero energy and stress)
+    region = deviatoric_region(dev_obs)
     gamma = jnp.linspace(0.0, gamma_max, n_gamma)
     F_all = standard_mode_F(learned_gp, gamma)
     incompressible = getattr(learned_gp, "incompressible_plane_stress", False)
     aniso = bool(getattr(learned_gp, "is_anisotropic", False)) and I_obs.shape[1] >= 5
-    if aniso:                               # fibre invariants (I4_bar, I6_bar) of the training states and their hull
+    if aniso:                               # fibre invariants (I4_bar, I6_bar) of the training states and their region
         an_obs = I_obs[:, 3:5]
-        an_ref = np.vstack([an_obs, [[1.0, 1.0]]])    # with the reference state F = I (I4_bar = I6_bar = 1)
-        try:
-            hull_an = ConvexHull(an_ref)
-            eqs_an, poly_an = hull_an.equations, an_ref[hull_an.vertices]
-        except QhullError:
-            lo_a, hi_a = an_obs.min(0), an_obs.max(0)
-            eqs_an = np.array([[-1, 0, lo_a[0]], [1, 0, -hi_a[0]], [0, -1, lo_a[1]], [0, 1, -hi_a[1]]], dtype=float)
-            poly_an = np.array([[lo_a[0], lo_a[1]], [hi_a[0], lo_a[1]], [hi_a[0], hi_a[1]], [lo_a[0], hi_a[1]]])
+        region_an = fibre_region(an_obs)
     n_panels = (2 if incompressible else 3) + (1 if aniso else 0)
     fig, axes = plt.subplots(1, n_panels, figsize=(5.2 * n_panels, 4.6))
     rng = np.random.default_rng(0)
@@ -872,14 +970,18 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
 
     def to_b(x1, x2):                    # panel (b): (I1 - 3, I2 - 3)
         return np.asarray(x1) - 3, np.asarray(x2) - 3
-    closed = np.vstack([poly, poly[:1]])
-    dense = np.concatenate([np.linspace(closed[k], closed[k + 1], 60) for k in range(len(closed) - 1)])
+    from matplotlib.collections import LineCollection
+    import matplotlib.tri as mtri_
+    polys = region.boundary_polylines()
     for ax, tf in ((axes[0], to_a), (axes[1], to_b)):
-        ax.scatter(*tf(sub[:, 0], sub[:, 1]), s=3, c="#9e9e9e", alpha=0.35, lw=0, label="training invariants")
-        hx, hy = tf(dense[:, 0], dense[:, 1])
-        if tf is to_b:
-            ax.fill(hx, hy, color="#4caf50", alpha=0.12, lw=0)
-        ax.plot(hx, hy, color="#2e7d32", lw=1.2, label="interpolation region (hull)")
+        ax.scatter(*tf(sub[:, 0], sub[:, 1]), s=5, c="#37474f", alpha=0.6, lw=0, zorder=3, label="training invariants")
+        if tf is to_b and region.tri is not None:
+            V = region.vertices
+            ax.tripcolor(mtri_.Triangulation(V[:, 0] - 3, V[:, 1] - 3, region.triangles), np.ones(len(V)),
+                         cmap="Greens", vmin=0, vmax=8, alpha=0.6, lw=0, zorder=0)
+        ax.add_collection(LineCollection([np.column_stack(tf(pl[:, 0], pl[:, 1])) for pl in polys], colors="#2e7d32",
+                                         linewidths=1.0, zorder=1))
+        ax.plot([], [], color="#2e7d32", lw=1.0, label="interpolation region (data)")
         if picked is not None:
             pk = np.asarray(picked).reshape(-1, np.asarray(picked).shape[-1])
             ax.scatter(*tf(pk[:, 0], pk[:, 1]), s=22, marker="x", c="#111111", lw=1.0, zorder=6,
@@ -887,10 +989,13 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
     if aniso:
         ax_an = axes[-1]
         sub_an = an_obs[rng.choice(len(an_obs), min(len(an_obs), 6000), replace=False)]
-        ax_an.scatter(sub_an[:, 0], sub_an[:, 1], s=3, c="#9e9e9e", alpha=0.35, lw=0, label="training invariants")
-        closed_an = np.vstack([poly_an, poly_an[:1]])
-        ax_an.fill(closed_an[:, 0], closed_an[:, 1], color="#4caf50", alpha=0.12, lw=0)
-        ax_an.plot(closed_an[:, 0], closed_an[:, 1], color="#2e7d32", lw=1.2, label="interpolation region (hull)")
+        ax_an.scatter(sub_an[:, 0], sub_an[:, 1], s=5, c="#37474f", alpha=0.6, lw=0, zorder=3, label="training invariants")
+        if region_an.tri is not None:
+            Va = region_an.vertices
+            ax_an.tripcolor(mtri_.Triangulation(Va[:, 0], Va[:, 1], region_an.triangles), np.ones(len(Va)),
+                            cmap="Greens", vmin=0, vmax=8, alpha=0.6, lw=0, zorder=0)
+        ax_an.add_collection(LineCollection(region_an.boundary_polylines(), colors="#2e7d32", linewidths=1.0, zorder=1))
+        ax_an.plot([], [], color="#2e7d32", lw=1.0, label="interpolation region (data)")
         if picked is not None and np.asarray(picked).reshape(-1, np.asarray(picked).shape[-1]).shape[1] >= 5:
             pk_an = np.asarray(picked).reshape(-1, np.asarray(picked).shape[-1])[:, 3:5]
             ax_an.scatter(pk_an[:, 0], pk_an[:, 1], s=22, marker="x", c="#111111", lw=1.0, zorder=6,
@@ -899,10 +1004,10 @@ def plot_invariant_space_modes(learned_gp, save_path, I_obs, gamma_max: float = 
     for m in range(6):
         feats = jax.vmap(learned_gp.feature_extractor.extract)(F_all[m])
         dev_m, vol_m = np.asarray(feats[0]), np.asarray(feats[1])
-        inside = np.all(dev_m @ eqs[:, :-1].T + eqs[:, -1] <= 1e-3, axis=1)
+        inside = region.contains(dev_m)
         if aniso:                           # outside the data if either input pair leaves its hull
             an_m = np.asarray(feats[2])[:, :2]
-            inside_an = np.all(an_m @ eqs_an[:, :-1].T + eqs_an[:, -1] <= 1e-3, axis=1)
+            inside_an = region_an.contains(an_m)
             inside = inside & inside_an
             an_paths.append(an_m)
         # first point after the reference state F = I that is outside the data (F = I itself can lie just outside the

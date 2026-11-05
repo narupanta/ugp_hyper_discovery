@@ -1,0 +1,103 @@
+# ==============================================================================
+# Recipe v2 (HSGP extraction): TTf + UT experiments fitted together (one energy, one s; the folds
+# interleave the pooled load steps of all specimens; one reaction-force figure per experiment).
+# Datasets: dataset/convert_ttc_to_pipeline_npz.py --assumption incompressible_plane_stress with the DIC steps
+# 300 600 1000 1300 1600 1900 2200 2500 2800 3000 3300 3600 3900 4200 4500 4800 5100 5400 5700 6000. Otherwise as the TTc recipe: residual likelihood (exact update), force-residual noise by
+# cross-validation over the training steps (sigma_f,t = s |R_t|, s from held-out reactions, plateau rule 2 nats).
+# Incompressible plane stress (deviatoric energy only); R_x measured (0.5% of the reading, floor 0.02 N) and
+# R_y fitted to 0 (tensile test) with the same noise, 0.5% of |R_x|.
+# Amplitude cap 100 x the prior centre.
+# Run: bash scripts/run_study.sh --mode normal --recipe configs/recipes_v2/ttf_ut_hsgp_residual_cv.yaml --downstream 1
+# (FEM: full TTf specimen mesh, see full_mesh_fem below; the DIC-window FEM is not run)
+# ==============================================================================
+
+# --- Material and data generation --------------------------------------------
+material_model_name: experimental
+has_ground_truth: false
+dataset_path: dataset/preprocessed/experiment/ttf_20_steps_ps_incomp.npz   # first experiment (pipeline default)
+experiments:                      # same 20 DIC steps (300 ... 6000) and the same step indices for all
+                                  # optional per experiment: thickness (reactions are divided by it; default 1)
+- name: TTf
+  dataset_path: dataset/preprocessed/experiment/ttf_20_steps_ps_incomp.npz
+- name: UT
+  dataset_path: dataset/preprocessed/experiment/ut_20_steps_ps_incomp.npz
+geometry_train: ttf_ut
+geometry_val: ttf
+control_mode: displacement
+stress_mode: plane_stress
+plane_stress_mode: incompressible
+n_loadsteps: 20
+load_noise: 0.005
+
+# --- Load steps and seeds ----------------------------------------------------
+train_load_steps_indices:
+- 1
+- 3
+- 5
+- 7
+- 9
+- 11
+- 13
+- 15
+- 17
+- 19
+val_load_steps_indices:
+- 0
+- 2
+- 4
+- 6
+- 8
+- 10
+- 12
+- 14
+- 16
+- 18
+seeds:
+- 1
+
+# --- Extraction (HSGP) -------------------------------------------------------
+hsgp_likelihood: residual_exact
+hsgp_force_noise_rel: 0.0       # 0: s chosen by cross-validation
+hsgp_cv_folds: 2
+hsgp_cv_tol: 2.0
+reaction_components:
+- 0
+reaction_noise_rel: 0.005
+reaction_noise_floor: 0.02
+reaction_zero_components: [1]             # R_y = 0 (tensile test), sigma = 0.5% x |R_x|
+hsgp_num_basis_dev: 8
+hsgp_num_basis_vol: 8
+hsgp_box_factor: 8.0
+hsgp_amplitude_prior_scale: 0.0
+hsgp_lengthscale_prior_scale: 0.0
+hsgp_sigma_cap: 100.0
+hsgp_hyper_restarts: 1
+
+# --- Distillation ------------------------------------------------------------
+distilled_material_model: gmr_ogden_dev
+distill_target: sef_split
+distillation_n_iterations: 10000
+dev_vol_distillation_n_iterations: 10000
+sample_mode: dataset_f
+num_points: 512
+num_func_samples: 512
+max_gamma: 1.0
+do_sensitivity: 1
+sobol_threshold: 0.0001
+sobol_samples_factor: 4096
+
+# --- FEM forward validation --------------------------------------------------
+run_validation: 1
+fem_param_mode: mean              # full-mesh FEM with the distilled model: mean (one solve at the mean parameters)
+                                  # or samples (fem_n_samples parameter samples: mean field + 95% band)
+# fem_n_samples: 32
+full_mesh_fem:                    # FEM on the full TTf specimen (replaces the DIC-window FEM); distilled + EUCLID
+- name: ttf
+  mesh: mesh/TTf_full_mesh.npz
+  dataset_path: dataset/preprocessed/experiment/ttf_20_steps_ps_incomp.npz
+  clamp_distance: 38.8            # clamped length at each end (mm); the top tab is pulled, the bottom held
+  grip_max: 100.0                 # grip displacement (mm) at DIC step step_max
+  step_max: 6000
+  plot_step: 19
+# val_number_samples: 1024
+val_workers: 4

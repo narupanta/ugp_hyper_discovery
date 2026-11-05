@@ -724,7 +724,35 @@ for SEED in $SEEDS_LIST; do
 
         SPEC_GEOM=""   # experimental specimen geometry (FEM on the specimen's own mesh and measured boundary data)
         for G in ttc tte; do [ "$GEOMETRY_TRAIN" == "$G" ] || [ "$GEOMETRY_VAL" == "$G" ] && SPEC_GEOM=$G; done
-        if [ -n "$SPEC_GEOM" ]; then
+        # recipe key full_mesh_fem: FEM on the full specimen mesh (clamped grips, displacement control), compared
+        # with the DIC data mesh; replaces the DIC-window FEM. One line per entry: name|mesh|dataset|extra options.
+        FULL_MESH_RUNS=$(python3 -c "
+import yaml
+d = yaml.safe_load(open('$CONFIG_YAML'))
+for e in d.get('full_mesh_fem') or []:
+    opts = []
+    for k in ('clamp_distance', 'clamp_bottom_y', 'clamp_top_y', 'grip_max', 'step_max', 'plot_step'):
+        if e.get(k) is not None:
+            opts += ['--' + k, str(e[k])]
+    print('|'.join([e['name'], e['mesh'], e['dataset_path'], ' '.join(opts)]))
+" 2>/dev/null || true)
+        FEM_PARAM_MODE=$(get_cfg_default "fem_param_mode" "mean")       # full-mesh FEM: mean | samples
+        FEM_N_SAMPLES=$(get_cfg_default "fem_n_samples" "$VAL_SAMPLES")
+        FM_MODEL=$([ "$FEM_PARAM_MODE" == "samples" ] && echo distilled_samples || echo distilled_mean)
+        if [ -n "$FULL_MESH_RUNS" ]; then
+            while IFS='|' read -r FM_NAME FM_MESH FM_DATA FM_OPTS; do
+                FM_DIR="$VAL_DIR/${FM_NAME}_full"
+                mkdir -p "$FM_DIR"
+                echo "Full-specimen FEM ($FM_NAME, $FM_MESH): distilled ($FEM_PARAM_MODE) + ${REF_MODEL:-euclid}..."
+                python3 validation/forward_fem_full_specimen.py --distilled_dir "$DISTILL_DIR" --out_dir "$FM_DIR" \
+                    --mesh "$FM_MESH" --dataset "$FM_DATA" --reference "${REF_MODEL:-euclid}" $FM_OPTS \
+                    --param_mode "$FEM_PARAM_MODE" --n_samples "$FEM_N_SAMPLES" \
+                    > "$FM_DIR/full_mesh_fem.log" 2>&1 || echo "  full-mesh FEM failed (see $FM_DIR/full_mesh_fem.log)"
+                PLOT_OPTS=$(echo "$FM_OPTS" | sed -E 's/--(grip_max|step_max|plot_step) [^ ]+//g')
+                python3 plots/plot_ttc_full_mesh_roi.py --fem_dir "$FM_DIR" --model "$FM_MODEL" --mesh "$FM_MESH" \
+                    --dataset "$FM_DATA" $PLOT_OPTS >> "$FM_DIR/full_mesh_fem.log" 2>&1 || true
+            done <<< "$FULL_MESH_RUNS"
+        elif [ -n "$SPEC_GEOM" ]; then
             mkdir -p "$VAL_DIR/$SPEC_GEOM"
             VAL_DATASET_TTC="${TRAIN_DATASET_PATH}"
 
@@ -908,6 +936,13 @@ for SEED in $SEEDS_LIST; do
             # emulated-experiment version (observed data only) for the training geometry
             python3 plots/plot_fem_validation_2x2.py --seed_dir "$SEED_DIR" --geometries "$GEOMETRY_TRAIN" --experimental || true
             mkdir -p "$EXPERIMENT_DIR/plots"
+            for FM_DIR in "$VAL_DIR"/*_full; do      # full-specimen FEM (recipe key full_mesh_fem)
+                [ -d "$FM_DIR" ] || continue
+                FM_NAME=$(basename "$FM_DIR")
+                for F in displacement_analysis_full_mesh full_mesh_with_dic_roi; do
+                    [ -f "$FM_DIR/$F.pdf" ] && cp "$FM_DIR/$F.pdf" "$EXPERIMENT_DIR/plots/${F}_${FM_NAME}_seed${SEED}.pdf"
+                done
+            done
             for G in block holes block_exp; do
                 if [ -f "$VAL_DIR/${G%_exp}/fem_validation_2x2_$G.pdf" ]; then
                     cp "$VAL_DIR/${G%_exp}/fem_validation_2x2_$G.pdf" "$EXPERIMENT_DIR/plots/fem_validation_2x2_${G}_seed${SEED}.pdf"

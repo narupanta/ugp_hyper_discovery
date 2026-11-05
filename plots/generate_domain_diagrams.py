@@ -134,16 +134,19 @@ def draw_traction_arrows_right(ax, x=1.0, y_min=0.0, y_max=1.0, n_arrows=9, arro
 # Plot 1: Block Domain (Training Geometry)
 # ==============================================================================
 
-def plot_block_domain(ax, mesh_npz_path="mesh/block_mesh.npz", panel_label=r"$\mathbf{(a)}$"):
-    """Renders the detailed Block geometry with dimensions, FE mesh, and BC specifications."""
+def plot_block_domain(ax, mesh_npz_path="mesh/block_mesh.npz", panel_label=r"$\mathbf{(a)}$", plain=False):
+    """Renders the detailed Block geometry with dimensions, FE mesh, and BC specifications.
+    plain: black and grey only, no load arrows (boundary conditions as labels only)."""
+    ink = "#111111"
     # 1. Load actual FE Mesh
     if os.path.exists(mesh_npz_path):
         data = np.load(mesh_npz_path)
         node_coords = data["node_coords"][:, :2]
         cells = data["cells"]
         triang = tri.Triangulation(node_coords[:, 0], node_coords[:, 1], cells)
-        ax.triplot(triang, color="#64748b", lw=0.45, alpha=0.55, zorder=2)
-        ax.tripcolor(triang, np.ones(len(node_coords)), cmap="Blues", alpha=0.05, zorder=1)
+        ax.triplot(triang, color="#808080" if plain else "#64748b", lw=0.45, alpha=0.55, zorder=2)
+        if not plain:
+            ax.tripcolor(triang, np.ones(len(node_coords)), cmap="Blues", alpha=0.05, zorder=1)
     else:
         poly_pts = [[0.1, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.1]]
         theta = np.linspace(np.pi / 2, 0, 30)
@@ -165,28 +168,36 @@ def plot_block_domain(ax, mesh_npz_path="mesh/block_mesh.npz", panel_label=r"$\m
     ax.plot([0.0, 0.0], [0.10, 1.0], color="#0f172a", lw=2.4, zorder=4)  # Left
 
     # 3. Boundary Conditions
+    if plain:   # labels only (no arrows, no colour)
+        box = dict(boxstyle="round,pad=0.28", facecolor="white", edgecolor="#9e9e9e", lw=1.2, alpha=0.96)
+        ax.text(0.5, 1.05, r"$\partial \Omega_{\mathrm{top}}: u_y = \bar{u}_{\mathrm{top}}$", ha="center", va="bottom",
+                fontsize=15.0, color=ink, fontweight="bold", bbox=box, zorder=7)
+        ax.text(1.05, 0.5, r"$\partial \Omega_{\mathrm{right}}: u_x = 0.5\,\bar{u}_{\mathrm{top}}$", ha="left",
+                va="center", fontsize=15.0, color=ink, fontweight="bold", bbox=box, zorder=7)
     # Top edge: Prescribed vertical displacement / pull
-    draw_traction_arrows_top(
+    if not plain:
+      draw_traction_arrows_top(
         ax, y=1.0, x_min=0.0, x_max=1.0, n_arrows=9, arrow_len=0.09,
         color="#c2410c",
         label=r"$\partial \Omega_{\mathrm{top}}: u_y = \bar{u}_{\mathrm{top}}$"
     )
     
     # Right edge: Prescribed horizontal displacement (asymmetric biaxial with \mu)
-    draw_traction_arrows_right(
+    if not plain:
+      draw_traction_arrows_right(
         ax, x=1.0, y_min=0.0, y_max=1.0, n_arrows=9, arrow_len=0.09,
         color="#1d4ed8",
-        label=r"$\partial \Omega_{\mathrm{right}}: u_x = \mu\,\bar{u}_{\mathrm{top}}$"
+        label=r"$\partial \Omega_{\mathrm{right}}: u_x = 0.5\,\bar{u}_{\mathrm{top}}$"
     )
 
     # Radius Dimension for Notch: R = 0.10
     ax.annotate(
         "", xy=(0.10 * np.cos(np.radians(65)), 0.10 * np.sin(np.radians(65))), xytext=(0.0, 0.0),
-        arrowprops=dict(arrowstyle="->", color="#b91c1c", lw=1.8),
+        arrowprops=dict(arrowstyle="->", color=ink if plain else "#b91c1c", lw=1.8),
         zorder=6
     )
     ax.text(
-        0.045, 0.095, r"$R = 0.10$", fontsize=15.0, color="#b91c1c", fontweight="bold",
+        0.045, 0.095, r"$R = 0.10$", fontsize=15.0, color=ink if plain else "#b91c1c", fontweight="bold",
         bbox=dict(boxstyle="round,pad=0.20", facecolor="white", edgecolor="none", alpha=0.92),
         zorder=7
     )
@@ -194,14 +205,16 @@ def plot_block_domain(ax, mesh_npz_path="mesh/block_mesh.npz", panel_label=r"$\m
     # 4. Mechanical BC Callouts (Positioned cleanly along symmetry boundaries)
     ax.text(
         -0.05, 0.55, r"$\partial \Omega_{\mathrm{left}}:\; u_x = 0$",
-        fontsize=15.0, ha="right", va="center", color="#1e293b", fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.28", facecolor="#f8fafc", edgecolor="#cbd5e1", lw=1.2, alpha=0.96),
+        fontsize=15.0, ha="right", va="center", color=ink if plain else "#1e293b", fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.28", facecolor="white" if plain else "#f8fafc",
+                  edgecolor="#9e9e9e" if plain else "#cbd5e1", lw=1.2, alpha=0.96),
         zorder=7
     )
     ax.text(
         0.55, -0.065, r"$\partial \Omega_{\mathrm{bottom}}:\; u_y = 0$",
-        fontsize=15.0, ha="center", va="top", color="#1e293b", fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.28", facecolor="#f8fafc", edgecolor="#cbd5e1", lw=1.2, alpha=0.96),
+        fontsize=15.0, ha="center", va="top", color=ink if plain else "#1e293b", fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.28", facecolor="white" if plain else "#f8fafc",
+                  edgecolor="#9e9e9e" if plain else "#cbd5e1", lw=1.2, alpha=0.96),
         zorder=7
     )
 
@@ -468,7 +481,7 @@ def generate_all_diagrams(output_dir="plots"):
     # 2. Standalone Block Domain Figure
     print("Generating standalone Block diagram...")
     fig, ax = plt.subplots(1, 1, figsize=(8.5, 7.2), dpi=300)
-    plot_block_domain(ax, block_npz, panel_label=None)
+    plot_block_domain(ax, block_npz, panel_label=None, plain=True)   # standalone: black and grey, no arrows
     plt.tight_layout(pad=0.8)
     block_pdf = os.path.join(output_dir, "domain_diagram_block.pdf")
     block_png = os.path.join(output_dir, "domain_diagram_block.png")

@@ -345,6 +345,8 @@ def main():
         material_model=true_model
     )
     mode_names = ["UT", "ET", "PS", "UC", "EC", "SS"]
+    from plots.training import compute_interpolation_masks
+    regime_inside = compute_interpolation_masks(learned_gp, F_all, np.asarray(I_obs_all) if os.path.exists(obs_path) else None)["tot"]
     
     extractor = feature_extractor if feature_extractor is not None else IsotropicFeatureExtractor()
 
@@ -711,7 +713,7 @@ def main():
         inside_vol = (vol_J[:, 0] >= limit_min_vol[0] - vol_tol) & (vol_J[:, 0] <= limit_max_vol[0] + vol_tol)
         dev_I_np = np.array(dev_I)
         inside_dev = np.all(dev_I_np @ hull_eqs[:, :-1].T + hull_eqs[:, -1] <= dev_tol, axis=1)
-        inside_mask = inside_vol & inside_dev
+        inside_mask = np.asarray(regime_inside[i])   # shared definition (includes F = I and fibre invariants)
         crossings_mask = np.where(np.diff(inside_mask.astype(int)) != 0)[0]
         gamma_boundaries = [float(gamma[0])] + [float(gamma[idx]) for idx in crossings_mask] + [float(gamma[-1])]
         for k in range(len(gamma_boundaries) - 1):
@@ -814,7 +816,7 @@ def main():
         inside_vol = (vol_J[:, 0] >= limit_min_vol[0] - vol_tol) & (vol_J[:, 0] <= limit_max_vol[0] + vol_tol)
         dev_I_np = np.array(dev_I)
         inside_dev = np.all(dev_I_np @ hull_eqs[:, :-1].T + hull_eqs[:, -1] <= dev_tol, axis=1)
-        inside_mask = inside_vol & inside_dev
+        inside_mask = np.asarray(regime_inside[i])   # shared definition (includes F = I and fibre invariants)
         crossings_mask = np.where(np.diff(inside_mask.astype(int)) != 0)[0]
         gamma_boundaries = [float(gamma[0])] + [float(gamma[idx]) for idx in crossings_mask] + [float(gamma[-1])]
         for k in range(len(gamma_boundaries) - 1):
@@ -902,7 +904,7 @@ def main():
         inside_vol = (vol_J[:, 0] >= limit_min_vol[0] - vol_tol) & (vol_J[:, 0] <= limit_max_vol[0] + vol_tol)
         dev_I_np = np.array(dev_I)
         inside_dev = np.all(dev_I_np @ hull_eqs[:, :-1].T + hull_eqs[:, -1] <= dev_tol, axis=1)
-        inside_mask = inside_vol & inside_dev
+        inside_mask = np.asarray(regime_inside[i])   # shared definition (includes F = I and fibre invariants)
         crossings_mask = np.where(np.diff(inside_mask.astype(int)) != 0)[0]
         gamma_boundaries = [float(gamma[0])] + [float(gamma[idx]) for idx in crossings_mask] + [float(gamma[-1])]
         for k in range(len(gamma_boundaries) - 1):
@@ -938,6 +940,71 @@ def main():
     fig_piola.savefig(os.path.join(distilled_dir, f"split_piola_stress_{true_model_name}_with_legend.pdf"), dpi=300, bbox_inches='tight')
     fig_piola.savefig(os.path.join(distilled_dir, f"split_piola_stress_{true_model_name}_with_legend.png"), dpi=300, bbox_inches='tight')
     plt.close(fig_piola)
+
+    # Energy (left) and all first Piola-Kirchhoff components (right) of each mode, one mode per row
+    def shade_extrapolation(ax, inside_mask):
+        inside_mask = np.asarray(inside_mask, dtype=bool)
+        cross = np.where(np.diff(inside_mask.astype(int)) != 0)[0]
+        bounds = [float(gamma[0])] + [float(gamma[k]) for k in cross] + [float(gamma[-1])]
+        for k in range(len(bounds) - 1):
+            state = inside_mask[0] if k == 0 else inside_mask[cross[k - 1] + 1]
+            if not state:
+                ax.axvspan(bounds[k], bounds[k + 1], color="#E69F00", alpha=extrap_alpha, zorder=-1)
+        for k in cross:
+            ax.axvline(float(gamma[k]), color="#E69F00", linestyle=":", linewidth=0.9, zorder=0)
+
+    n_modes = len(mode_names)
+    fig_es = plt.figure(figsize=(4.6, 2.05 * n_modes + 0.55))
+    gs_es = fig_es.add_gridspec(n_modes, 2, hspace=0.42, wspace=0.42, top=0.985, bottom=0.075, left=0.14, right=0.98)
+    for i, name in enumerate(mode_names):
+        ax_e = fig_es.add_subplot(gs_es[i, 0])
+        ax_s = fig_es.add_subplot(gs_es[i, 1])
+        # energy
+        if psi_true is not None:
+            ax_e.plot(gamma, psi_true[i], "k--", lw=1.1, dashes=(3, 2), zorder=5)
+        gl = psi_dist_mean[i] - 1.96 * jnp.sqrt(psi_dist_var[i])
+        gu = psi_dist_mean[i] + 1.96 * jnp.sqrt(psi_dist_var[i])
+        ax_e.fill_between(gamma, gl, gu, color="gray", alpha=0.25, zorder=1)
+        ax_e.plot(gamma, psi_dist_mean[i], color="gray", lw=1.1, ls=":", zorder=3)
+        ax_e.fill_between(gamma, jnp.percentile(dist_psi_samples[i], 2.5, axis=0),
+                          jnp.percentile(dist_psi_samples[i], 97.5, axis=0), color=dist_energy_color, alpha=0.20, zorder=2)
+        ax_e.plot(gamma, dist_psi_samples[i].mean(axis=0), color=dist_energy_color, lw=1.3, zorder=4)
+        lim = ax_e.get_ylim()
+        ax_e.set_ylim(bottom=-0.04 * (lim[1] - lim[0]), top=lim[1] + 0.05 * (lim[1] - lim[0]))
+        # all Piola components
+        for (r_idx, c_idx), c_lbl, c_col in piola_comps:
+            pm_ = P_dist_mean[i][:, r_idx, c_idx]
+            ps_ = jnp.sqrt(jnp.maximum(P_dist_var[i][:, r_idx, c_idx], 1e-12))
+            ax_s.fill_between(gamma, pm_ - 1.96 * ps_, pm_ + 1.96 * ps_, color=c_col, alpha=0.18, zorder=1)
+            ax_s.plot(gamma, pm_, color=c_col, linestyle=":", lw=1.2, zorder=3)
+            samps = dist_p_samples[i][:, :, r_idx, c_idx]
+            for s_idx in range(samps.shape[0]):
+                ax_s.plot(gamma, samps[s_idx], color=c_col, alpha=0.25, lw=0.75, zorder=2)
+            if P_true is not None:
+                ax_s.plot(gamma, P_true[i][:, r_idx, c_idx], color=c_col, linestyle="--", lw=1.2, dashes=(4, 2.5), zorder=5)
+        title = mode_full_names.get(name, name)
+        for ax, ylab in ((ax_e, r"$\Psi$"), (ax_s, r"$P_{ij}$")):
+            ax.set_box_aspect(1)
+            shade_extrapolation(ax, regime_inside[i])
+            ax.set_title(f"({i + 1}) {title}", fontsize=7.8, pad=2, fontweight="bold")
+            ax.set_ylabel(ylab, fontsize=8.0, labelpad=2)
+            ax.grid(False)
+            ax.tick_params(axis="both", which="major", labelsize=6.8, pad=1.5)
+            if i == n_modes - 1:
+                ax.set_xlabel(r"$\gamma$", fontsize=7.5, labelpad=2)
+            else:
+                ax.tick_params(axis="x", which="both", labelbottom=False)
+    es_handles = [
+        mlines.Line2D([], [], color="black", linestyle="--", dashes=(3, 2), lw=1.1, label="Ground truth"),
+        mlines.Line2D([], [], color="gray", linestyle=":", lw=1.1, label="GP mean (95% CI)"),
+        mlines.Line2D([], [], color=dist_energy_color, lw=1.3, label=r"Distilled $\Psi$ (95% CI)"),
+    ] + [mlines.Line2D([], [], color=c_col, lw=1.5, label=c_lbl) for _, c_lbl, c_col in piola_comps] + [
+        mpatches.Patch(color="#E69F00", alpha=extrap_alpha, label="Extrapolation")]
+    fig_es.legend(handles=es_handles, loc="lower center", ncol=4, bbox_to_anchor=(0.54, 0.0), fontsize=6.2,
+                  frameon=False, handlelength=1.3, handletextpad=0.3, columnspacing=0.7)
+    fig_es.savefig(os.path.join(distilled_dir, f"split_energy_stress_{true_model_name}.pdf"), dpi=300, bbox_inches="tight")
+    fig_es.savefig(os.path.join(distilled_dir, f"split_energy_stress_{true_model_name}.png"), dpi=300, bbox_inches="tight")
+    plt.close(fig_es)
 
     # Standalone shared horizontal legend for PK1 Stress (spanning ~75% width of A4 = ~6.2 inches)
     fig_leg_piola = plt.figure(figsize=(6.2, 0.45))

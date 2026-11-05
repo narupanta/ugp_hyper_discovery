@@ -168,7 +168,7 @@ def evaluate(run_dir, k, final_iter, library, dev_only, truth, level, true_modul
     # spurious terms: not in the true model (true value 0) but their interval excludes 0 (pruned terms are exactly 0)
     spurious = used & (t == 0.0) & ((lo > tol) | (hi < -tol))
     out = dict(inside=inside, covered_true=bool(np.all(inside[active])), covered_all=bool(np.all(inside[used])),
-               mean=full.mean(0), std=full.std(0), lo=lo, hi=hi, used=used, spurious=spurious,
+               mean=full.mean(0), std=full.std(0), lo=lo, hi=hi, used=used, spurious=spurious, samples=full,
                n_spurious=int(spurious.sum()))
     if true_moduli is not None:          # effective small-strain moduli (identifiable even when C10/C01 are not)
         for name, x, t in zip(("mu", "kappa"), effective_moduli(full), true_moduli):
@@ -177,6 +177,62 @@ def evaluate(run_dir, k, final_iter, library, dev_only, truth, level, true_modul
             q_lo, q_hi = np.quantile(x, [a, 1.0 - a])
             out[name] = dict(mean=float(x.mean()), lo=float(q_lo), hi=float(q_hi), covered=bool(q_lo <= t <= q_hi))
     return out
+
+
+def plot_calibration(final_res, names, truth, true_moduli, dev_only, out_path, levels=None):
+    """
+    Calibration of the distilled intervals: for each nominal level p, the share of runs whose central p-interval
+    contains the true value (true parameters, and the effective shear modulus when known), against p. A calibrated
+    method lies on the diagonal; below = intervals too narrow (overconfident). The grey band is the binomial 95% range
+    of a calibrated method with this number of runs. Terms not in the true model are left out (their true value 0 is
+    covered exactly whenever they are pruned, which is model selection, not calibration).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from plots.theme import apply_style, save_figure
+    levels = np.linspace(0.05, 0.99, 48) if levels is None else np.asarray(levels)
+    keys = sorted(final_res)
+    n = len(keys)
+    curves = {}
+    for i, nm in enumerate(names):
+        if truth[i] == 0.0 or (dev_only and 10 <= i < 13):
+            continue
+        cov = []
+        for p in levels:
+            a = 0.5 * (1.0 - p)
+            cov.append(np.mean([np.quantile(final_res[k]["samples"][:, i], a) <= truth[i] <= np.quantile(
+                final_res[k]["samples"][:, i], 1.0 - a) for k in keys]))
+        curves[nm] = np.array(cov)
+    if true_moduli is not None:
+        mu = {k: effective_moduli(final_res[k]["samples"])[0] for k in keys}
+        curves[r"$\mu$ (eff.)"] = np.array([np.mean([np.quantile(mu[k], 0.5 * (1 - p)) <= true_moduli[0]
+                                                    <= np.quantile(mu[k], 1 - 0.5 * (1 - p)) for k in keys])
+                                           for p in levels])
+    apply_style()
+    fig, ax = plt.subplots(figsize=(5.2, 5.0))
+    band = 1.96 * np.sqrt(levels * (1 - levels) / max(n, 1))
+    ax.fill_between(levels, np.clip(levels - band, 0, 1), np.clip(levels + band, 0, 1), color="#bdbdbd", alpha=0.45,
+                    lw=0, label=f"calibrated, 95% range ({n} runs)")
+    ax.plot([0, 1], [0, 1], "k--", lw=1.0, label="ideal")
+    colors = ["#1565c0", "#c62828", "#2e7d32", "#6a1b9a", "#ef6c00", "#00838f", "#5d4037"]
+    for j, (nm, c) in enumerate(curves.items()):
+        ax.plot(levels, c, lw=1.8, color=colors[j % len(colors)], ls="-" if "mu" not in nm else ":", label=nm)
+    if len([k for k in curves if "mu" not in k]) > 1:
+        mean_c = np.mean([c for k, c in curves.items() if "mu" not in k], axis=0)
+        ax.plot(levels, mean_c, lw=2.6, color="#111111", label="mean over true parameters")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.02)
+    ax.set_aspect("equal")
+    ax.set_xlabel("nominal level of the central interval")
+    ax.set_ylabel("estimated coverage (share of runs)")
+    ax.set_title("Calibration of the distilled parameter intervals")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="upper left", frameon=False)
+    fig.tight_layout()
+    save_figure(fig, out_path)
+    plt.close(fig)
+    return {nm: dict(levels=levels.round(4).tolist(), coverage=c.round(4).tolist()) for nm, c in curves.items()}
 
 
 def main():
@@ -343,17 +399,35 @@ def main():
             w.writerows(sorted(rows, key=lambda r: (r["iteration"], r["noise_seed"], r["init"])))
     used_names = [n for i, n in enumerate(names) if not (dev_only and 10 <= i < 13)]
     active = [n for n, t in zip(names, truth) if t != 0.0 and n in used_names]
+    # candidate terms (evaluated and not disabled for the whole study); absent ones get a "filtered" column
+    from core.material_library import OGDEN_START
+    def full_index(comp, i):
+        if comp == "vol":
+            return 10 + i
+        if comp == "aniso":
+            return 13 + i
+        if library == "ogden":
+            return OGDEN_START + i
+        return i if (library == "gmr" or i < 10) else OGDEN_START + i - 10
+    disabled = {full_index(c, int(i)) for c in ("dev", "vol", "aniso")
+                for i in np.atleast_1d(cfg.get(f"{c}_params_disabled") or [])}
+    absent = [n for i, n in enumerate(names) if n in used_names and i not in disabled and truth[i] == 0.0]
     lines = [f"# Distillation coverage study ({os.path.basename(exp)})", "",
              f"Noise seeds {seeds} x {len(inits)} initialisations; nominal level {100 * args.level:.0f}% (central interval).",
              f"True parameters: " + ", ".join(f"{n} = {t:g}" for n, t in zip(names, truth) if t != 0.0 and n in used_names)
              + (" (deviatoric-only distillation: D1..D3 not evaluated)" if dev_only else ""), "",
+             "Per term: a true term counts when its interval covers the true value; a term not in the true model counts "
+             "when it is filtered out (pruned or disabled, i.e. its interval does not exclude 0). Mean over terms: the "
+             "average of these per-term rates (each term weighted equally).", "",
              "| Iteration | Permutations | Coverage, true params (%) | Coverage, all params (%) | "
-             + " | ".join(f"{n} (%)" for n in active) + " |",
-             "|" + "---|" * (4 + len(active))]
+             + " | ".join(f"{n} covered (%)" for n in active) + (" | " if absent else "")
+             + " | ".join(f"{n} filtered (%)" for n in absent) + " | Mean over terms (%) |",
+             "|" + "---|" * (5 + len(active) + len(absent))]
     for k in sorted(summary["checkpoints"]):
         e = summary["checkpoints"][k]
         lines.append(f"| {k} | {e['n_permutations']} | {e['coverage_true_params']:.1f} | {e['coverage_all_params']:.1f} | "
-                     + " | ".join(f"{e['per_parameter'][n]:.0f}" for n in active) + " |")
+                     + " | ".join(f"{e['per_parameter'][n]:.0f}" for n in active + absent)
+                     + f" | {np.mean([e['per_parameter'][n] for n in active + absent]):.1f} |")
     drift_ks = [k for k in sorted(summary["checkpoints"]) if "drift_over_between_init_std" in summary["checkpoints"][k]]
     if drift_ks:
         lines += ["", "Drift of the parameter means to the final iteration / spread between initialisations "
@@ -398,7 +472,82 @@ def main():
         per = {names[i]: sum(bool(r["spurious"][i]) for r in final_res.values()) for i in idx if tr[i] == 0.0}
         lines += ["", f"Spurious terms: {sum(1 for x in n_sp if x > 0)} of {len(n_sp)} runs have at least one "
                       f"(total {sum(n_sp)}); per term: " + ", ".join(f"{n} {c}" for n, c in per.items())]
+
+        # --- model selection as a classification: a term is "selected" when its interval excludes 0 (pruned and
+        # disabled terms are exactly 0, i.e. not selected); "in the true model" when its true value is non-zero.
+        # Candidates: every evaluated library term that is not disabled for the whole study.
+        cand = [i for i, n in enumerate(names) if n in used_names and i not in disabled]
+        tol = 1e-12
+        sel = {k: np.array([(r["lo"][i] > tol) or (r["hi"][i] < -tol) for i in cand]) for k, r in final_res.items()}
+        truth_in = np.array([tr[i] != 0.0 for i in cand])
+        lines += ["", "Model selection per candidate term (selected = 95% interval excludes 0; disabled terms left out). "
+                      "The true model is fixed, so each term is either always in it or never: one row of its confusion "
+                      "matrix is empty.", "",
+                  "| Term | In true model | Selected | Not selected | Correct selection (%) | Interval covers truth when selected (%) |",
+                  "|---|---|---|---|---|---|"]
+        for j, i in enumerate(cand):
+            s_j = np.array([sel[k][j] for k in sorted(final_res)])
+            ok = s_j if truth_in[j] else ~s_j
+            cov = [final_res[k]["inside"][i] for k in sorted(final_res) if sel[k][j]]
+            lines.append(f"| {names[i]} | {'yes' if truth_in[j] else 'no'} | {int(s_j.sum())} | {int((~s_j).sum())} | "
+                         f"{100 * ok.mean():.0f} | " + (f"{100 * np.mean(cov):.0f}" if cov else "-") + " |")
+        def interval_tables():
+            """Same split as the selection tables, but by interval coverage: a true term counts when its interval
+            contains the true value (selected AND calibrated); an absent term when its interval contains 0 (filtered)."""
+            keys = sorted(final_res)
+            Cv = np.array([[bool(final_res[k]["inside"][i]) for i in cand] for k in keys])   # (runs, candidates)
+            Sv = np.array([sel[k] for k in keys])
+            out = ["", "Interval coverage per candidate term (covered = 95% interval contains the true value; for a term "
+                       "not in the true model the true value is 0, so covered = filtered out). A true term that is not "
+                       "covered is either missed (not selected) or selected with an interval that misses its value.", "",
+                   "| Term | In true model | Covered | Not covered | of which: not selected | of which: interval misses | "
+                   "Coverage (%) |", "|---|---|---|---|---|---|---|"]
+            for j, i in enumerate(cand):
+                c, sj = Cv[:, j], Sv[:, j]
+                miss_sel = int(np.sum(~c & ~sj)) if truth_in[j] else 0
+                miss_int = int(np.sum(~c & sj)) if truth_in[j] else int(np.sum(~c))
+                out.append(f"| {names[i]} | {'yes' if truth_in[j] else 'no'} | {int(c.sum())} | {int((~c).sum())} | "
+                           f"{miss_sel if truth_in[j] else '-'} | {miss_int} | {100 * c.mean():.0f} |")
+            T2 = np.broadcast_to(truth_in, Cv.shape)
+            a_, b_, c_, d_ = int((Cv & T2).sum()), int((~Cv & T2).sum()), int((Cv & ~T2).sum()), int((~Cv & ~T2).sum())
+            out += ["", f"Confusion matrix by interval coverage, pooled over {len(keys)} runs x {len(cand)} candidate terms:",
+                    "", "| | Interval covers the true value | Interval misses it |", "|---|---|---|",
+                    f"| In the true model | {a_} (found and covered) | {b_} (missed or not covered) |",
+                    f"| Not in the true model | {c_} (correctly filtered, covers 0) | {d_} (spurious, excludes 0) |", "",
+                    f"True terms covered {100 * a_ / max(a_ + b_, 1):.0f}%, absent terms filtered "
+                    f"{100 * c_ / max(c_ + d_, 1):.0f}%, all term checks passed {100 * (a_ + c_) / max(Cv.size, 1):.0f}% "
+                    f"(= the mean over terms in the top table); runs passing every check: "
+                    f"{int(np.sum(np.all(Cv, axis=1)))} of {len(keys)}."]
+            return out
+        S = np.array([sel[k] for k in sorted(final_res)])            # (runs, candidates)
+        T = np.broadcast_to(truth_in, S.shape)
+        tp, fn, fp, tn = int((S & T).sum()), int((~S & T).sum()), int((S & ~T).sum()), int((~S & ~T).sum())
+        exact = int(np.sum(np.all(S == T, axis=1)))
+        lines += ["", f"Confusion matrix of the term selection, pooled over {len(final_res)} runs x {len(cand)} candidate "
+                      "terms:", "",
+                  "| | Selected | Not selected |", "|---|---|---|",
+                  f"| In the true model | {tp} (true positive) | {fn} (false negative) |",
+                  f"| Not in the true model | {fp} (false positive) | {tn} (true negative) |", "",
+                  f"Recall (true terms found) {100 * tp / max(tp + fn, 1):.0f}%, precision (selected terms that are true) "
+                  f"{100 * tp / max(tp + fp, 1):.0f}%, accuracy {100 * (tp + tn) / max(S.size, 1):.0f}%; "
+                  f"runs with exactly the true set of terms: {exact} of {len(final_res)}.", "",
+                  ] + interval_tables() + ["",
+                  "Coverage definitions (table at the top): 'true params' = every true term's interval contains its true "
+                  "value; 'all params' = that AND every absent term correctly not selected (= exact model structure "
+                  "with covered values)."]
+    if final_res:
+        try:
+            cal = plot_calibration(final_res, names, truth, true_moduli, dev_only,
+                                   os.path.join(study, "calibration_coverage.pdf"))
+            json.dump(cal, open(os.path.join(study, "calibration_coverage.json"), "w"), indent=1)
+            lines += ["", "Calibration curve (coverage against the nominal level, true parameters): "
+                          "calibration_coverage.pdf / .json."]
+        except Exception as e:
+            print(f"calibration plot failed: {type(e).__name__}: {e}", flush=True)
     open(os.path.join(study, "coverage_summary.md"), "w").write("\n".join(lines) + "\n")
+    # the candidate terms of the per-term table (true: interval covers the truth; absent: filtered out), for tables
+    summary["candidate_terms"] = dict(true=active, absent=absent)
+    json.dump(summary, open(os.path.join(study, "coverage_summary.json"), "w"), indent=2, default=float)
     print("\n".join(lines))
     print(f"\nSaved {study}/coverage_summary.md, coverage_summary.json, coverage_permutations.csv")
 

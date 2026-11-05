@@ -180,27 +180,17 @@ def main():
     mode_names = ["Uniaxial Tension", "Equibiaxial Tension", "Pure Shear", 
                   "Uniaxial Compression", "Equibiaxial Compression", "Simple Shear"]
 
-    # Calculate exact interpolation / extrapolation transitions for each mode
-    extractor = IsotropicFeatureExtractor()
-    true_min_dev = min_dev - 1e-4
-    true_max_dev = max_dev + 1e-4
-    true_min_vol = min_vol - 1e-4
-    true_max_vol = max_vol + 1e-4
-    
+    # Interpolation / extrapolation per mode: the first gamma after F = I at which the mode leaves the data support
+    # (convex hull of the observed invariants with the reference state, J range, fibre hull; plots.training)
+    from plots.training import compute_interpolation_masks
+    obs_file = os.path.join(saved_model_dir, "I_obs_all.npy")
+    I_obs = np.load(obs_file) if os.path.exists(obs_file) else None
+    inside_masks = compute_interpolation_masks(learned_gp, F_all, I_obs)["tot"]
     transitions = []
     for mode in range(len(mode_names)):
-        dev_m, vol_m = jax.vmap(extractor.extract)(F_all[mode])
-        in_bounds = ((dev_m[:, 0] >= true_min_dev[0]) & (dev_m[:, 0] <= true_max_dev[0]) &
-                     (dev_m[:, 1] >= true_min_dev[1]) & (dev_m[:, 1] <= true_max_dev[1]) &
-                     (vol_m[:, 0] >= true_min_vol[0]) & (vol_m[:, 0] <= true_max_vol[0]))
-        if not jnp.all(in_bounds):
-            idx = int(jnp.argmax(~in_bounds))
-            trans_g = float(gamma[idx])
-            if idx == 0:
-                trans_g = float(gamma[1])
-        else:
-            trans_g = float(gamma.max())
-        transitions.append(trans_g)
+        out_k = np.where(~inside_masks[mode][1:])[0]
+        transitions.append(float(gamma[out_k[0] + 1]) if len(out_k) else float(gamma.max()))
+    print("[regimes] data boundary per mode (gamma): " + ", ".join(f"{n} {t:.2f}" for n, t in zip(mode_names, transitions)))
 
     # 5. Evaluate True and GP
     if true_model is not None:
@@ -610,13 +600,7 @@ def main():
     fig_psi, axes_psi = plt.subplots(3, 2, figsize=(fig_width, fig_height), sharex=True)
     fig_p, axes_p = plt.subplots(3, 2, figsize=(fig_width, fig_height), sharex=True)
 
-    for i, name in enumerate(mode_names):
-        row = i // 2
-        col = i % 2
-        
-        ax_psi = axes_psi[row, col]
-        ax_p = axes_p[row, col]
-        
+    def draw_mode(i, name, ax_psi, ax_p, is_bottom, show_ylabel):
         if name == "Pure Shear":
             idx_comp = (1, 1); label_P = r"$P_{22}$"
         elif name == "Simple Shear":
@@ -677,7 +661,7 @@ def main():
         ax_psi.set_ylim(y_min - pad, y_max + pad)
         ax_psi.set_xlim(0, gamma.max())
         ax_psi.set_title(f"($m={i+1}$) {name}", fontsize=11)
-        if col == 0:
+        if show_ylabel:
             ax_psi.set_ylabel(r"$\Psi$", fontsize=11)
 
         # --- STRESS PLOT (ax_p) ---
@@ -735,7 +719,7 @@ def main():
         ax_p.set_ylim(y_min_p - pad_p, y_max_p + pad_p)
         ax_p.set_xlim(0, gamma.max())
         ax_p.set_title(f"($m={i+1}$) {name}", fontsize=11)
-        if col == 0:
+        if show_ylabel:
             ax_p.set_ylabel(label_P, fontsize=11)
         
         trans_g = transitions[i]
@@ -755,10 +739,15 @@ def main():
             ax.tick_params(axis='both', labelsize=10)
             
             # X-axis label only on bottom row (row == 2 for a 3x2 grid)
-            if row == 2:
+            if is_bottom:
                 ax.set_xlabel(r"Stretch Measure ($\gamma$)", fontsize=11)
             else:
                 ax.tick_params(axis='x', which='both', bottom=True, top=False, labelbottom=False)
+
+
+    for i, name in enumerate(mode_names):
+        row, col = i // 2, i % 2
+        draw_mode(i, name, axes_psi[row, col], axes_p[row, col], is_bottom=(row == 2), show_ylabel=(col == 0))
 
     if args.distill_target != "sef_split":
         handles_psi, labels_psi = axes_psi[0, 0].get_legend_handles_labels()

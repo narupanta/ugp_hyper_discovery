@@ -352,6 +352,9 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     as one more row (same colour scales as the first row; no band in the parity panel)."""
     apply_style()
     extra_rows = list(extra_rows or [])
+    no_band = u_p_lower_bound is None or u_p_upper_bound is None   # deterministic prediction: no coverage
+    if no_band:
+        u_p_lower_bound = u_p_upper_bound = np.asarray(u_p_mean)
 
     # --- Data Preparation ---
     coords_true = node_coords + u_true
@@ -439,9 +442,9 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     uy_err = [np.maximum(0.0, uy_med - uy_lower), np.maximum(0.0, uy_upper - uy_med)]
 
     axes[2].errorbar(ux_true, ux_med, yerr=ux_err, fmt="x", color="#0072B2", ecolor="#0072B2",
-                     alpha=0.35, label=r"$u_x$ " + f"({cov_x:.1f}%)", markersize=4, capsize=0, elinewidth=0.8)
+                     alpha=0.35, label=r"$u_x$" + ("" if no_band else f" ({cov_x:.1f}%)"), markersize=4, capsize=0, elinewidth=0.8)
     axes[2].errorbar(uy_true, uy_med, yerr=uy_err, fmt="o", color="#D55E00", ecolor="#D55E00",
-                     alpha=0.35, label=r"$u_y$ " + f"({cov_y:.1f}%)", markersize=3, capsize=0, elinewidth=0.8)
+                     alpha=0.35, label=r"$u_y$" + ("" if no_band else f" ({cov_y:.1f}%)"), markersize=3, capsize=0, elinewidth=0.8)
 
     all_vals = np.concatenate([u_true_val_flat.flatten(), u_p_mean.flatten()])
     limits = [all_vals.min(), all_vals.max()]
@@ -467,7 +470,8 @@ def plot_disp_field(node_coords, cells, u_true, u_pred_mean, u_true_val_flat, u_
     # --- Bottom Text Box Banner across figure width (centered under panels 2 & 3) ---
     prefix_str = f"{banner_prefix} " if banner_prefix else ""
     stats_banner = (
-        rf"{prefix_str}$95\%\;\mathrm{{EC}}_{{u}} = \mathbf{{{cov_xy:.1f}\%}}$   $\vert$   "
+        ("" if no_band else rf"{prefix_str}$95\%\;\mathrm{{EC}}_{{u}} = \mathbf{{{cov_xy:.1f}\%}}$   $\vert$   ")
+        + (prefix_str if no_band else "") +
         rf"$r^2_{{u_x}} = \mathbf{{{r2_x:.4f}}},\; r^2_{{u_y}} = \mathbf{{{r2_y:.4f}}}$   $\vert$   "
         rf"$\mathrm{{RMSE}}_{{u_x}} = \mathbf{{{rmse_x:.4f}}},\; \mathrm{{RMSE}}_{{u_y}} = \mathbf{{{rmse_y:.4f}}}$"
     )
