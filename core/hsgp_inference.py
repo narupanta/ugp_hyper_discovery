@@ -37,11 +37,12 @@ from .loss_function import build_eiv_indices
 
 jax.config.update("jax_enable_x64", True)
 
-LS_MAX_FRACTION = 1.0 / 2.67   # l_max = box_factor * S / 2.67 (constrained-kernel error < 1e-3 at c = 8, see tests)
+LS_MAX_FRACTION = 1.0 / 3.2    # l_max = box_factor * S / 3.2: c >= 3.2 l / S (Riutort-Mayol et al. 2023, SE kernel)
 
 
 def lengthscale_bounds(box: Box, box_factor: float):
-    """Per-dimension [l_min, l_max] the basis resolves: l_min from m >= 1.75 c S / l, l_max ~ c S / 2.67."""
+    """Per-dimension [l_min, l_max] where the HSGP approximates the SE kernel well (Riutort-Mayol et al. 2023):
+    l_min from m >= 1.75 c S / l, l_max from c >= 3.2 l / S."""
     S = box.half_width / box_factor
     m = box.indices.max(axis=0)
     return 1.75 * box_factor * S / m, LS_MAX_FRACTION * box_factor * S

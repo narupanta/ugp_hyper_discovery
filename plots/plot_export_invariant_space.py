@@ -21,7 +21,7 @@ from plots.training import plot_invariant_space_modes  # noqa: E402
 def plot_export(export_dir, saved_model_dir=None, gp=None, label=None):
     export_dir = os.path.abspath(export_dir)
     saved_model_dir = saved_model_dir or os.path.dirname(export_dir)
-    gp = gp or HSGPHyperelasticity.load(os.path.join(saved_model_dir, "hsgp_posterior.npz"))
+    gp = gp or __import__("core.teacher", fromlist=["load_energy_gp"]).load_energy_gp(os.path.join(saved_model_dir, "hsgp_posterior.npz"))
     F = jnp.asarray(np.load(os.path.join(export_dir, "f3x3.npy")))
     feats = jax.vmap(gp.feature_extractor.extract)(F)
     cols = [np.asarray(feats[0]), np.asarray(feats[1])]          # I1_bar, I2_bar, J

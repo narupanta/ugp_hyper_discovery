@@ -56,7 +56,7 @@ def main():
         gp = json.load(open(os.path.join(ext, "extraction_metrics.json"))).get("small_strain_moduli")
     if ext and os.path.exists(os.path.join(ext, "hsgp_posterior.npz")):
         from core.hsgp_model import HSGPHyperelasticity
-        incompressible = incompressible or bool(HSGPHyperelasticity.load(os.path.join(ext, "hsgp_posterior.npz")).incompressible_plane_stress)
+        incompressible = incompressible or bool(__import__("core.teacher", fromlist=["load_energy_gp"]).load_energy_gp(os.path.join(ext, "hsgp_posterior.npz")).incompressible_plane_stress)
     truth = None
     try:
         from core.material_models import get_material_from_dir

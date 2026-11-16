@@ -1506,39 +1506,14 @@ def main():
         import pandas as pd
         
         df = pd.DataFrame(samples_np, columns=full_param_names)
-        num_params_len = len(full_param_names)
-        cols = 4
-        rows = (num_params_len + cols - 1) // cols
-        
-        fig, axes = plt.subplots(rows, cols, figsize=(cols*4, rows*4))
-        axes = axes.flatten()
-        
-        means = df.mean()
-        for i, col in enumerate(full_param_names):
-            is_active = col in model.parameter_names
-            if is_active:
-                sns.histplot(df[col], ax=axes[i], color='#2980b9', bins=30, kde=True, edgecolor="black", alpha=0.7)
-                mean_val = means[col]
-                axes[i].axvline(mean_val, color='#c0392b', linestyle='--', linewidth=2, label=f"Mean: {mean_val:.4f}")
-                if col in true_params:
-                    true_val = true_params[col]
-                    axes[i].axvline(true_val, color='#27ae60', linestyle=':', linewidth=2, label=f"True: {true_val:.4f}")
-                    axes[i].set_title(f"{col}\nMean: {mean_val:.4f} (True: {true_val:.4f})", color='#2c3e50', fontsize=11, fontweight='bold')
-                else:
-                    axes[i].set_title(f"{col}\nMean: {mean_val:.4f}", color='#2c3e50', fontsize=11, fontweight='bold')
-                axes[i].legend(fontsize=9)
-            else:
-                sns.histplot([0], ax=axes[i], color='gray', bins=1)
-                axes[i].set_title(f"{col}\n[Deactivated by Sensitivity]", color='#7f8c8d', fontsize=12, style='italic')
-                axes[i].set_xlabel("Value (Fixed to 0)")
-            
-        for j in range(num_params_len, len(axes)):
-            axes[j].set_visible(False)
-            
-        plt.tight_layout()
+        # library terms only: terms disabled for this run (and E unless fitted) are left out; pruned ones are shown
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plots"))
+        from plot_param_distributions import plot_param_distributions
+        disabled_names = {full_param_names_master[i] for i in global_disabled if i < len(full_param_names_master)}
+        shown = [n for n in full_param_names if n not in disabled_names]
         plot_path = os.path.join(out_dir, pfx(f"distributions_{args.material_model}.pdf"))
-        plt.savefig(plot_path, dpi=200)
-        plt.close()
+        plot_param_distributions(samples_np, list(full_param_names), shown, list(model.parameter_names), true_params,
+                                 plot_path)
         print(f"Saved parameter distributions plot to {plot_path}")
     except Exception as e:
         print(f"Error plotting distribution histograms: {e}")

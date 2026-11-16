@@ -530,7 +530,8 @@ def main():
             
             # Form param names
             dev_names = ["$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$"]
-            og_names = [r"$\mu_{1}$", r"$\alpha_{1}$", r"$\mu_{2}$", r"$\alpha_{2}$", r"$\mu_{3}$", r"$\alpha_{3}$"]
+            from core.material_library import N_OGDEN_TERMS
+            og_names = [n for k in range(1, N_OGDEN_TERMS + 1) for n in (rf"$\mu_{{{k}}}$", rf"$\alpha_{{{k}}}$")]
             lib = distilled_library(distilled_dir) if args.distill_target == "sef_split" else "gmr"
             if lib == "ogden":
                 dev_names = og_names[:dev_df_samples.shape[1]]
@@ -768,6 +769,69 @@ def main():
     fig_p.savefig(save_file_p, bbox_inches='tight', dpi=200)
     plt.close(fig_p)
     print(f"Validation Stress plot saved to: {save_file_p}")
+
+    # --- combined figure: one column per mode, total energy (top) and the mode's Piola component (bottom), with the
+    # data boundary of plots.training.compute_interpolation_masks (extrapolation shaded) in both columns
+    def stress_comp(name):
+        return {"Pure Shear": ((1, 1), r"$P_{22}$"), "Simple Shear": ((0, 1), r"$P_{12}$")}.get(name, ((0, 0), r"$P_{11}$"))
+
+    dist_col = "#009E73"
+    n_modes = len(mode_names)
+    fig_c, axes_c = plt.subplots(2, n_modes, figsize=(3.0 * n_modes, 6.4), squeeze=False)   # row 0: energy, 1: stress
+    max_g = float(gamma.max())
+    for i, name in enumerate(mode_names):
+        (a_, b_), lab_p = stress_comp(name)
+        cols = [dict(truth=None if psi_true is None or i >= len(psi_true) else psi_true[i],
+                     gp_m=psi_dist_mean[i], gp_s=jnp.sqrt(psi_dist_var[i]), samp=dist_psi_samples[i],
+                     ylabel=r"$\Psi$"),
+                dict(truth=None if P_true is None or i >= len(P_true) else P_true[i, :, a_, b_],
+                     gp_m=P_dist_mean[i][:, a_, b_], gp_s=jnp.sqrt(P_dist_var[i][:, a_, b_]),
+                     samp=dist_p_samples[i][:, :, a_, b_], ylabel=lab_p)]
+        for j, cd in enumerate(cols):
+            ax = axes_c[j, i]
+            lo_n, hi_n = jnp.percentile(cd["samp"], 2.5, axis=0), jnp.percentile(cd["samp"], 97.5, axis=0)
+            ax.fill_between(gamma, cd["gp_m"] - 1.96 * cd["gp_s"], cd["gp_m"] + 1.96 * cd["gp_s"], color="gray",
+                            alpha=0.3, lw=0, label="GP 95% CI", zorder=2)
+            ax.plot(gamma, cd["gp_m"], color="gray", lw=1.5, label="GP mean", zorder=4)
+            ax.fill_between(gamma, lo_n, hi_n, color=dist_col, alpha=0.2, lw=0, label="Distilled 95% CI", zorder=3)
+            ax.plot(gamma, cd["samp"].mean(axis=0), color=dist_col, lw=2.0, label="Distilled mean", zorder=5)
+            if cd["truth"] is not None:
+                ax.plot(gamma, cd["truth"], "k--", lw=1.5, label=GT_LABEL, zorder=6)
+                y0, y1 = float(jnp.min(cd["truth"])), float(jnp.max(cd["truth"]))
+            else:
+                y0, y1 = float(jnp.min(lo_n)), float(jnp.max(hi_n))
+            pad = 0.1 * (y1 - y0) if y1 > y0 else 0.1
+            ax.set_ylim(y0 - pad, y1 + pad)
+            ax.set_xlim(0, max_g)
+            tg = transitions[i]
+            if tg < max_g:
+                ax.axvspan(tg, max_g, color="lightgrey", alpha=0.45, lw=0, zorder=1, label="Extrapolation")
+                ax.axvline(tg, color="black", ls=":", lw=1.2, zorder=4)
+            if j == 0:
+                ax.set_title(f"($m={i + 1}$) {name}", fontsize=10.5)
+            ax.set_ylabel(cd["ylabel"], fontsize=11, labelpad=1)
+            ax.yaxis.set_major_locator(ticker.MaxNLocator(5))
+            ax.tick_params(axis="both", labelsize=9)
+            ax.grid(False)
+            if j == 1:
+                ax.set_xlabel(r"Stretch measure ($\gamma$)", fontsize=11)
+    h, l = axes_c[0, 0].get_legend_handles_labels()
+    for ax in axes_c.ravel():                 # the extrapolation patch may only appear in some panels
+        hh, ll = ax.get_legend_handles_labels()
+        for x_, y_ in zip(hh, ll):
+            if y_ not in l:
+                h.append(x_); l.append(y_)
+    order = [GT_LABEL, "GP mean", "GP 95% CI", "Distilled mean", "Distilled 95% CI", "Extrapolation"]
+    hl = [(h[l.index(k)], k) for k in order if k in l]
+    fig_c.legend([x for x, _ in hl], [y for _, y in hl], loc="lower center", ncol=len(hl), fontsize=9.5, frameon=False,
+                 bbox_to_anchor=(0.5, 0.0))
+    fig_c.tight_layout(rect=[0, 0.06, 1, 1])
+    save_c = os.path.join(distilled_dir, f"distilled_validation_energy_stress_{args.material_model}{REF_SFX}.pdf")
+    fig_c.savefig(save_c, bbox_inches="tight", dpi=200)
+    fig_c.set_dpi(200)
+    fig_c.canvas.print_png(save_c[:-4] + ".png")   # direct PNG writer (savefig is redirected to PDF by the theme)
+    plt.close(fig_c)
+    print(f"Validation energy + stress plot saved to: {save_c}")
 
 if __name__ == "__main__":
     main()

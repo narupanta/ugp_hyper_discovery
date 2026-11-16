@@ -110,6 +110,33 @@ def solve(mat, X, cells, at_held, at_pulled, load_dof, load_sign, grip, label, m
     return np.asarray(solve_adaptive_fem(problem, bc, schedule, petsc, max_substeps=max_substeps, initial_substeps=2))
 
 
+def solve_force(mat, X, cells, at_held, at_pin, at_pulled, load_dof, load_sign, traction, label, max_substeps=32):
+    """Force control: uniform traction (force per length, reference configuration) on the pulled edge along
+    load_sign x e_load. Like the grips, both edges are held laterally (other component 0); the held edge also has the
+    load component fixed. (at_pin is kept for the call signature; the lateral edge constraints remove rigid motion.)"""
+    from jax_fem.generate_mesh import Mesh
+    from core.fem_engine import (BoundaryConditionConfig, DirichletBC, HyperElasticityProblem, NeumannBC,
+                                 make_incompressible_plane_stress_piola, solve_adaptive_fem)
+    piola, _ = make_incompressible_plane_stress_piola(mat)
+    other = 1 - load_dof
+    direction = [0.0, 0.0]
+    direction[load_dof] = -load_sign          # jax-fem sign: a force along +e is applied with direction -e
+    bc = BoundaryConditionConfig(mode="force", dirichlet_bcs=[
+        DirichletBC("held_load", at_held, load_dof, 0.0), DirichletBC("held_other", at_held, other, 0.0),
+        DirichletBC("pulled_other", at_pulled, other, 0.0)],
+        neumann_bcs=[NeumannBC("pulled", at_pulled, direction=tuple(direction), load_index=0)])
+    problem = HyperElasticityProblem(mesh=Mesh(X, cells), vec=2, dim=2, ele_type="TRI3",
+                                     dirichlet_bc_info=bc.get_dirichlet_info(), location_fns=[at_pulled],
+                                     surface_maps=bc.get_surface_maps(),
+                                     piola_func=lambda F: piola(F[:2, :2] if F.shape == (3, 3) else F))
+    petsc = {"snes_type": "newtonls", "snes_linesearch_type": "bt", "snes_atol": 1e-10, "snes_rtol": 1e-10,
+             "snes_stol": 1e-10, "snes_max_it": 50, "ksp_type": "preonly", "pc_type": "lu",
+             "pc_factor_mat_solver_type": "mumps"}
+    print(f"[{label}] force control: solving {len(traction)} steps on the full mesh ({X.shape[0]} nodes) ...", flush=True)
+    return np.asarray(solve_adaptive_fem(problem, bc, jnp.asarray(traction[:, None]), petsc, max_substeps=max_substeps,
+                                         initial_substeps=2))
+
+
 def grip_reaction(mat, X, cells, u, nodes):
     """Sum of the internal forces at the given grip nodes (per unit thickness), per step: (steps, 2)."""
     from core.material_models import IncompressiblePlaneStressView
@@ -165,6 +192,10 @@ def main():
     p.add_argument("--plot_step", type=int, default=16, help="load step index of the field panels")
     p.add_argument("--val_steps", type=int, nargs="*", default=None, help="steps of the parity panel (default: all)")
     p.add_argument("--plot_only", action="store_true", help="reuse saved u_full_*.npz")
+    p.add_argument("--control", choices=["displacement", "force"], default="displacement",
+                   help="displacement: grips (clamp options, grip stroke); force: uniform traction on the pulled end "
+                        "edge totalling the measured reaction (force per thickness), both end edges held laterally and "
+                        "the opposite edge held in the load direction (specimen-frame meshes)")
     p.add_argument("--param_mode", choices=["mean", "samples"], default="mean",
                    help="distilled model: mean of the parameter samples (one solve), or n_samples parameter samples "
                         "(mean field and 95%% band)")
@@ -265,7 +296,26 @@ def main():
                   f"x {X[n, 0].min():.2f}..{X[n, 0].max():.2f}")
         held_nodes = tabs[held]
         print(f"loading along x, sign {load_sign:+.0f}")
-    print(f"grip displacement (mm) per DIC step: {np.round(grip, 2)}")
+    if args.control == "force":
+        if "X_dic" not in m.files:
+            raise SystemExit("--control force needs a specimen-frame mesh (X_dic), e.g. TTf / TTc")
+        pe, he = (nt_edge, nb_edge) if top_pulled else (nb_edge, nt_edge)
+        y_p, y_h = float(X[pe, 1].mean()), float(X[he, 1].mean())
+        width = float(np.ptp(X[pe, 0]))
+        pin = he[np.argmin(np.abs(X[he, 0] - X[he, 0].mean()))]
+        xp, yp = float(X[pin, 0]), float(X[pin, 1])
+
+        def edge_fn(y_c):
+            return lambda q: jnp.abs(q[1] - y_c) <= 1e-6
+        at_pulled, at_held = edge_fn(y_p), edge_fn(y_h)
+        at_pin = lambda q: (jnp.abs(q[0] - xp) <= 1e-6) & (jnp.abs(q[1] - yp) <= 1e-6)
+        held_nodes = he
+        F_meas = np.linalg.norm(R_meas, axis=1)
+        traction = F_meas / width
+        print(f"force control: traction on the {'top' if top_pulled else 'bottom'} edge (width {width:.1f} mm), "
+              f"{np.round(traction, 4)} per step (= measured force / width); both edges held laterally, the opposite edge also in y")
+    else:
+        print(f"grip displacement (mm) per DIC step: {np.round(grip, 2)}")
 
     dist_key = "distilled_mean" if args.param_mode == "mean" else "distilled_samples"
     models = ({dist_key: None} if args.distilled_dir else {}) | {args.reference: None}
@@ -297,7 +347,10 @@ def main():
         for i, (mat, th) in enumerate(zip(mats, thetas)):
             tag = label if len(mats) == 1 else f"{label}: sample {i + 1}/{len(mats)}"
             try:
-                u = solve(mat, X, cells, at_held, at_pulled, load_dof, load_sign, grip, tag)
+                if args.control == "force":
+                    u = solve_force(mat, X, cells, at_held, at_pin, at_pulled, load_dof, load_sign, traction, tag)
+                else:
+                    u = solve(mat, X, cells, at_held, at_pulled, load_dof, load_sign, grip, tag)
                 if not np.all(np.isfinite(u)):
                     raise RuntimeError("non-finite displacements")
             except Exception as exc:                                   # a failed sample is skipped
@@ -317,7 +370,12 @@ def main():
             extra = dict(u_dic_lo=lo, u_dic_hi=hi, reaction_samples=np.array(R), u_dic_samples=u_dic_s.astype(np.float32))
             label = label.replace(f"{len(thetas)} parameter", f"{len(U)} parameter")
         params = np.array([]) if thetas[0] is None else np.array(thetas)[ok]
-        np.savez_compressed(f, u_full=u_full, u_dic=u_dic, reaction_top=R_top, grip=grip, steps=steps, label=label,
+        grip_s = (np.abs(u_full[:, pe, load_dof].mean(1)) - np.abs(u_full[:, he, load_dof].mean(1))
+                  if args.control == "force" else grip)
+        if args.control == "force":
+            print(f"[{label}] pulled-edge displacement per step (mm): {np.round(grip_s, 1)}")
+        np.savez_compressed(f, u_full=u_full, u_dic=u_dic, reaction_top=R_top, grip=grip_s, steps=steps, label=label,
+                            control=args.control,
                             params=params, **extra)
         print(f"[{label}] saved {f}; top-grip force at the last step {np.round(R_top[-1], 3)} (per unit thickness), "
               f"measured {np.round(R_meas[-1], 3)}")
@@ -337,7 +395,7 @@ def main():
              if main_key != args.reference else [])
     plot_disp_field(xq, dic_cells, u_obs[k], main_u[k], u_obs[vs].reshape(-1, 2), main_u[vs].reshape(-1, 2),
                     lo_v, hi_v, args.out_dir, filename_base="displacement_analysis_full_mesh",
-                    banner_prefix="[Full specimen, displacement control]", is_clean=False, extra_rows=extra,
+                    banner_prefix=f"[Full specimen, {args.control} control]", is_clean=False, extra_rows=extra,
                     main_label=results[main_key]["label"])
     for key, r in results.items():
         print(f"{r['label']}: held-grip force per step (load direction): {np.round(np.abs(r['R'][:, load_dof]), 3)}")

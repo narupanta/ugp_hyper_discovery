@@ -48,8 +48,19 @@ REFERENCES = {
     "gt": ("Gent-Thomas", lambda c: (lambda I1, I2: 0.2842 * (I1 - 3) + 0.0445 * np.log(I2 / 3))(*_inv(c))),
     "ogden1": ("1-term Ogden", lambda c: 0.2881 * (_sum_pow(c, 2.0160) - 3)),
     "ogden2": ("2-term Ogden", lambda c: 0.0006 * (_sum_pow(c, 5.9364) - 3) + 10.9138 * (_sum_pow(c, 0.3435) - 3)),
+    # identified / discovered on the UT and TTf local data (Flaschel et al., Table 4)
+    "euclid_ttf_ut": ("EUCLID (UT+TTf)", lambda c: 1.9458 * (_sum_pow(c, 0.8) - 3) + 0.0003 * (_sum_pow(c, 6.4) - 3)),
+    "euclid_noogden_ttf_ut": ("EUCLID w/o Ogden (UT+TTf)", lambda c: (lambda I1, I2: 0.2157 * (I1 - 3)
+                                                                       + 0.00004 * (I1 - 3) ** 4
+                                                                       + 0.2771 * np.log(I2 / 3))(*_inv(c))),
+    "gmr1_ttf_ut": ("1st-order GMR (UT+TTf)", lambda c: 0.2831 * (_inv(c)[0] - 3)),
+    "gmr2_ttf_ut": ("2nd-order GMR (UT+TTf)", lambda c: (lambda I1, I2: 0.2738 * (I1 - 3) + 0.0023 * (I1 - 3) ** 2)(*_inv(c))),
+    "gmr3_ttf_ut": ("3rd-order GMR (UT+TTf)", lambda c: (lambda I1, I2: 0.2630 * (I1 - 3) + 0.0003 * (I2 - 3) ** 3)(*_inv(c))),
+    "gt_ttf_ut": ("Gent-Thomas (UT+TTf)", lambda c: 0.2835 * (_inv(c)[0] - 3)),
+    "ogden1_ttf_ut": ("1-term Ogden (UT+TTf)", lambda c: 0.2442 * (_sum_pow(c, 2.1241) - 3)),
+    "ogden2_ttf_ut": ("2-term Ogden (UT+TTf)", lambda c: 0.0002 * (_sum_pow(c, 6.5881) - 3) + 1.4939 * (_sum_pow(c, 0.9109) - 3)),
 }
-REF_STYLES = {"euclid": dict(color="#c62828", lw=2.0, ls="--")}
+REF_STYLES = {"euclid": dict(color="#c62828", lw=2.0, ls="--"), "euclid_ttf_ut": dict(color="#c62828", lw=2.0, ls="--")}
 
 
 # --- the references as material objects (JAX, incompressible: isochoric invariants, no volumetric part), for plots
@@ -64,9 +75,16 @@ def _jax_W(key):
         "gmr3": lambda I1, I2: (0.1354 * (I1 - 3) + 0.1528 * (I2 - 3) + 3.7369e-6 * (I1 - 3) ** 2 * (I2 - 3)
                                 + 8.6685e-5 * (I1 - 3) ** 2 + 6.5870e-4 * (I1 - 3) ** 3),
         "gt": lambda I1, I2: 0.2842 * (I1 - 3) + 0.0445 * jnp.log(I2 / 3),
+        "euclid_noogden_ttf_ut": lambda I1, I2: 0.2157 * (I1 - 3) + 0.00004 * (I1 - 3) ** 4 + 0.2771 * jnp.log(I2 / 3),
+        "gmr1_ttf_ut": lambda I1, I2: 0.2831 * (I1 - 3),
+        "gmr2_ttf_ut": lambda I1, I2: 0.2738 * (I1 - 3) + 0.0023 * (I1 - 3) ** 2,
+        "gmr3_ttf_ut": lambda I1, I2: 0.2630 * (I1 - 3) + 0.0003 * (I2 - 3) ** 3,
+        "gt_ttf_ut": lambda I1, I2: 0.2835 * (I1 - 3),
     }
     # Ogden references c_k (sum lam^a_k - 3) = 2 mu_k / a_k^2 (...) -> mu_k = c_k a_k^2 / 2 (core/ogden.py convention)
-    og = {"ogden1": ([0.2881], [2.0160]), "ogden2": ([0.0006, 10.9138], [5.9364, 0.3435])}
+    og = {"ogden1": ([0.2881], [2.0160]), "ogden2": ([0.0006, 10.9138], [5.9364, 0.3435]),
+          "euclid_ttf_ut": ([1.9458, 0.0003], [0.8, 6.4]), "ogden1_ttf_ut": ([0.2442], [2.1241]),
+          "ogden2_ttf_ut": ([0.0002, 1.4939], [6.5881, 0.9109])}
     if key in og:
         c, a = (jnp.asarray(v) for v in og[key])
         return lambda F: ogden_dev_energy_jax(F, c * a ** 2 / 2, a)
@@ -127,7 +145,7 @@ def main():
     args = p.parse_args()
     apply_style()
 
-    gp = HSGPHyperelasticity.load(os.path.join(args.extract_dir, "hsgp_posterior.npz"))
+    gp = __import__("core.teacher", fromlist=["load_energy_gp"]).load_energy_gp(os.path.join(args.extract_dir, "hsgp_posterior.npz"))
     if not getattr(gp, "incompressible_plane_stress", False):
         print("warning: the GP is not incompressible plane stress; the reference models are incompressible")
     I_obs = np.load(os.path.join(args.extract_dir, "I_obs_all.npy")).reshape(-1, 3)
@@ -137,8 +155,10 @@ def main():
     from plots.training import deviatoric_region
     inside = deviatoric_region(dev_obs).contains
 
-    phi_feat = jax.jit(lambda dev: gp.basis_from_features(dev, jnp.ones(dev.shape[:-1] + (1,))))
-    m, Fc = np.asarray(gp.theta_mean), np.asarray(gp.theta_factor)
+    exact = getattr(gp, "model_type", "hsgp") == "exact_gp"
+    if not exact:
+        phi_feat = jax.jit(lambda dev: gp.basis_from_features(dev, jnp.ones(dev.shape[:-1] + (1,))))
+        m, Fc = np.asarray(gp.theta_mean), np.asarray(gp.theta_factor)
 
     def gp_W_along(mode, lam):
         """GP energy and dW/dlambda (mean, std) along a mode path."""
@@ -149,6 +169,8 @@ def main():
             c = jnp.stack([l1 ** 2, l2 ** 2, 1.0 / (l1 * l2) ** 2])
             return jnp.stack([c.sum(), c[0] * c[1] + c[1] * c[2] + c[2] * c[0]])
         lam_j = jnp.asarray(lam)
+        if exact:      # exact GP: the energy and its derivative along the path as GP functionals
+            return gp.dev_curve_dist(feats, lam_j)
         phi = np.asarray(phi_feat(jax.vmap(feats)(lam_j)))
         dphi = np.asarray(jax.vmap(jax.jacfwd(lambda l: gp.basis_from_features(feats(l), jnp.ones(1))))(lam_j))
         W, dW = phi @ m, dphi @ m

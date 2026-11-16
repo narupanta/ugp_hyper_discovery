@@ -26,6 +26,14 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_amplitude_prior_scale: 0.0 # > 0: log-normal hyperprior widths (log units)
     hsgp_lengthscale_prior_scale: 0.0
     hsgp_hyper_restarts: 1          # multi-start hyperparameter optimisation (prior centre, lengthscales x0.5, x2)
+Exact GP (no basis approximation, for 1-3 load steps; core/exact_gp.py):
+    gp_method: exact                # hsgp (default) | exact
+    exact_gp_train_load_steps_indices: [9, 19]   # optional: the steps of the exact fit (default: train_load_steps_indices)
+    exact_gp_hyper_steps: 200       # L-BFGS iterations of the hyperparameter fit
+  The noise / s options (hsgp_force_noise_rel, hsgp_cv_*, hsgp_opposite_reactions, hsgp_global_equilibrium,
+  hsgp_sigma_cap, hsgp_hyper_restarts) apply as for the HSGP; the basis options (hsgp_num_basis_*, hsgp_box_factor) do
+  not. With a single training step, s needs hsgp_force_noise_rel > 0 or hsgp_cv_holdout: val. The posterior is written
+  to the same hsgp_posterior.npz (model_type exact_gp), so the downstream steps load it unchanged.
 Anisotropy: material_params.angles (degrees, one or two fibre families) switches on the fibre GP over (I4_bar, I6_bar);
 model_mode: isotropic in such a recipe switches it off (isotropic GP on anisotropic data).
 Recipe keys for the reactions (not hsgp_*): reaction_components, reaction_noise_rel, reaction_noise_floor,
@@ -50,6 +58,8 @@ import matplotlib.pyplot as plt
 
 from core.datasetclass import DatasetFactory
 from core.hsgp_inference import fit_hsgp, reaction_prediction
+from core.exact_gp import fit_exact_gp
+from core.teacher import load_energy_gp
 from core.hsgp_model import HSGPHyperelasticity, fiber_vectors
 from core.loss_function import ellipticity_penalty
 from core.material_models import get_material
@@ -99,7 +109,8 @@ def plot_reactions(model, F_steps, prep, train_steps, save_path, has_truth, sigm
     """Reaction forces per load step: epistemic band vs true reactions (synthetic), predictive band vs measured.
     sigma_R: (n_steps, 2) reaction noise of the likelihood (default: the dataset's load_noise_std_steps).
     name: experiment name (several experiments): reaction_force_uncertainty_<name>.pdf."""
-    mean, cov = reaction_prediction(model, F_steps, prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"])
+    pred = model.reaction_prediction if hasattr(model, "reaction_prediction") else (lambda *a: reaction_prediction(model, *a))
+    mean, cov = pred(F_steps, prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"])
     sd_epi = np.sqrt(np.stack([cov[:, 0, 0], cov[:, 1, 1]], axis=1))
     sig_R = np.maximum(np.asarray(prep["load_noise_std_steps"] if sigma_R is None else sigma_R, dtype=float), 1e-3)
     unmeasured = np.all(sig_R > 1e6, axis=0)                 # components without a load cell: epistemic band only
@@ -173,7 +184,14 @@ def main():
     if str(rec.get("hsgp_likelihood", "residual_exact")) != "residual_exact":
         raise ValueError(f"hsgp_likelihood {rec['hsgp_likelihood']!r}: only residual_exact is supported here; "
                          f"the EIV and other likelihoods are in archive/eiv/train_hsgp.py")
+    gp_method = str(rec.get("gp_method", "hsgp")).lower()
+    if gp_method not in ("hsgp", "exact"):
+        raise ValueError(f"gp_method must be 'hsgp' or 'exact' (got {gp_method!r})")
     train_steps = args.train_load_steps_indices or rec.get("train_load_steps_indices")
+    if gp_method == "exact" and rec.get("exact_gp_train_load_steps_indices") is not None and args.train_load_steps_indices is None:
+        train_steps = [int(t) for t in rec["exact_gp_train_load_steps_indices"]]
+    if gp_method == "exact":
+        print(f"[ExactGP] exact GP extraction (no HSGP basis) on the training steps {train_steps}", flush=True)
     val_steps = args.val_load_steps_indices or rec.get("val_load_steps_indices", [])
     test_steps = args.test_load_steps_indices if args.test_load_steps_indices is not None else rec.get("test_load_steps_indices", [])
     save_path = args.batch_dir
@@ -278,8 +296,10 @@ def main():
         labels = [[f"{x['name']}:{t}" for t in train_steps] for x in exps]
         if not multi:
             data_args, labels = tuple(a[0] for a in data_args), train_steps
-        model, hist = fit_hsgp(
-            *data_args,
+        fit_fn = fit_exact_gp if gp_method == "exact" else fit_hsgp
+        extra = dict(hyper_steps=int(rec.get("exact_gp_hyper_steps", 200))) if gp_method == "exact" else {}
+        model, hist = fit_fn(
+            *data_args, **extra,
             energy_scale=energy_scale, num_basis_dev=opt["hsgp_num_basis_dev"], num_basis_vol=opt["hsgp_num_basis_vol"],
             box_factor=opt["hsgp_box_factor"], sigma_cap=opt["hsgp_sigma_cap"],
             amplitude_prior_scale=opt["hsgp_amplitude_prior_scale"], lengthscale_prior_scale=opt["hsgp_lengthscale_prior_scale"],
@@ -297,7 +317,7 @@ def main():
         np.save(os.path.join(save_path, "I_obs_all.npy"), I_obs)
         if multi:   # pooled training states of all experiments (the export's distillation states read these)
             np.save(os.path.join(save_path, "train_states_f3x3.npy"), np.asarray(F_train_states))
-        cfg_out = dict(rec, extraction_method="hsgp", dataset_path=exps[0]["dataset_path"], seed=args.seed, batch_dir=save_path,
+        cfg_out = dict(rec, extraction_method="exact_gp" if gp_method == "exact" else "hsgp", dataset_path=exps[0]["dataset_path"], seed=args.seed, batch_dir=save_path,
                        experiments=[dict(name=x["name"], dataset_path=x["dataset_path"]) for x in exps] if multi else None,
                        train_load_steps_indices=train_steps, val_load_steps_indices=val_steps,
                        test_load_steps_indices=test_steps, data_energy_scale=energy_scale, hsgp_options=opt,
@@ -308,7 +328,7 @@ def main():
         if args.phase == "fit":
             return
     else:
-        model = HSGPHyperelasticity.load(post_path)
+        model = load_energy_gp(post_path)
         I_obs = np.load(os.path.join(save_path, "I_obs_all.npy"))
         fit_time = model.info.get("fit_time", float("nan"))
 
@@ -321,7 +341,7 @@ def main():
         reac = plot_reactions(model, F_all, prep, train_steps, save_path, has_truth, sigma_R=sigma_R_steps)
     _, frac = ellipticity_penalty(model.psi_det, jnp.concatenate([x["F_all"][jnp.array(train_steps)].reshape(-1, 3, 3)
                                                                   for x in exps]), 8)
-    metrics = dict(seed=args.seed, extraction_method="hsgp", extraction_time=fit_time, train_steps=train_steps,
+    metrics = dict(seed=args.seed, extraction_method="exact_gp" if gp_method == "exact" else "hsgp", extraction_time=fit_time, train_steps=train_steps,
                    val_steps=val_steps, log_evidence=model.info["log_evidence"], converged=model.info["converged"],
                    small_strain_moduli=model.small_strain_moduli(),
                    fraction_unstable=float(frac), reaction_forces=reac,
@@ -336,10 +356,14 @@ def main():
             jax.clear_caches()
             gc.collect()
         release()   # the stability check and moduli above leave their compiled functions behind
-        r2_res = plot_training_r2(model, mat, F_all, save_path, train_steps=train_steps, val_steps=val_steps, test_steps=test_steps)
+        # exact GP: fewer pathwise draws in the sample-based plot panels (each draw touches every observation atom;
+        # the means, bands and metrics are closed form and do not use them)
+        n_e, n_p = (64, 16) if getattr(model, "model_type", "hsgp") == "exact_gp" else (256, 64)
+        r2_res = plot_training_r2(model, mat, F_all, save_path, train_steps=train_steps, val_steps=val_steps,
+                                  test_steps=test_steps, n_pws_samples=n_e)
         release()
         plot_training_r2_piola(model, mat, F_all, save_path, train_steps=train_steps, val_steps=val_steps,
-                               test_steps=test_steps, n_pws_samples=64)
+                               test_steps=test_steps, n_pws_samples=n_p)
         release()
         plot_combined_validation(model, mat, save_path, 0, I_obs=I_obs)
         release()

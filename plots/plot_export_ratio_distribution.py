@@ -99,7 +99,7 @@ def plot_ratio_distribution(ext, export_dirs=(), random_n=(), fps_n=(), random_s
     from types import SimpleNamespace
     args = SimpleNamespace(export_dir=list(export_dirs), random_n=list(random_n), fps_n=list(fps_n),
                            random_seed=random_seed, out=out)
-    gp = gp or HSGPHyperelasticity.load(os.path.join(ext, "hsgp_posterior.npz"))
+    gp = gp or __import__("core.teacher", fromlist=["load_energy_gp"]).load_energy_gp(os.path.join(ext, "hsgp_posterior.npz"))
     incompressible = bool(getattr(gp, "incompressible_plane_stress", False))
     I_all = np.load(os.path.join(ext, "I_obs_all.npy"))
     dev_obs = I_all[:, :2]
