@@ -14,8 +14,6 @@ import jax.numpy as jnp
 
 from plots.theme import apply_style
 from plots.sensitivity import load_sobol_csv
-from core.model import SparseHyperelasticityGP
-from core.dataclass import GPRawParams
 from core.material_models import get_material
 from core.features import IsotropicFeatureExtractor
 from core.utils import (
@@ -213,77 +211,11 @@ def main():
         true_model_name = "experimental"
     
     from core.teacher import load_hsgp_teacher
-    learned_gp = load_hsgp_teacher(saved_model_dir)   # HSGP extraction or None (SVGP: rebuilt below)
-    is_hsgp = learned_gp is not None
-    if is_hsgp:
-        I_z = None
-        feature_extractor = learned_gp.feature_extractor
-        cov_mode, constraint_lengthscale = "diag", 1
-        dev_z, vol_z, aniso_z = learned_gp.dev_z, learned_gp.vol_z, None
-        min_dev, max_dev = dev_z.min(0), dev_z.max(0)
-        min_vol, max_vol = vol_z.min(0), vol_z.max(0)
-        min_aniso = max_aniso = None
-    else:
-        best_params_dict = np.load(os.path.join(saved_model_dir, "best_params.npy"), allow_pickle=True).item()
-        gp_params = GPRawParams(**best_params_dict)
-        I_z = jnp.load(os.path.join(saved_model_dir, "I_z.npy"))
-    
-        dev_z = I_z[:, :2]
-        vol_z = I_z[:, 2:3] if I_z.shape[1] > 3 else I_z[:, 2:]
-        aniso_z = I_z[:, 3:] if I_z.shape[1] > 3 else None
+    learned_gp = load_hsgp_teacher(saved_model_dir)   # HSGP or exact GP posterior
+    feature_extractor = learned_gp.feature_extractor
+    dev_z, vol_z = learned_gp.dev_z, learned_gp.vol_z
 
-        min_dev = jnp.min(dev_z, axis=0)
-        min_vol = jnp.min(vol_z, axis=0)
-        max_dev = jnp.max(dev_z, axis=0)
-        max_vol = jnp.max(vol_z, axis=0)
-
-        min_aniso = jnp.min(aniso_z, axis=0) if aniso_z is not None else None
-        max_aniso = jnp.max(aniso_z, axis=0) if aniso_z is not None else None
-
-        feature_extractor = None
-        if aniso_z is not None:
-            from core.features import AnisotropicFeatureExtractor
-            a0_val = getattr(true_model, "a0", None)
-            if a0_val is None:
-                a0_val = getattr(true_model, "a1", None)
-        
-            a1_val = getattr(true_model, "a1", None) if getattr(true_model, "a0", None) is not None else getattr(true_model, "a2", None)
-        
-            if a0_val is not None and a1_val is not None:
-                feature_extractor = AnisotropicFeatureExtractor(np.array(a0_val), a1=np.array(a1_val))
-            elif a0_val is not None:
-                feature_extractor = AnisotropicFeatureExtractor(np.array(a0_val))
-            elif getattr(gp_params, "raw_aniso_theta_mean", None) is not None:
-                raw_th = gp_params.raw_aniso_theta_mean
-                theta = float(np.pi * (1.0 / (1.0 + np.exp(-raw_th)) - 0.5))
-                a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
-                feature_extractor = AnisotropicFeatureExtractor(a0)
-            elif os.path.exists(os.path.join(saved_model_dir, "metadata.json")):
-                with open(os.path.join(saved_model_dir, "metadata.json")) as mf:
-                    m_data = json.load(mf)
-                    if "a0" in m_data:
-                        a0 = np.array(m_data["a0"])
-                        a1 = np.array(m_data["a1"]) if "a1" in m_data else None
-                        feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
-                    elif aniso_z.shape[1] == 4:
-                        a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
-                        a1 = np.array([np.cos(-np.pi / 4.0), np.sin(-np.pi / 4.0), 0.0])
-                        feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
-                    else:
-                        theta = np.pi / 4.0
-                        a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
-                        feature_extractor = AnisotropicFeatureExtractor(a0)
-            elif aniso_z.shape[1] == 4:
-                a0 = np.array([np.cos(np.pi / 4.0), np.sin(np.pi / 4.0), 0.0])
-                a1 = np.array([np.cos(-np.pi / 4.0), np.sin(-np.pi / 4.0), 0.0])
-                feature_extractor = AnisotropicFeatureExtractor(a0, a1=a1)
-            else:
-                theta = np.pi / 4.0
-                a0 = np.array([np.cos(theta), np.sin(theta), 0.0])
-                feature_extractor = AnisotropicFeatureExtractor(a0)
-    
-
-    # shared by both teachers: observed-invariant hull and limits, stress mode
+    # observed-invariant hull and limits, stress mode
     obs_path = os.path.join(saved_model_dir, "I_obs_all.npy")
     if os.path.exists(obs_path):
         I_obs_all = jnp.load(obs_path)
@@ -293,7 +225,7 @@ def main():
     else:
         dev_obs = dev_z
         vol_obs = vol_z
-        I_obs_all = I_z
+        I_obs_all = None
     
     limit_min_vol, limit_max_vol = jnp.min(vol_obs, axis=0), jnp.max(vol_obs, axis=0)
     dev_hull = ConvexHull(np.array(dev_obs))
@@ -301,19 +233,7 @@ def main():
     dev_tol = 0.001
     vol_tol = 0.001
 
-    import json
-    metadata_path = os.path.join(saved_model_dir, "metadata.json")
-    cov_mode = "diag"
-    constraint_lengthscale = 1
     stress_mode = args.stress_mode
-
-    if os.path.exists(metadata_path):
-        with open(metadata_path, "r") as f:
-            _meta = json.load(f)
-            cov_mode = _meta.get("covariance_mode", "diag")
-            constraint_lengthscale = _meta.get("constraint_lengthscale", 1)
-            if stress_mode is None:
-                stress_mode = _meta.get("stress_mode", None)
 
     if stress_mode is None:
         from core.utils import load_model_config
@@ -327,15 +247,6 @@ def main():
         stress_mode = "plane_strain"
     print(f"[PLOT SUMMARY] Using stress_mode='{stress_mode}' for standard deformation mode generation.")
 
-    if not is_hsgp:            
-        learned_gp = SparseHyperelasticityGP(
-            gp_params, I_z, min_dev, min_vol, max_dev, max_vol,
-            beta=1.0, feature_extractor=feature_extractor,
-            aniso_z=aniso_z, min_aniso=min_aniso, max_aniso=max_aniso,
-            covariance_mode=cov_mode,
-            constraint_lengthscale=constraint_lengthscale
-        )
-    
     # Generate Data according to stress_mode ("plane_strain" vs "plane_stress")
     if getattr(learned_gp, "incompressible_plane_stress", False):
         stress_mode = "plane_stress_incompressible"   # modes at J = 1, as the GP and a deviatoric-only distillation
@@ -1515,9 +1426,6 @@ def main():
     # Plot training dataset
     ax_dev.scatter(I_obs_all[:, 0], I_obs_all[:, 1], color='#1f77b4', marker='.', s=10, alpha=0.3, label='Training Dataset', zorder=2)
     
-    # Plot inducing points
-    ax_dev.scatter(dev_z[:, 0], dev_z[:, 1], color='black', marker='X', s=15, linewidths=0.2, label='Inducing Points', zorder=5)
-    
     # Plot mode trajectories and collect interception text
     mode_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
     extrap_texts_dev = []
@@ -1554,11 +1462,6 @@ def main():
     ax_vol.axhline(limit_min_vol[0], color='k', linestyle='--', lw=1.5, zorder=2)
     ax_vol.axhline(limit_max_vol[0], color='k', linestyle='--', lw=1.5, zorder=2)
     
-    # Plot inducing points as faint lines
-    for idx, vz in enumerate(vol_z):
-        lbl = 'Inducing Points (J)' if idx == 0 else ""
-        ax_vol.axhline(vz[0], color='black', alpha=0.5, ls=':', lw=1, label=lbl, zorder=3)
-        
     # Plot mode trajectories and collect interception text
     extrap_texts_vol = []
     

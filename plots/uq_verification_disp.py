@@ -622,7 +622,6 @@ if __name__ == "__main__" :
     true_data_dir = Path("dataset/precomputed_vfm")
 
     analysis_dir = Path("validation/coverage_test") 
-    extraction_result_dir = Path("extraction/extracted_models") 
     case_name = args.model_path
 
     if os.path.exists(Path(args.model_path)):

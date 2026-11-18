@@ -1,0 +1,83 @@
+# ==============================================================================
+# Recipe v2 (HSGP extraction): 3-term Ogden with large / non-integer exponents (alpha = 1.3, 12, -6.5;
+# mu = 0.6, 0.002, 0.05, mu_0 = 0.652), plane strain, top load 1.0. Unlike even exponents (alpha = +-2, +-4 are
+# polynomials in I1, I2), this energy is not an invariant polynomial: a cubic GMR fit leaves ~2-7% relative misfit
+# at these strains (vs ~1e-4 for alpha = 2.3, 1.4). Residual likelihood, sigma_free by cross-validation.
+# Distillation library: 3 Ogden terms (mu_k, alpha_k) + D1..D3 (set distilled_material_model: gmr to test the
+# invariant library against it).
+# ==============================================================================
+
+# --- Material and data generation --------------------------------------------
+material_model_name: ogden
+material_params:
+  mu_params: [0.6, 0.02, 0.0]
+  alpha_params: [1.3, 12.0, 0.0]
+  vol_params: [1.5, 0.0, 0.0]
+geometry_train: block
+geometry_val: holes
+mesh_size: 0.08
+control_mode: displacement
+stress_mode: plane_strain
+n_loadsteps: 20
+target_load_true_top: 1.0
+target_load_holes: 1.0
+asym_factor: 0.5
+disp_noise: 1.0e-5
+load_noise: 0.02
+
+# --- Load steps and seeds ----------------------------------------------------
+train_load_steps_indices:
+- 1
+- 3
+- 5
+- 7
+- 9
+- 11
+- 13
+- 15
+- 17
+- 19
+val_load_steps_indices:
+- 2
+- 4
+- 6
+- 8
+- 10
+- 12
+- 14
+- 16
+- 18
+- 20
+seeds:
+- 1
+
+# --- Extraction (HSGP) -------------------------------------------------------
+hsgp_likelihood: residual_exact
+hsgp_force_noise_rel: 0.0       # 0: s chosen by cross-validation
+hsgp_cv_folds: 2
+hsgp_cv_tol: 2.0
+hsgp_num_basis_dev: 8
+hsgp_num_basis_vol: 8
+hsgp_box_factor: 8.0
+hsgp_amplitude_prior_scale: 0.0
+hsgp_lengthscale_prior_scale: 0.0
+hsgp_sigma_cap: 10.0
+hsgp_hyper_restarts: 1
+
+# --- Distillation ------------------------------------------------------------
+distilled_material_model: ogden
+distill_target: sef_split
+distillation_n_iterations: 10000
+dev_vol_distillation_n_iterations: 10000
+sample_mode: dataset_f
+num_points: 512
+num_func_samples: 512
+max_gamma: 1.0
+do_sensitivity: 1
+sobol_threshold: 0.0001
+sobol_samples_factor: 4096
+
+# --- FEM forward validation --------------------------------------------------
+run_validation: 1
+val_number_samples: 1024
+val_workers: 4

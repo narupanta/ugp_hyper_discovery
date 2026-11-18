@@ -1,0 +1,53 @@
+{
+  "transform": "x = y_dic - ty, y = tx - x_dic",
+  "tx": 47.78,
+  "ty": -25.514,
+  "roi_reference_specimen_frame": {
+    "x": [
+      -0.2264000000000017,
+      49.4013
+    ],
+    "y": [
+      70.0265,
+      138.1069
+    ],
+    "length_y": 68.0804
+  },
+  "specimen": {
+    "x": [
+      0.0,
+      50.0
+    ],
+    "y": [
+      0.0,
+      205.0
+    ]
+  },
+  "free_length_outside_roi": {
+    "below": 70.0265,
+    "above": 66.8931
+  },
+  "boundary_distance_given": {
+    "mean": 0.739858117218585,
+    "median": 0.7004499999999982,
+    "p95": 1.655890682127201,
+    "max": 1.867345653527504,
+    "n_nodes": 202
+  },
+  "rigid_correction": {
+    "rotation_deg": 0.4001618277656204,
+    "shift_x": 0.3031212851346163,
+    "shift_y": -0.04067341721619508
+  },
+  "boundary_distance_corrected": {
+    "mean": 0.7267913115032489,
+    "median": 0.7229489817949415,
+    "p95": 1.2439815229868367,
+    "max": 2.2820545235049976
+  },
+  "dic_nodes_outside_mesh": {
+    "given": 36,
+    "corrected": 18,
+    "total": 3204
+  }
+}

@@ -1,9 +1,13 @@
 #!/bin/bash
+# glibc keeps freed memory per arena by default: the exact-GP plots (many large temporaries) then grow past small
+# machines. Fewer arenas and an eager trim return it to the OS (harmless for the HSGP).
+export MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-2}
+export MALLOC_TRIM_THRESHOLD_=${MALLOC_TRIM_THRESHOLD_:-100000}
 # HSGP extraction pipeline: dataset spec (clean FEM data solved once, reused) -> HSGP fit -> plots/metrics, per seed.
 #
 # Usage:
 #   scripts/run_hsgp_pipeline.sh <recipe.yaml | recipe name (configs/recipes_v2 first) | experiment dir> [--seeds "6 7 8"] [--hsgp_cv_tol 2 ...]
-#   Any --hsgp_* option is passed on to extraction/train_hsgp.py and overrides the recipe (see its docstring).
+#   Any --hsgp_* option is passed on to pipeline/fit_gp.py and overrides the recipe (see its docstring).
 #   --downstream: afterwards run distillation, FEM forward validation and validation plots with scripts/run_pipeline.sh
 #                 on the same experiment directory (it accepts HSGP extractions; data generation only adds the missing
 #                 validation geometry, the clean training data is reused).
@@ -61,7 +65,6 @@ else
     if [ -f "$INPUT_TARGET" ]; then RECIPE_FILE="$INPUT_TARGET"
     elif [ -f "${INPUT_TARGET}.yaml" ]; then RECIPE_FILE="${INPUT_TARGET}.yaml"
     elif [ -f "configs/recipes_v2/${INPUT_TARGET}.yaml" ]; then RECIPE_FILE="configs/recipes_v2/${INPUT_TARGET}.yaml"
-    elif [ -f "configs/recipes/${INPUT_TARGET}.yaml" ]; then RECIPE_FILE="configs/recipes/${INPUT_TARGET}.yaml"
     else echo "Recipe or experiment '$INPUT_TARGET' not found"; exit 1; fi
     NAME=$(python3 -c "
 import yaml; d = yaml.safe_load(open('$RECIPE_FILE'))
@@ -131,10 +134,10 @@ for SEED in $SEEDS_LIST; do
 
     COMMON=(--recipe "$CONFIG_YAML" --dataset_path "$TRAIN_DATASET_PATH" --seed "$SEED" --batch_dir "$EXTRACT_DIR" "${HSGP_ARGS[@]}")
     echo "--- HSGP fit (seed $SEED)"
-    python3 extraction/train_hsgp.py "${COMMON[@]}" --phase fit
+    python3 pipeline/fit_gp.py "${COMMON[@]}" --phase fit
     if [ "$SKIP_PLOTS" = false ]; then
         echo "--- HSGP plots and metrics (seed $SEED)"
-        python3 extraction/train_hsgp.py "${COMMON[@]}" --phase plot
+        python3 pipeline/fit_gp.py "${COMMON[@]}" --phase plot
         if [ -n "$REF_MODEL" ]; then   # experimental data: the published reference model on the GP energy plots
             python3 plots/plot_reference_energy.py --extract_dir "$EXTRACT_DIR" --references $REF_MODEL \
                 > "$EXTRACT_DIR/reference_energy.log" 2>&1 || echo "  reference energy plot failed (see $EXTRACT_DIR/reference_energy.log)"

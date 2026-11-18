@@ -50,7 +50,7 @@ from core.utils import (
     transformation_jacobian,
     compute_invariants_np,
 )
-from core.loss_function import neumann_cell_force
+from core.mechanics import neumann_cell_force
 from core.dataset_store import compute_all_invariants  # noqa: F401  (re-export)
 from core.material_models import get_material
 

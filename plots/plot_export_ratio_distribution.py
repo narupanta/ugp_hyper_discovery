@@ -95,7 +95,7 @@ def main():
 def plot_ratio_distribution(ext, export_dirs=(), random_n=(), fps_n=(), random_seed=0, out=None, gp=None,
                             verbose=True):
     """One row per export folder / random subset / FPS selection; returns the output path. Also called by
-    distillation/export_gp_to_pytorch.py after every export (one row: that export, saved in its folder)."""
+    pipeline/export_gp.py after every export (one row: that export, saved in its folder)."""
     from types import SimpleNamespace
     args = SimpleNamespace(export_dir=list(export_dirs), random_n=list(random_n), fps_n=list(fps_n),
                            random_seed=random_seed, out=out)

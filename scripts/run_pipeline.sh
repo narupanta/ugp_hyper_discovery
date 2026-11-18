@@ -5,6 +5,10 @@
 #SBATCH --job-name=gp-pipeline
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:ampere
+# glibc keeps freed memory per arena by default: the exact-GP plots (many large temporaries) then grow past small
+# machines. Fewer arenas and an eager trim return it to the OS (harmless for the HSGP).
+export MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-2}
+export MALLOC_TRIM_THRESHOLD_=${MALLOC_TRIM_THRESHOLD_:-100000}
 
 set -e
 
@@ -164,45 +168,9 @@ if [ "$IS_EXISTING_EXP" = true ]; then
         fi
     fi
 else
-    # Resolve recipe file
-    RECIPE_FILE=""
-    if [ -f "$INPUT_TARGET" ]; then
-        RECIPE_FILE="$INPUT_TARGET"
-    elif [ -f "configs/recipes/${INPUT_TARGET}.yaml" ]; then
-        RECIPE_FILE="configs/recipes/${INPUT_TARGET}.yaml"
-    elif [ -f "configs/recipes/${INPUT_TARGET}_benchmark.yaml" ]; then
-        RECIPE_FILE="configs/recipes/${INPUT_TARGET}_benchmark.yaml"
-    else
-        echo "❌ Error: Recipe or experiment '$INPUT_TARGET' not found!"
-        exit 1
-    fi
-
-    echo "📋 Initializing new experiment from recipe: $RECIPE_FILE"
-    
-    # Read core naming parameters from recipe
-    MODEL=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('material_model_name', 'nh2'))")
-    D_NOISE=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('disp_noise', 0.0001))")
-    L_NOISE=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('load_noise', 0.01))")
-    TOP_LOAD=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('target_load_true_top', 1.5))")
-    ASYM=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('asym_factor', 0.95))")
-    N_IP=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('n_ip', 5))")
-    BETA=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('beta', d.get('beta_list', [1.0])[0] if isinstance(d.get('beta_list'), (list, tuple)) else 1.0))" 2>/dev/null || echo "1.0")
-    MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('model_mode', 'isotropic'))")
-    GEOM_TRAIN=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('geometry_train', d.get('geometry', 'block')))")
-
-    HAS_GT_VAL=$(python3 -c "import yaml; d=yaml.safe_load(open('$RECIPE_FILE')); print(d.get('has_ground_truth', True))" 2>/dev/null || echo "True")
-
-    CURRENT_TIME=$(date +"%Y%m%dT%H%M%S")
-    if [ "$HAS_GT_VAL" == "False" ] || [ "$HAS_GT_VAL" == "false" ] || [ "$GEOM_TRAIN" == "ttc" ] || [ "$MODEL" == "experimental" ]; then
-        EXP_FOLDER_NAME="${CURRENT_TIME}_${GEOM_TRAIN}_${N_IP}_${BETA}_${MODEL_MODE}"
-    else
-        EXP_FOLDER_NAME="${CURRENT_TIME}_${MODEL}_${D_NOISE}_${L_NOISE}_${TOP_LOAD}_${ASYM}_${N_IP}_${BETA}_${MODEL_MODE}_${GEOM_TRAIN}"
-    fi
-    EXPERIMENT_DIR="$(pwd)/results/${EXP_FOLDER_NAME}"
-    mkdir -p "$EXPERIMENT_DIR"
-    cp "$RECIPE_FILE" "$EXPERIMENT_DIR/config.yaml"
-    CONFIG_YAML="$EXPERIMENT_DIR/config.yaml"
-    echo "📁 Created experiment directory: $EXPERIMENT_DIR"
+    echo "❌ Error: '$INPUT_TARGET' is not an experiment directory. A new experiment starts from a recipe with"
+    echo "   scripts/run_hsgp_pipeline.sh <recipe> --downstream   (extraction, then the stages of this script)"
+    exit 1
 fi
 
 # Extract parameters from experiment config.yaml
@@ -231,31 +199,11 @@ TOP_LOAD_HOLES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML'))
 STEPS=$(get_cfg_default "n_loadsteps" "1")
 MESH_SIZE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('mesh_size', '0.08'))" 2>/dev/null || echo "0.08")
 
-# Extraction params
-MCI_SAMPLING=$(get_cfg_default "number_of_mci_sampling" "1")
-N_IP=$(get_cfg_default "n_ip" "5")
-BETAS_LIST=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); b=d.get('beta_list', d.get('betas', d.get('beta', 1.0))); print(*b) if isinstance(b, (list, tuple)) else print(b)" 2>/dev/null || echo "1.0")
-BETA=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('beta', d.get('beta_list', [1.0])[0] if isinstance(d.get('beta_list'), (list, tuple)) else 1.0))" 2>/dev/null || echo "1.0")
-NUM_RFF=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('num_rff', 800))" 2>/dev/null || echo "800")
-FIXED_NOISE=$(get_cfg_default "is_fixed_reaction_force_noise" "1")
-FIXED_IP=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('is_fixed_inducing_points', 1))" 2>/dev/null || echo "1")
-EXT_ITERS=$(get_cfg_default "extraction_n_iterations" "100")
-EXT_LR=$(get_cfg_default "extraction_learning_rate" "0.01")
-EXT_FINAL_LR=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('extraction_final_learning_rate', d.get('final_learning_rate', d.get('extraction_learning_rate'))))" 2>/dev/null || echo "$EXT_LR")
-CAP_COMPRESSION=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('cap_compression', 1))" 2>/dev/null || echo "1")
-TRAIN_INDICES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(*(d.get('train_load_steps_indices', [0])))" 2>/dev/null || echo "0")
+# Extraction params (the extraction itself: scripts/run_hsgp_pipeline.sh)
 MODEL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('model_mode', 'isotropic'))" 2>/dev/null || echo "isotropic")
-COVARIANCE_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('covariance_mode', 'diag'))" 2>/dev/null || echo "diag")
-NORMALIZE_ELL=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('normalize_ell', 0))" 2>/dev/null || echo "0")
-U_VAR_ANCHOR=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('u_var_anchor', '1e-12'))" 2>/dev/null || echo "1e-12")
-KZZ_JITTER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('kzz_jitter', '1e-8'))" 2>/dev/null || echo "1e-8")
-VFM_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vfm_mode', 'linear_triangle'))" 2>/dev/null || echo "linear_triangle")
-VF_ORDER=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('vf_order', 2))" 2>/dev/null || echo "2")
 CONTROL_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('control_mode', 'force'))" 2>/dev/null || echo "force")
 STRESS_MODE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('stress_mode', d.get('stress_modes', 'plane_strain')))" 2>/dev/null || echo "plane_strain")
-CONSTRAINT_LENGTHSCALE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(int(d.get('constraint_lengthscale', 1)))" 2>/dev/null || echo "1")
 CLAMP_TOP_X=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(1 if d.get('clamp_top_x', True) else 0)" 2>/dev/null || echo "1")
-REACTION_LOSS_WEIGHT=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); val=d.get('reaction_loss_weight', d.get('reaction_loss_scale', '1.0')); print(val if val is not None else '1.0')" 2>/dev/null || echo "1.0")
 
 # Distillation params
 DIST_MODEL=$(get_cfg_default "distilled_material_model" "gmr")
@@ -263,7 +211,7 @@ DIST_ITERS=$(get_cfg_default "distillation_n_iterations" "100")
 DEV_VOL_DIST_ITERS=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('dev_vol_distillation_n_iterations', d.get('distillation_n_iterations', 5000)))" 2>/dev/null || echo "$DIST_ITERS")
 ANISO_DIST_ITERS=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); val=d.get('aniso_distillation_n_iterations'); print(val if val is not None else '')" 2>/dev/null || echo "")
 DIST_TARGET=$(get_cfg_default "distill_target" "sef_split")
-SAMPLE_MODE=$(get_cfg_default "sample_mode" "standard")
+SAMPLE_MODE=$(get_cfg_default "sample_mode" "dataset_f")
 NUM_POINTS=$(get_cfg_default "num_points" "100")
 NUM_FUNC_SAMPLES=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(d.get('num_func_samples', 512))" 2>/dev/null || echo "512")
 MAX_GAMMA=$(get_cfg_default "max_gamma" "1.0")
@@ -430,103 +378,10 @@ for SEED in $SEEDS_LIST; do
         echo "✅ Step 1 (Data Generation for Seed $SEED) completed."
     fi
 
-    # --- STEP 2: EXTRACTION ---
+    # --- STEP 2: EXTRACTION (HSGP / exact GP, scripts/run_hsgp_pipeline.sh) ---
     if [ "$RUN_EXT" = true ]; then
-        echo "--- Step 2: UGP Extraction (Seed: $SEED) ---"
-        
-        NUM_BETAS=$(echo "$BETAS_LIST" | wc -w)
-        if [ "$NUM_BETAS" -gt 1 ]; then
-            echo "🔬 Multi-Beta Training active ($NUM_BETAS candidates: $BETAS_LIST)"
-            CANDIDATES_DIR="$SEED_DIR/extracted_candidates"
-            mkdir -p "$CANDIDATES_DIR"
-
-            for BETA_VAL in $BETAS_LIST; do
-                CANDIDATE_OUT="$CANDIDATES_DIR/beta_${BETA_VAL}"
-                echo "  ▶ Training candidate model with beta = $BETA_VAL -> $CANDIDATE_OUT"
-                mkdir -p "$CANDIDATE_OUT"
-                python3 extraction/train_unsupervised.py \
-                    --recipe "$CONFIG_YAML" \
-                    --dataset_path "$TRAIN_DATASET_PATH" \
-                    --material_model_name "$MODEL" \
-                    --number_of_mci_sampling "$MCI_SAMPLING" \
-                    --train_load_steps_indices $TRAIN_INDICES \
-                    --val_load_steps_indices $VAL_LOAD_STEPS_INDICES \
-                    $TEST_LOAD_STEPS_ARG \
-                    --n_ip "$N_IP" \
-                    --beta "$BETA_VAL" \
-                    --num_rff "$NUM_RFF" \
-                    --is_fixed_reaction_force_noise "$FIXED_NOISE" \
-                    --is_fixed_inducing_points "$FIXED_IP" \
-                    --n_iterations "$EXT_ITERS" \
-                    --geometry "$GEOMETRY_TRAIN" \
-                    --disp_noise "$D_NOISE" \
-                    --load_noise "$L_NOISE" \
-                    --target_load_true_top "$TOP_LOAD" \
-                    --asym_factor "$ASYM" \
-                    --learning_rate "$EXT_LR" \
-                    --final_learning_rate "$EXT_FINAL_LR" \
-                    --cap_compression "$CAP_COMPRESSION" \
-                    --model_mode "$MODEL_MODE" \
-                    --covariance_mode "$COVARIANCE_MODE" \
-                    --normalize_ell "$NORMALIZE_ELL" \
-                    --u_var_anchor "$U_VAR_ANCHOR" \
-                    --kzz_jitter "$KZZ_JITTER" \
-                    --vfm_mode "$VFM_MODE" \
-                    --vf_order "$VF_ORDER" \
-                    --control_mode "$CONTROL_MODE" \
-                    --stress_mode "$STRESS_MODE" \
-                    --constraint_lengthscale "$CONSTRAINT_LENGTHSCALE" \
-                    --reaction_loss_weight "$REACTION_LOSS_WEIGHT" \
-                    --seed "$SEED" \
-                    --batch_dir "$CANDIDATE_OUT" \
-                    $MAT_EXTRA_ARGS
-            done
-
-            echo "📊 Evaluating candidate models and selecting best-calibrated beta..."
-            python3 extraction/select_best_beta.py \
-                --candidates_dir "$CANDIDATES_DIR" \
-                --output_dir "$EXTRACT_DIR" \
-                --target_ec 95.0
-        else
-            echo "  ▶ Single Beta Training (beta = $BETA) -> $EXTRACT_DIR"
-            mkdir -p "$EXTRACT_DIR"
-            python3 extraction/train_unsupervised.py \
-                --recipe "$CONFIG_YAML" \
-                --dataset_path "$TRAIN_DATASET_PATH" \
-                --material_model_name "$MODEL" \
-                --number_of_mci_sampling "$MCI_SAMPLING" \
-                --train_load_steps_indices $TRAIN_INDICES \
-                --val_load_steps_indices $VAL_LOAD_STEPS_INDICES \
-                $TEST_LOAD_STEPS_ARG \
-                --n_ip "$N_IP" \
-                --beta "$BETA" \
-                --num_rff "$NUM_RFF" \
-                --is_fixed_reaction_force_noise "$FIXED_NOISE" \
-                --is_fixed_inducing_points "$FIXED_IP" \
-                --n_iterations "$EXT_ITERS" \
-                --geometry "$GEOMETRY_TRAIN" \
-                --disp_noise "$D_NOISE" \
-                --load_noise "$L_NOISE" \
-                --target_load_true_top "$TOP_LOAD" \
-                --asym_factor "$ASYM" \
-                --learning_rate "$EXT_LR" \
-                --final_learning_rate "$EXT_FINAL_LR" \
-                --cap_compression "$CAP_COMPRESSION" \
-                --model_mode "$MODEL_MODE" \
-                --covariance_mode "$COVARIANCE_MODE" \
-                --normalize_ell "$NORMALIZE_ELL" \
-                --u_var_anchor "$U_VAR_ANCHOR" \
-                --kzz_jitter "$KZZ_JITTER" \
-                --vfm_mode "$VFM_MODE" \
-                --vf_order "$VF_ORDER" \
-                --control_mode "$CONTROL_MODE" \
-                --stress_mode "$STRESS_MODE" \
-                --constraint_lengthscale "$CONSTRAINT_LENGTHSCALE" \
-                --reaction_loss_weight "$REACTION_LOSS_WEIGHT" \
-                --seed "$SEED" \
-                --batch_dir "$EXTRACT_DIR" \
-                $MAT_EXTRA_ARGS
-        fi
+        echo "--- Step 2: GP Extraction (Seed: $SEED) ---"
+        bash scripts/run_hsgp_pipeline.sh "$EXPERIMENT_DIR" --seeds "$SEED" --do-ext
         echo "✅ Step 2 (Extraction for Seed $SEED) completed."
     else
         echo "⏭️ Skipping Step 2 (Extraction) for Seed $SEED."
@@ -538,7 +393,7 @@ for SEED in $SEEDS_LIST; do
         mkdir -p "$DISTILL_DIR"
         
         # Verify extracted model exists
-        if [ ! -f "$EXTRACT_DIR/best_params.npy" ] && [ ! -f "$EXTRACT_DIR/hsgp_posterior.npz" ]; then   # SVGP or HSGP extraction
+        if [ ! -f "$EXTRACT_DIR/hsgp_posterior.npz" ]; then
             echo "❌ Error: Cannot run distillation; extracted model not found at $EXTRACT_DIR"
             exit 1
         fi
@@ -547,12 +402,8 @@ for SEED in $SEEDS_LIST; do
             EXPORT_SUB="pytorch_export_dataset_all"
         elif [[ "$SAMPLE_MODE" == dataset_f* ]]; then
             EXPORT_SUB="pytorch_export_${SAMPLE_MODE}_n${NUM_POINTS}"
-        elif [ "$SAMPLE_MODE" == "standard_interp" ]; then
+        else   # standard_interp
             EXPORT_SUB="pytorch_export_standard_interp"
-        elif [ "$SAMPLE_MODE" == "inducing_points" ]; then
-            EXPORT_SUB="pytorch_export_inducing_points"
-        else
-            EXPORT_SUB="pytorch_export_standard_g${MAX_GAMMA}"
         fi
         if [ "$DIST_TARGET" == "sef_stress" ] || [ "$DIST_TARGET" == "sef_cauchy" ]; then
             EXPORT_SUB="${EXPORT_SUB}_${DIST_TARGET}"
@@ -560,7 +411,7 @@ for SEED in $SEEDS_LIST; do
 
         if [ ! -f "$EXTRACT_DIR/$EXPORT_SUB/mean_dev.npy" ] && [ ! -f "$EXTRACT_DIR/$EXPORT_SUB/mean_psi.npy" ]; then
             echo "Exporting GP posterior to PyTorch bridge ($EXPORT_SUB)..."
-            python3 distillation/export_gp_to_pytorch.py \
+            python3 pipeline/export_gp.py \
                 --saved_model_dir "$EXTRACT_DIR" \
                 --dataset_path "$TRAIN_DATASET_PATH" \
                 --sample_mode "$SAMPLE_MODE" \
@@ -571,7 +422,7 @@ for SEED in $SEEDS_LIST; do
         fi
 
         echo "Distilling DEV component into $DISTILL_DIR..."
-        python3 distillation/distill_uqmodeldisc.py \
+        python3 pipeline/distill.py \
             --saved_model_dir "$EXTRACT_DIR" \
             --material_model "$DIST_MODEL" \
             --n_iterations "$DEV_VOL_DIST_ITERS" \
@@ -596,7 +447,7 @@ for SEED in $SEEDS_LIST; do
             echo "Deviatoric-only distillation (incompressible plane stress or '$DIST_MODEL'); skipping the VOL distillation."
         else
         echo "Distilling VOL component into $DISTILL_DIR..."
-        python3 distillation/distill_uqmodeldisc.py \
+        python3 pipeline/distill.py \
             --saved_model_dir "$EXTRACT_DIR" \
             --material_model "$DIST_MODEL" \
             --n_iterations "$DEV_VOL_DIST_ITERS" \
@@ -622,7 +473,7 @@ for SEED in $SEEDS_LIST; do
                 exit 1
             fi
             echo "Distilling ANISO component into $DISTILL_DIR (n_iterations: $ANISO_DIST_ITERS)..."
-            python3 distillation/distill_uqmodeldisc.py \
+            python3 pipeline/distill.py \
                 --saved_model_dir "$EXTRACT_DIR" \
                 --material_model "$DIST_MODEL" \
                 --n_iterations "$ANISO_DIST_ITERS" \
@@ -696,11 +547,6 @@ for SEED in $SEEDS_LIST; do
             --dataset_path "$TRAIN_DATASET_PATH" \
             --save_path "$DISTILL_DIR/block_validation" || true
 
-        # free-node counterpart of the reaction check: force residual and EIV correction K^-1 f vs. inferred noise
-        if [ -f "$EXTRACT_DIR/hsgp_posterior.npz" ]; then
-            python3 plots/plot_free_node_residual_eiv.py --seed_dir "$SEED_DIR" || true
-        fi
-
         echo "✅ Step 3 (Distillation for Seed $SEED) completed."
     else
         echo "⏭️ Skipping Step 3 (Distillation) for Seed $SEED."
@@ -731,7 +577,7 @@ import yaml
 d = yaml.safe_load(open('$CONFIG_YAML'))
 for e in d.get('full_mesh_fem') or []:
     opts = []
-    for k in ('clamp_distance', 'clamp_bottom_y', 'clamp_top_y', 'grip_max', 'step_max', 'plot_step'):
+    for k in ('control', 'clamp_distance', 'clamp_bottom_y', 'clamp_top_y', 'grip_max', 'step_max', 'plot_step'):
         if e.get(k) is not None:
             opts += ['--' + k, str(e[k])]
     print('|'.join([e['name'], e['mesh'], e['dataset_path'], ' '.join(opts)]))
@@ -748,9 +594,11 @@ for e in d.get('full_mesh_fem') or []:
                     --mesh "$FM_MESH" --dataset "$FM_DATA" --reference "${REF_MODEL:-euclid}" $FM_OPTS \
                     --param_mode "$FEM_PARAM_MODE" --n_samples "$FEM_N_SAMPLES" \
                     > "$FM_DIR/full_mesh_fem.log" 2>&1 || echo "  full-mesh FEM failed (see $FM_DIR/full_mesh_fem.log)"
-                PLOT_OPTS=$(echo "$FM_OPTS" | sed -E 's/--(grip_max|step_max|plot_step) [^ ]+//g')
+                PLOT_OPTS=$(echo "$FM_OPTS" | sed -E 's/--(control|grip_max|step_max|plot_step) [^ ]+//g')
                 python3 plots/plot_ttc_full_mesh_roi.py --fem_dir "$FM_DIR" --model "$FM_MODEL" --mesh "$FM_MESH" \
                     --dataset "$FM_DATA" $PLOT_OPTS >> "$FM_DIR/full_mesh_fem.log" 2>&1 || true
+                python3 plots/plot_full_mesh_displacement.py --fem_dir "$FM_DIR" --mesh "$FM_MESH" --dataset "$FM_DATA" \
+                    --models "$FM_MODEL" "${REF_MODEL:-euclid}" >> "$FM_DIR/full_mesh_fem.log" 2>&1 || true
             done <<< "$FULL_MESH_RUNS"
         elif [ -n "$SPEC_GEOM" ]; then
             mkdir -p "$VAL_DIR/$SPEC_GEOM"
@@ -939,7 +787,7 @@ for e in d.get('full_mesh_fem') or []:
             for FM_DIR in "$VAL_DIR"/*_full; do      # full-specimen FEM (recipe key full_mesh_fem)
                 [ -d "$FM_DIR" ] || continue
                 FM_NAME=$(basename "$FM_DIR")
-                for F in displacement_analysis_full_mesh full_mesh_with_dic_roi; do
+                for F in displacement_analysis_full_mesh full_mesh_with_dic_roi displacement_full_mesh_roi; do
                     [ -f "$FM_DIR/$F.pdf" ] && cp "$FM_DIR/$F.pdf" "$EXPERIMENT_DIR/plots/${F}_${FM_NAME}_seed${SEED}.pdf"
                 done
             done

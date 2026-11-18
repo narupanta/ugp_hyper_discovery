@@ -14,6 +14,7 @@
 # --- Material and data generation --------------------------------------------
 material_model_name: experimental
 has_ground_truth: false
+reference_model: euclid_ttf_ut      # EUCLID identified on UT + TTf (Flaschel et al., Table 4)
 dataset_path: dataset/preprocessed/experiment/ttf_20_steps_ps_incomp.npz   # first experiment (pipeline default)
 experiments:                      # same 20 DIC steps (300 ... 6000) and the same step indices for all
                                   # optional per experiment: thickness (reactions are divided by it; default 1)
@@ -95,8 +96,11 @@ full_mesh_fem:                    # FEM on the full TTf specimen (replaces the D
 - name: ttf
   mesh: mesh/TTf_full_mesh.npz
   dataset_path: dataset/preprocessed/experiment/ttf_20_steps_ps_incomp.npz
-  clamp_distance: 38.8            # clamped length at each end (mm); the top tab is pulled, the bottom held
-  grip_max: 100.0                 # grip displacement (mm) at DIC step step_max
+  control: force                  # force: uniform traction on the top edge = measured force / width (N/mm per mm),
+                                  # both end edges held laterally, the bottom edge also in y (no clamp / stroke guess);
+                                  # displacement: rigid grips with clamp_distance and grip_max / step_max below
+  clamp_distance: 38.8            # displacement control: clamped length at each end (mm); top pulled, bottom held
+  grip_max: 100.0                 # displacement control: grip displacement (mm) at DIC step step_max
   step_max: 6000
   plot_step: 19
 # val_number_samples: 1024

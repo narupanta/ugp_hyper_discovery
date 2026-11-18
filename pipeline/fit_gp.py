@@ -1,0 +1,404 @@
+"""
+Pipeline step 1: GP extraction for one seed (HSGP, or the exact GP with gp_method: exact). Exact Gaussian posterior
+of the GP energy under the residual likelihood (core/hsgp_inference.py, core/exact_gp.py), with the free-residual
+noise sigma_free,t = s |R_t| and s chosen by cross-validation on held-out reactions (or given).
+
+Writes into --batch_dir: hsgp_posterior.npz, hsgp_history.json, config.json, I_obs_all.npy, extraction_metrics.json
+and the plots. --phase fit|plot|all: the fit and the plots can run in separate processes (peak memory on small
+machines); scripts/run_hsgp_pipeline.sh calls the two phases one after the other.
+
+HSGP settings are read from the recipe (keys below) and can be overridden on the command line:
+    hsgp_force_noise_rel: 0.0       # s of sigma_free,t = s |R_t|; 0 = chosen by cross-validation
+    hsgp_cv_folds: 2                # interleaved folds of the training steps
+    hsgp_cv_holdout: "folds"        # "val": fit on the training steps, choose s by the reactions of the validation
+                                    # steps (val_load_steps_indices; hsgp_cv_folds ignored); "folds" = interleaved folds
+    hsgp_cv_tol: 0.0                # > 0: smallest s within this many nats of the best held-out score (plateau rule)
+    hsgp_global_equilibrium: 0.0    # > 0: per step and direction, sum of the free internal forces = 0 with sigma
+                                    # = this x |R_t| (global equilibrium of the free residuals); 0 = off
+    hsgp_num_basis_dev: 24          # eigenfunctions per deviatoric dimension
+    hsgp_num_basis_vol: 32
+    hsgp_num_basis_aniso: 0         # anisotropic recipes (material_params.angles): functions per fibre invariant
+                                    # (I4_bar, I6_bar); 0 = hsgp_num_basis_dev
+    hsgp_box_factor: 8.0
+    hsgp_sigma_cap: 10.0            # GP amplitudes capped at this multiple of their prior centre; <= 0: no cap
+    hsgp_amplitude_prior_scale: 0.0 # > 0: log-normal hyperprior widths (log units)
+    hsgp_lengthscale_prior_scale: 0.0
+    hsgp_hyper_restarts: 1          # multi-start hyperparameter optimisation (prior centre, lengthscales x0.5, x2)
+Exact GP (no basis approximation, for 1-3 load steps; core/exact_gp.py):
+    gp_method: exact                # hsgp (default) | exact
+    exact_gp_train_load_steps_indices: [9, 19]   # optional: the steps of the exact fit (default: train_load_steps_indices)
+    exact_gp_hyper_steps: 200       # L-BFGS iterations of the hyperparameter fit
+  The noise / s options (hsgp_force_noise_rel, hsgp_cv_*, hsgp_global_equilibrium,
+  hsgp_sigma_cap, hsgp_hyper_restarts) apply as for the HSGP; the basis options (hsgp_num_basis_*, hsgp_box_factor) do
+  not. With a single training step, s needs hsgp_force_noise_rel > 0 or hsgp_cv_holdout: val. The posterior is written
+  to the same hsgp_posterior.npz (model_type exact_gp), so the downstream steps load it unchanged.
+Anisotropy: material_params.angles (degrees, one or two fibre families) switches on the fibre GP over (I4_bar, I6_bar);
+model_mode: isotropic in such a recipe switches it off (isotropic GP on anisotropic data).
+Reaction rows: one per boundary with a measured reaction in the data: the loaded edges (reaction_forces) and, where the
+dataset provides them (synthetic data: support_reactions, independent noise), the supports (fixed-x / fixed-y
+boundaries). Experimental data with one load cell: loaded edges only.
+Recipe keys for the reactions (not hsgp_*): reaction_components, reaction_noise_rel, reaction_noise_floor,
+reaction_zero_components (components known to vanish, e.g. R_y of a tensile test, fitted to 0).
+"""
+import argparse
+import json
+import os
+import sys
+import time
+
+import numpy as np
+import yaml
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import jax
+import jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
+import matplotlib.pyplot as plt
+
+from core.datasetclass import DatasetFactory
+from core.hsgp_inference import fit_hsgp, reaction_prediction
+from core.exact_gp import fit_exact_gp
+from core.teacher import load_energy_gp
+from core.hsgp_model import fiber_vectors
+from core.mechanics import ellipticity_penalty
+from core.utils import load_f3x3_from_dataset
+from plots.theme import apply_style, save_figure
+
+HSGP_DEFAULTS = dict(hsgp_force_noise_rel=0.0, hsgp_cv_folds=2, hsgp_cv_holdout="folds", hsgp_cv_tol=0.0,
+                     hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_num_basis_aniso=0, hsgp_box_factor=8.0, hsgp_sigma_cap=10.0,
+                     hsgp_amplitude_prior_scale=0.0, hsgp_lengthscale_prior_scale=0.0, hsgp_hyper_restarts=1,
+                     hsgp_global_equilibrium=0.0)
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="HSGP strain-energy extraction (one seed).")
+    p.add_argument("--recipe", required=True, help="Recipe / experiment config.yaml")
+    p.add_argument("--dataset_path", required=True, help="Dataset spec 'clean.npz?seed=..&disp_noise=..&load_noise=..' or file")
+    p.add_argument("--seed", type=int, required=True)
+    p.add_argument("--batch_dir", required=True, help="Output directory (<experiment>/<seed>/extracted)")
+    p.add_argument("--train_load_steps_indices", type=int, nargs="+", default=None)
+    p.add_argument("--val_load_steps_indices", type=int, nargs="+", default=None)
+    p.add_argument("--test_load_steps_indices", type=int, nargs="*", default=None)
+    p.add_argument("--phase", choices=["fit", "plot", "all"], default="all")
+    for k, v in HSGP_DEFAULTS.items():   # --hsgp_cv_tol 2 etc. override the recipe
+        p.add_argument(f"--{k}", type=type(v), default=None)
+    return p.parse_args()
+
+
+def external_work_density(prep, node_type, last_step):
+    """Data energy scale: external work up to last_step / specimen area."""
+    u = np.asarray(prep["u_obs"] if "u_obs" in prep else prep["u"])[: last_step + 1]
+    area = float(np.sum(np.asarray(prep["dA"])))
+    R = np.asarray(prep["reaction_forces"])[: last_step + 1]
+    nt = np.asarray(node_type)
+    ux = u[:, nt[:, 3] == 1, 0].mean(axis=1) if np.any(nt[:, 3] == 1) else np.zeros(len(u))
+    uy = u[:, nt[:, 4] == 1, 1].mean(axis=1) if np.any(nt[:, 4] == 1) else np.zeros(len(u))
+    # the reaction side may move too (e.g. a DIC region of interest cut at both ends): use the relative displacement
+    if np.any(nt[:, 1] == 1):
+        ux = ux - u[:, nt[:, 1] == 1, 0].mean(axis=1)
+    if np.any(nt[:, 2] == 1):
+        uy = uy - u[:, nt[:, 2] == 1, 1].mean(axis=1)
+    dW = 0.5 * (R[1:, 0] + R[:-1, 0]) * np.diff(ux) + 0.5 * (R[1:, 1] + R[:-1, 1]) * np.diff(uy)
+    e = float(np.sum(dW)) / area
+    return e if np.isfinite(e) and e > 0 else 1.0
+
+
+def plot_reactions(model, F_steps, prep, train_steps, save_path, has_truth, sigma_R=None, name=None):
+    """Reaction forces per load step: epistemic band vs true reactions (synthetic), predictive band vs measured.
+    sigma_R: (n_steps, 2) reaction noise of the likelihood (default: the dataset's load_noise_std_steps).
+    name: experiment name (several experiments): reaction_force_uncertainty_<name>.pdf."""
+    pred = model.reaction_prediction if hasattr(model, "reaction_prediction") else (lambda *a: reaction_prediction(model, *a))
+    mean, cov = pred(F_steps, prep["cells"], prep["node_type"], prep["dNdX"], prep["dA"])
+    sd_epi = np.sqrt(np.stack([cov[:, 0, 0], cov[:, 1, 1]], axis=1))
+    sig_R = np.maximum(np.asarray(prep["load_noise_std_steps"] if sigma_R is None else sigma_R, dtype=float), 1e-3)
+    unmeasured = np.all(sig_R > 1e6, axis=0)                 # components without a load cell: epistemic band only
+    sig_R = np.where(unmeasured[None, :], 0.0, sig_R)
+    sd_pred = np.sqrt(sd_epi ** 2 + sig_R ** 2)
+    R_obs = np.asarray(prep["reaction_forces"])
+    panels = [("predictive", sd_pred, R_obs, "measured reaction")]
+    if has_truth:
+        panels.insert(0, ("epistemic", sd_epi, np.asarray(prep["reaction_forces_true"]), "true reaction"))
+    steps = np.arange(F_steps.shape[0])
+    is_tr = np.isin(steps, train_steps)
+    apply_style()
+    fig, axes = plt.subplots(2, len(panels), figsize=(7.0 * len(panels), 10.0), sharex=True, squeeze=False)
+    out = {}
+    for i, comp in enumerate(["x", "y"]):
+        for j, (kind, sd, ref, lab) in enumerate(panels):
+            ax = axes[i, j]
+            m, s, r = mean[:, i], sd[:, i], ref[:, i]
+            hit = np.abs(r - m) <= 1.96 * s
+            ax.fill_between(steps, m - 1.96 * s, m + 1.96 * s, color="tab:blue", alpha=0.25, label="95% band")
+            ax.plot(steps, m, color="tab:blue", lw=2, label="posterior mean")
+            ax.plot(steps[~is_tr], r[~is_tr], "o", color="k", ms=5, label=f"{lab} (validation step)")
+            ax.plot(steps[is_tr], r[is_tr], "s", color="tab:red", ms=7, label=f"{lab} (training step)")
+            for k in np.where(~hit)[0]:
+                ax.plot(steps[k], r[k], "x", color="tab:orange", ms=11, mew=2)
+            r2 = 1 - np.sum((r - m) ** 2) / np.sum((r - r.mean()) ** 2)
+            cov_all = hit.mean() * 100
+            cov_val = hit[~is_tr].mean() * 100 if np.any(~is_tr) else float("nan")
+            if kind == "predictive" and unmeasured[i]:
+                ax.set_title(f"$R_{comp}$: not measured (epistemic band only)")
+            else:
+                ax.set_title(f"$R_{comp}$ {kind}: coverage {cov_all:.0f}% (val {cov_val:.0f}%), $R^2$ {r2:.4f}")
+            ax.set_ylabel(f"$R_{comp}$")
+            if i == 1:
+                ax.set_xlabel("load step")
+            if i == 0 and j == 0:
+                ax.legend(fontsize=9)
+            out[f"{kind}_{comp}"] = dict(coverage=float(cov_all), coverage_val=float(cov_val), r2=float(r2),
+                                         z=((r - m) / s).tolist())
+    fig.suptitle("Reaction forces at the measured displacements" + (f": {name}" if name else ""))
+    save_figure(fig, os.path.join(save_path, f"reaction_force_uncertainty{'_' + name if name else ''}.pdf"))
+    plt.close(fig)
+    return out
+
+
+def plot_force_noise_cv(model, save_path):
+    """Cross-validation curve of the free-residual scale s (held-out reaction log predictive density)."""
+    cv = model.info.get("force_noise_cv")
+    if not cv:
+        return
+    s_vals = np.array([float(k) for k in cv["curve"]])
+    score = np.array(list(cv["curve"].values()), dtype=float)
+    ok = np.isfinite(score)
+    apply_style()
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.semilogx(s_vals[ok], score[ok], "o-", color="tab:blue")
+    ax.axvline(cv["s"], color="tab:red", ls="--", label=f"selected s = {cv['s']:.3g}")
+    if cv["s_best_score"] != cv["s"]:
+        ax.axvline(cv["s_best_score"], color="grey", ls=":", label=f"best score s = {cv['s_best_score']:.3g}")
+    ax.set_xlabel(r"$s$ ($\sigma_{\mathrm{free},t} = s\,\|R_t\|$)")
+    ax.set_ylabel("held-out reaction log predictive density")
+    ax.set_title(f"validation steps {cv.get('validation_steps')}" if cv.get('holdout') == 'validation' else f"{len(cv['folds'])}-fold cross-validation")
+    ax.legend()
+    save_figure(fig, os.path.join(save_path, "force_noise_cv.pdf"))
+
+
+def main():
+    args = parse_args()
+    rec = yaml.safe_load(open(args.recipe)) or {}
+    opt = {k: (getattr(args, k) if getattr(args, k) is not None else type(v)(rec.get(k, v))) for k, v in HSGP_DEFAULTS.items()}
+    if str(rec.get("hsgp_likelihood", "residual_exact")) != "residual_exact":
+        raise ValueError(f"hsgp_likelihood {rec['hsgp_likelihood']!r}: only residual_exact is supported")
+    gp_method = str(rec.get("gp_method", "hsgp")).lower()
+    if gp_method not in ("hsgp", "exact"):
+        raise ValueError(f"gp_method must be 'hsgp' or 'exact' (got {gp_method!r})")
+    train_steps = args.train_load_steps_indices or rec.get("train_load_steps_indices")
+    if gp_method == "exact" and rec.get("exact_gp_train_load_steps_indices") is not None and args.train_load_steps_indices is None:
+        train_steps = [int(t) for t in rec["exact_gp_train_load_steps_indices"]]
+    if gp_method == "exact":
+        print(f"[ExactGP] exact GP extraction (no HSGP basis) on the training steps {train_steps}", flush=True)
+    val_steps = args.val_load_steps_indices or rec.get("val_load_steps_indices", [])
+    test_steps = args.test_load_steps_indices if args.test_load_steps_indices is not None else rec.get("test_load_steps_indices", [])
+    save_path = args.batch_dir
+    os.makedirs(save_path, exist_ok=True)
+
+    def prepare(dataset_path, thickness=1.0):
+        """One experiment: data, observed F (n_steps, C, 3, 3), reaction noise, truth and plane-stress mode.
+        thickness: specimen thickness; the reactions (and their noise floor) are divided by it, so experiments of
+        different thickness share one energy per unit volume (the 2D model has unit thickness)."""
+        prep = DatasetFactory.create("dataset/precomputed_vfm", data_path=dataset_path).get_data()
+        if float(thickness) != 1.0:
+            prep = dict(prep)
+            prep["reaction_forces"] = np.asarray(prep["reaction_forces"], dtype=float) / float(thickness)
+            prep["load_noise_std_steps"] = np.asarray(prep["load_noise_std_steps"], dtype=float) / float(thickness)
+            for k in ("support_reactions", "support_noise_std"):
+                if k in prep:
+                    prep[k] = np.asarray(prep[k], dtype=float) / float(thickness)
+            print(f"[HSGP] {dataset_path}: reactions divided by the thickness {float(thickness):g}", flush=True)
+        floor = float(rec.get("reaction_noise_floor", 0.0)) / float(thickness)
+        has_truth = bool(rec.get("has_ground_truth", True)) and "reaction_forces_true" in prep
+        mat_p = rec.get("material_params", {}) or {}
+        # true material from the recipe (any family: dev/vol params, Ogden mu/alpha, ...)
+        from core.material_models import get_material_from_config
+        mat = get_material_from_config(dict(rec, material_model_name=rec.get("material_model_name", "isihara"))) if has_truth else None
+        F_all = load_f3x3_from_dataset(prep, material_model=mat)                       # (n_steps, C, 3, 3) observed
+        # incompressible plane stress (recipe or dataset): F33 = 1/det F_2D inside the model, no volumetric part
+        ps_mode = str(rec.get("plane_stress_mode", prep.get("plane_stress_mode", "")) or "")
+        incompressible_ps = str(prep.get("stress_mode", rec.get("stress_mode", ""))) == "plane_stress" and ps_mode == "incompressible"
+        if incompressible_ps and mat is not None:   # truth stress = gradient of the reduced energy (as the data and the GP)
+            from core.material_models import IncompressiblePlaneStressView
+            mat = IncompressiblePlaneStressView(mat)
+        # reaction components with a load cell (e.g. [0] for a uniaxial machine): the others get no weight in the likelihood
+        sigma_R_steps = np.array(prep["load_noise_std_steps"], dtype=float)
+        if rec.get("reaction_components") is not None:
+            unmeasured = [i for i in range(sigma_R_steps.shape[1]) if i not in [int(c) for c in rec["reaction_components"]]]
+            sigma_R_steps[:, unmeasured] = 1e12
+            if "support_reactions" in prep:          # the supports measure the same components
+                prep = dict(prep)
+                prep["support_reactions"] = np.array(prep["support_reactions"], dtype=float)
+                prep["support_reactions"][:, unmeasured] = np.nan
+        if rec.get("reaction_noise_rel") is not None:      # load-cell noise relative to the reading (+ optional floor)
+            R_abs = np.abs(np.asarray(prep["reaction_forces"], dtype=float))
+            rel = np.maximum(float(rec["reaction_noise_rel"]) * R_abs, floor)
+            meas = [int(c) for c in rec.get("reaction_components", range(sigma_R_steps.shape[1]))]
+            sigma_R_steps[:, meas] = rel[:, meas]
+        zero_comps = [int(c) for c in rec.get("reaction_zero_components", [])]
+        if zero_comps:     # components known to vanish (e.g. R_y of a tensile test): observed 0, noise from the measured force
+            rf = np.array(prep["reaction_forces"], dtype=float)
+            rf[:, zero_comps] = 0.0
+            prep["reaction_forces"] = rf
+            meas = [int(c) for c in rec.get("reaction_components", range(rf.shape[1])) if int(c) not in zero_comps]
+            scale = np.linalg.norm(rf[:, meas], axis=1)
+            rel_z = float(rec.get("reaction_noise_rel", 0.01))
+            sigma_R_steps[:, zero_comps] = np.maximum(rel_z * scale, floor)[:, None]
+            print(f"[HSGP] reaction components {zero_comps} fitted to 0 with sigma = {rel_z:g} x |measured force| "
+                  f"(floor {float(rec.get('reaction_noise_floor', 0.0)):g})", flush=True)
+        return prep, F_all, sigma_R_steps, mat, has_truth, incompressible_ps
+
+    def supports(prep, steps):
+        """Measured support reactions and their noise at the given steps (None if the data has none)."""
+        if "support_reactions" not in prep:
+            return None, None
+        return (np.asarray(prep["support_reactions"], dtype=float)[steps],
+                np.asarray(prep["support_noise_std"], dtype=float)[steps])
+
+    # several experiments (recipe 'experiments': [{name, dataset_path}, ...]): one GP fitted to all of them
+    experiments = rec.get("experiments") or [dict(name=None, dataset_path=args.dataset_path)]
+    exps = []
+    for k, e in enumerate(experiments):
+        name = e.get("name") or (f"exp{k}" if len(experiments) > 1 else None)
+        exps.append(dict(zip(("prep", "F_all", "sigma_R", "mat", "has_truth", "incompressible_ps"),
+                             prepare(e["dataset_path"], e.get("thickness", 1.0))), name=name, dataset_path=e["dataset_path"]))
+    multi = len(exps) > 1
+    if multi and len({x["incompressible_ps"] for x in exps}) > 1:
+        raise ValueError("all experiments need the same kinematic assumption (incompressible plane stress or not)")
+    for x in exps:
+        if max(train_steps) >= x["F_all"].shape[0]:
+            raise ValueError(f"experiment {x['name']}: training step {max(train_steps)} beyond its {x['F_all'].shape[0]} steps")
+    # the first experiment provides the single-experiment names used below (and the truth plots)
+    prep, F_all, sigma_R_steps, mat, has_truth, incompressible_ps = (exps[0][k] for k in (
+        "prep", "F_all", "sigma_R", "mat", "has_truth", "incompressible_ps"))
+    if multi:
+        print(f"[HSGP] {len(exps)} experiments fitted together: " + ", ".join(f"{x['name']} ({x['dataset_path']})" for x in exps), flush=True)
+    energy_scale = float(np.mean([external_work_density(x["prep"], x["prep"]["node_type"], max(train_steps)) for x in exps]))
+    angles = (rec.get("material_params") or {}).get("angles", rec.get("angles"))
+    fibers = fiber_vectors(angles) if angles and str(rec.get("model_mode", "anisotropic")) != "isotropic" else None
+    if fibers is not None:
+        print(f"[HSGP] anisotropic GP over (I4_bar, I6_bar), fibre angles {angles} deg", flush=True)
+    post_path = os.path.join(save_path, "hsgp_posterior.npz")
+    print(f"[HSGP] seed {args.seed} | steps {train_steps} | energy scale {energy_scale:.4g} | options {opt}", flush=True)
+
+    cv_mode = str(opt["hsgp_cv_holdout"] or "folds").lower()
+    if cv_mode not in ("folds", "val"):
+        raise ValueError(f"hsgp_cv_holdout must be 'folds' or 'val' (got {cv_mode!r})")
+    cv_data = None
+    if cv_mode == "val" and multi:
+        raise ValueError("hsgp_cv_holdout: val is not supported for several experiments; use folds")
+    if cv_mode == "val":
+        cv_steps = [int(t) for t in val_steps if 0 <= int(t) < F_all.shape[0]]
+        if len(cv_steps) < len(val_steps):
+            print(f"[HSGP] validation steps {sorted(set(map(int, val_steps)) - set(cv_steps))} are not in the data "
+                  f"({F_all.shape[0]} steps): left out of the s selection", flush=True)
+        if not cv_steps:
+            raise ValueError("hsgp_cv_holdout: val needs val_load_steps_indices inside the data")
+        cv_data = dict(f3x3=F_all[jnp.array(cv_steps)], R=np.asarray(prep["reaction_forces"])[cv_steps],
+                       sigma_R=sigma_R_steps[cv_steps], labels=cv_steps,
+                       support_R=supports(prep, cv_steps)[0], support_sigma=supports(prep, cv_steps)[1])
+        print(f"[HSGP] s chosen on the validation steps {cv_steps} (these are then not independent of the fit "
+              f"settings)", flush=True)
+
+    if args.phase in ("fit", "all"):
+        t0 = time.time()
+        tr = jnp.array(train_steps)
+        data_args = ([x["F_all"][tr] for x in exps], [np.asarray(x["prep"]["reaction_forces"])[train_steps] for x in exps],
+                     [x["sigma_R"][train_steps] for x in exps], [x["prep"]["cells"] for x in exps],
+                     [x["prep"]["node_type"] for x in exps], [x["prep"]["dNdX"] for x in exps], [x["prep"]["dA"] for x in exps])
+        labels = [[f"{x['name']}:{t}" for t in train_steps] for x in exps]
+        sup_R, sup_s = [supports(x["prep"], train_steps)[0] for x in exps], [supports(x["prep"], train_steps)[1] for x in exps]
+        n_sup = [0 if S is None else int(np.isfinite(S[0]).sum()) for S in sup_R]
+        print(f"[HSGP] reaction rows per step: 2 loaded edges + {n_sup if multi else n_sup[0]} measured supports", flush=True)
+        if not multi:
+            data_args, labels = tuple(a[0] for a in data_args), train_steps
+            sup_R, sup_s = sup_R[0], sup_s[0]
+        fit_fn = fit_exact_gp if gp_method == "exact" else fit_hsgp
+        extra = dict(hyper_steps=int(rec.get("exact_gp_hyper_steps", 200))) if gp_method == "exact" else {}
+        model, hist = fit_fn(
+            *data_args, **extra,
+            energy_scale=energy_scale, num_basis_dev=opt["hsgp_num_basis_dev"], num_basis_vol=opt["hsgp_num_basis_vol"],
+            box_factor=opt["hsgp_box_factor"], sigma_cap=opt["hsgp_sigma_cap"],
+            amplitude_prior_scale=opt["hsgp_amplitude_prior_scale"], lengthscale_prior_scale=opt["hsgp_lengthscale_prior_scale"],
+            hyper_restarts=bool(opt["hsgp_hyper_restarts"]), incompressible_plane_stress=incompressible_ps,
+            sigma_f_rel=float(opt["hsgp_force_noise_rel"]) or None, cv_folds=int(opt["hsgp_cv_folds"]),
+            cv_tol=float(opt["hsgp_cv_tol"]), global_equilibrium=float(opt["hsgp_global_equilibrium"]),
+            support_R=sup_R, support_sigma=sup_s, cv_data=cv_data, step_labels=labels, fibers=fibers,
+            num_basis_aniso=int(opt["hsgp_num_basis_aniso"]) or None)
+        fit_time = time.time() - t0
+        model.save(post_path)
+        F_train_states = jnp.concatenate([x["F_all"][tr].reshape(-1, 3, 3) for x in exps])
+        feats = jax.vmap(model.feature_extractor.extract)(F_train_states)
+        I_obs = np.concatenate([np.asarray(x) for x in feats], axis=-1)   # dev (2), vol (1)[, aniso (3)]
+        np.save(os.path.join(save_path, "I_obs_all.npy"), I_obs)
+        if multi:   # pooled training states of all experiments (the export's distillation states read these)
+            np.save(os.path.join(save_path, "train_states_f3x3.npy"), np.asarray(F_train_states))
+        cfg_out = dict(rec, extraction_method="exact_gp" if gp_method == "exact" else "hsgp", dataset_path=exps[0]["dataset_path"], seed=args.seed, batch_dir=save_path,
+                       experiments=[dict(name=x["name"], dataset_path=x["dataset_path"]) for x in exps] if multi else None,
+                       train_load_steps_indices=train_steps, val_load_steps_indices=val_steps,
+                       test_load_steps_indices=test_steps, data_energy_scale=energy_scale, hsgp_options=opt,
+                       hsgp=dict(model.info, hyper={k: np.asarray(v).tolist() for k, v in model.hyper.items()}))
+        json.dump(cfg_out, open(os.path.join(save_path, "config.json"), "w"), indent=4, default=float)
+        json.dump(hist, open(os.path.join(save_path, "hsgp_history.json"), "w"), indent=2)
+        print(f"[seed {args.seed}] fit done in {fit_time:.0f}s, s = {model.info['sigma_f_rel']:.3g}", flush=True)
+        if args.phase == "fit":
+            return
+    else:
+        model = load_energy_gp(post_path)
+        I_obs = np.load(os.path.join(save_path, "I_obs_all.npy"))
+        fit_time = model.info.get("fit_time", float("nan"))
+
+    t0 = time.time()
+    plot_force_noise_cv(model, save_path)
+    if multi:   # one reaction-force figure per experiment
+        reac = {x["name"]: plot_reactions(model, x["F_all"], x["prep"], train_steps, save_path, x["has_truth"],
+                                          sigma_R=x["sigma_R"], name=x["name"]) for x in exps}
+    else:
+        reac = plot_reactions(model, F_all, prep, train_steps, save_path, has_truth, sigma_R=sigma_R_steps)
+    _, frac = ellipticity_penalty(model.psi_det, jnp.concatenate([x["F_all"][jnp.array(train_steps)].reshape(-1, 3, 3)
+                                                                  for x in exps]), 8)
+    metrics = dict(seed=args.seed, extraction_method="exact_gp" if gp_method == "exact" else "hsgp", extraction_time=fit_time, train_steps=train_steps,
+                   val_steps=val_steps, log_evidence=model.info["log_evidence"], converged=model.info["converged"],
+                   small_strain_moduli=model.small_strain_moduli(),
+                   fraction_unstable=float(frac), reaction_forces=reac,
+                   force_noise=dict(sigma_f_rel=model.info.get("sigma_f_rel"), cv=model.info.get("force_noise_cv")),
+                   hyper={k: np.asarray(v).tolist() for k, v in model.hyper.items()})
+    if has_truth:   # synthetic benchmark: energy and stress against the true material
+        from plots.training import (plot_training_r2, plot_training_r2_piola, plot_combined_validation,
+                                    plot_energy_decomposition_validation)
+        import gc
+
+        def release():   # compiled functions keep their (large, closed-over) sample arrays alive: free between plots
+            jax.clear_caches()
+            gc.collect()
+        release()   # the stability check and moduli above leave their compiled functions behind
+        # exact GP: fewer pathwise draws in the sample-based plot panels (each draw touches every observation atom;
+        # the means, bands and metrics are closed form and do not use them)
+        n_e, n_p = (64, 16) if getattr(model, "model_type", "hsgp") == "exact_gp" else (256, 64)
+        r2_res = plot_training_r2(model, mat, F_all, save_path, train_steps=train_steps, val_steps=val_steps,
+                                  test_steps=test_steps, n_pws_samples=n_e)
+        release()
+        plot_training_r2_piola(model, mat, F_all, save_path, train_steps=train_steps, val_steps=val_steps,
+                               test_steps=test_steps, n_pws_samples=n_p)
+        release()
+        plot_combined_validation(model, mat, save_path, 0, I_obs=I_obs)
+        release()
+        plot_energy_decomposition_validation(model, mat, save_path, I_obs=I_obs)
+        metrics.update(r2=r2_res[0], rmse=r2_res[1], ec=r2_res[2],
+                       r2_train=r2_res.train_metrics.get("r2"), ec_train=r2_res.train_metrics.get("ec"),
+                       r2_val=r2_res.val_metrics.get("r2"), rmse_val=r2_res.val_metrics.get("rmse"),
+                       ec_val=r2_res.val_metrics.get("ec"))
+    else:   # experimental data: the extracted energy along the six standard deformation modes, without a truth
+        from plots.training import plot_energy_decomposition_validation
+        plot_energy_decomposition_validation(model, None, save_path, I_obs=I_obs)
+    # data coverage in the GP input space: interpolation region and where the standard modes leave it
+    from plots.training import plot_invariant_space_modes
+    metrics["mode_exit_gamma"] = plot_invariant_space_modes(model, save_path, I_obs)
+    json.dump(metrics, open(os.path.join(save_path, "extraction_metrics.json"), "w"), indent=4, default=float)
+    print(f"[seed {args.seed}] plots and metrics done in {time.time() - t0:.0f}s -> {save_path} | "
+          f"R2 val {metrics.get('r2_val', float('nan')):.4f} EC val {metrics.get('ec_val', float('nan')):.1f} | "
+          f"moduli {metrics['small_strain_moduli']}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

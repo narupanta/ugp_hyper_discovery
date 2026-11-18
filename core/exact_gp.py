@@ -38,7 +38,7 @@ import optax
 from .dataclass import EnergyDist, StressDist
 from .features import AnisotropicFeatureExtractor, make_feature_extractor
 from .hsgp_model import ANISO_REFERENCE, DEV_REFERENCE, VOL_REFERENCE
-from .loss_function import build_eiv_indices
+from .mechanics import dof_sets
 
 jax.config.update("jax_enable_x64", True)
 
@@ -99,9 +99,10 @@ def prior_var_value(hyper, layout, comps=None):
 
 
 # ----------------------------------------------------------------------------- observation operator per step
-def step_operator(extractor, layout, F, mesh, R, sR, opposite_reactions, global_equilibrium):
+def step_operator(extractor, layout, F, mesh, R, sR, global_equilibrium, S=None, sS=None):
     """Atoms (Z, kinds), dense rows A (n_rows, n_atoms), targets y, fixed noise var, free-row scale |R|^2 (rows whose
-    noise is s^2 |R|^2 get the scale, others 0)."""
+    noise is s^2 |R|^2 get the scale, others 0). Reaction rows: loaded edges (R, sR) and the supports with a measured
+    reaction (S, sS: (2,), NaN = not measured), as core.hsgp_inference.pseudo_observation."""
     F = jnp.asarray(F, dtype=jnp.float64)
 
     def z_of(f3):
@@ -126,15 +127,16 @@ def step_operator(extractor, layout, F, mesh, R, sR, opposite_reactions, global_
     noise += [0.0] * len(free)
     fscale += [r2] * len(free)
     n_react = 0
-    sets = [(mesh["rx"], 0, 1.0), (mesh["ry"], 1, 1.0)]
-    if opposite_reactions:
-        sets += [(mesh["fx"], 0, -1.0), (mesh["fy"], 1, -1.0)]
-    for dofs, comp, sign in sets:
-        s = float(np.asarray(sR)[comp])
-        if len(dofs) == 0 or s > 1e6:          # no load cell for this component: no row
+    sets = [(mesh["rx"], float(np.asarray(R)[0]), float(np.asarray(sR)[0])),
+            (mesh["ry"], float(np.asarray(R)[1]), float(np.asarray(sR)[1]))]
+    if S is not None:
+        sets += [(mesh["fx"], float(np.asarray(S)[0]), max(float(np.asarray(sS)[0]), 1e-3)),
+                 (mesh["fy"], float(np.asarray(S)[1]), max(float(np.asarray(sS)[1]), 1e-3))]
+    for dofs, value, s in sets:
+        if len(dofs) == 0 or not np.isfinite(value) or not s <= 1e6:   # no measurement for this boundary: no row
             continue
         rows.append(G[np.asarray(dofs)].sum(0)[None])
-        y.append(sign * float(np.asarray(R)[comp]))
+        y.append(value)
         noise.append(s ** 2)
         fscale.append(0.0)
         n_react += 1
@@ -150,9 +152,9 @@ def step_operator(extractor, layout, F, mesh, R, sR, opposite_reactions, global_
                 fscale=np.asarray(fscale), n_free=len(free), n_react=n_react)
 
 
-def reaction_rows_operator(extractor, layout, F, mesh, opposite=False):
+def reaction_rows_operator(extractor, layout, F, mesh):
     """Atoms and rows (R_x, R_y) of the loaded edges at one state (for reaction prediction)."""
-    st = step_operator(extractor, layout, F, mesh, np.ones(2), np.ones(2), False, 0.0)
+    st = step_operator(extractor, layout, F, mesh, np.ones(2), np.ones(2), 0.0)
     nf = st["n_free"]
     return st["Z"], st["kinds"], st["A"][nf:nf + 2]
 
@@ -337,9 +339,8 @@ class ExactGPHyperelasticity:
     def reaction_prediction(self, f3x3_steps, cells, node_type, dNdX, dA):
         """Reactions (R_x, R_y) at the measured states of each step: mean (T, 2), epistemic covariance (T, 2, 2)."""
         nt, c = np.asarray(node_type), np.asarray(cells)
-        ix = build_eiv_indices(nt, c)
-        mesh = dict(cells=c, n_nodes=nt.shape[0], dNdX=np.asarray(dNdX), dA=np.asarray(dA), free=ix["dof_free"],
-                    rx=ix["dof_rx"], ry=ix["dof_ry"], fx=np.array([], int), fy=np.array([], int))
+        mesh = dict(cells=c, n_nodes=nt.shape[0], dNdX=np.asarray(dNdX), dA=np.asarray(dA),
+                    **dict(dof_sets(nt), fx=np.array([], int), fy=np.array([], int)))   # loaded-edge reactions only
         means, covs = [], []
         for F in np.asarray(f3x3_steps):
             Zq, kq_, Aq = reaction_rows_operator(self.feature_extractor, self.layout, F, mesh)
@@ -504,7 +505,7 @@ def fit_exact_gp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, ener
                  hyper_restarts: bool = True, incompressible_plane_stress: bool = False,
                  sigma_f_rel: Optional[float] = None, cv_folds: int = 2, cv_grid=None, cv_tol: float = 0.0,
                  cv_data: Optional[dict] = None, fibers=None, step_labels=None, hyper_steps: int = 200,
-                 global_equilibrium: float = 0.0, opposite_reactions: bool = False, verbose: bool = True,
+                 global_equilibrium: float = 0.0, support_R=None, support_sigma=None, verbose: bool = True,
                  log_fn=print, **unused):
     """Same data arguments and noise / s options as core.hsgp_inference.fit_hsgp (single or several experiments).
     The HSGP basis options (num_basis_*, box_factor, priors) do not apply and are ignored.
@@ -515,6 +516,9 @@ def fit_exact_gp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, ener
         f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA = ([x] for x in (f3x3_steps, R_obs, sigma_R, cells,
                                                                                node_type, dNdX, dA))
         step_labels = None if step_labels is None else [step_labels]
+        support_R, support_sigma = [support_R], [support_sigma]
+    if support_R is None:
+        support_R = support_sigma = [None] * len(f3x3_steps)
     aniso_on = fibers is not None
     if aniso_on:
         extractor = AnisotropicFeatureExtractor(jnp.asarray(fibers[0], dtype=jnp.float64),
@@ -526,10 +530,7 @@ def fit_exact_gp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, ener
     meshes = []
     for c, nt, dn, da in zip(cells, node_type, dNdX, dA):
         nt, c = np.asarray(nt), np.asarray(c)
-        ix = build_eiv_indices(nt, c)
-        meshes.append(dict(cells=c, n_nodes=nt.shape[0], dNdX=np.asarray(dn), dA=np.asarray(da), free=ix["dof_free"],
-                           rx=ix["dof_rx"], ry=ix["dof_ry"], fx=2 * np.where(nt[:, 1] == 1)[0],
-                           fy=2 * np.where(nt[:, 2] == 1)[0] + 1))
+        meshes.append(dict(cells=c, n_nodes=nt.shape[0], dNdX=np.asarray(dn), dA=np.asarray(da), **dof_sets(nt)))
     steps, labels = [], []
     for e, Fe in enumerate(f3x3_steps):
         Fe = np.asarray(Fe)
@@ -537,7 +538,9 @@ def fit_exact_gp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, ener
         for t in range(Fe.shape[0]):
             R_t = np.asarray(R_obs[e])[t]
             sR_t = np.maximum(np.asarray(sigma_R[e])[t], 1e-3)
-            steps.append(step_operator(extractor, layout, Fe[t], meshes[e], R_t, sR_t, opposite_reactions, global_equilibrium))
+            S_t = None if support_R[e] is None else np.asarray(support_R[e])[t]
+            sS_t = None if support_sigma[e] is None else np.asarray(support_sigma[e])[t]
+            steps.append(step_operator(extractor, layout, Fe[t], meshes[e], R_t, sR_t, global_equilibrium, S_t, sS_t))
             labels.append((lab_e[t] if isinstance(lab_e[t], str) else f"{e}:{int(lab_e[t])}") if multi else int(lab_e[t]))
     T = len(steps)
     if T > 3:
@@ -659,7 +662,10 @@ def fit_exact_gp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, ener
         if cv_data is not None:
             v_ops = [step_operator(extractor, layout, np.asarray(cv_data["f3x3"])[v], meshes[0],
                                    np.asarray(cv_data["R"])[v], np.maximum(np.asarray(cv_data["sigma_R"])[v], 1e-3),
-                                   opposite_reactions, global_equilibrium) for v in range(np.asarray(cv_data["f3x3"]).shape[0])]
+                                   global_equilibrium,
+                                   None if cv_data.get("support_R") is None else np.asarray(cv_data["support_R"])[v],
+                                   None if cv_data.get("support_sigma") is None else np.asarray(cv_data["support_sigma"])[v])
+                     for v in range(np.asarray(cv_data["f3x3"]).shape[0])]
             folds = []
         else:
             if T < 2:
@@ -711,7 +717,7 @@ def fit_exact_gp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, ener
                             for n, _ in layout.comps) + f" ({rec['time']:.0f}s)")
     noise_full = np.asarray(full["noise"] + s ** 2 * full["fs"])
     info = dict(likelihood="residual_exact", model="exact_gp", sigma_f_rel=s, force_noise_cv=cv, converged=True,
-                global_equilibrium=float(global_equilibrium), opposite_reactions=bool(opposite_reactions),
+                global_equilibrium=float(global_equilibrium), reaction_rows=int(steps[0]["n_react"]),
                 log_evidence=log_ev, valid_load_steps=labels, n_atoms=int(n_at), n_obs=int(n_obs),
                 lengthscale_bounds=dict(lo=np.exp(lo_l).tolist(), hi=np.exp(hi_l).tolist()),
                 amplitude_prior_centre=float(np.exp(sig_centre)), sigma_cap=sigma_cap, fit_time=time.time() - t0,

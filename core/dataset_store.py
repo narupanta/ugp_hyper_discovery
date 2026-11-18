@@ -26,7 +26,7 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from core.utils import compute_invariants_np, deformation_gradient_element, transformation_jacobian
-from core.loss_function import neumann_cell_force
+from core.mechanics import neumann_cell_force
 
 CLEAN_FORMAT = "clean_v1"
 CLEAN_DIR = "dataset/clean"
@@ -241,6 +241,20 @@ def observe_dataset(clean: Dict[str, Any], seed: int, disp_noise: float, load_no
         loads_noisy = np.column_stack([reactions_true[:, 0] + noise_x, reactions_true[:, 1] + noise_y])
         load_noise_std = load_noise * np.abs(reactions_true)
         load_noise_std_steps = load_noise_std
+        # Support reactions (fixed-x / fixed-y boundaries) as measurements of their own, as with a load cell at every
+        # support: same relative noise, drawn independently (after the draws above, so existing seeds are unchanged).
+        # Truth: stored, or from equilibrium (support = -loaded reaction; the clean FEM is converged, |sum| / |R| ~ 1e-7).
+        # A direction without a fixed boundary has no support reaction (NaN).
+        support_true = (np.asarray(clean["support_reactions_true"], dtype=float) if "support_reactions_true" in clean
+                        else -reactions_true.astype(float))
+        rng, subkey_s1 = jax.random.split(rng)
+        rng, subkey_s2 = jax.random.split(rng)
+        z_s = np.column_stack([np.array(jax.random.normal(k, (num_steps,))) for k in (subkey_s1, subkey_s2)])
+        support_std = load_noise * np.abs(support_true)
+        support_obs = support_true + support_std * z_s
+        for comp, col in ((0, 1), (1, 2)):
+            if not np.any(node_type[:, col] == 1):
+                support_true[:, comp] = support_obs[:, comp] = support_std[:, comp] = np.nan
 
     out = {
         "mesh_pos": mesh_pos, "cells": cells, "node_type": node_type, "dNdX": dNdX, "dA": dA,
@@ -258,6 +272,8 @@ def observe_dataset(clean: Dict[str, Any], seed: int, disp_noise: float, load_no
         out["lam3"], out["lam3_true"] = lam3_obs_arr, lam3_true_arr
     if mode == "displacement":
         out["reaction_forces"], out["reaction_forces_true"] = loads_noisy, reactions_true
+        out["support_reactions"], out["support_reactions_true"] = support_obs, support_true
+        out["support_noise_std"] = support_std
     if a0 is not None:
         out["a0"] = a0
         if "I4_bar" in inv_true:

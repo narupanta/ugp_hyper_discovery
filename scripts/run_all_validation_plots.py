@@ -5,8 +5,7 @@ scripts/run_all_validation_plots.py
 Executes full validation and UQ analysis across all seeds in an experiment:
 1. Displacement UQ verification (uq_verification_disp.py)
 2. Pointwise Reaction Force calibration (plot_reaction_force_distilled.py)
-3. Free Node Residual analysis with GP overlay (plot_free_node_residuals.py)
-4. Master cross-seed ranking & summary compilation (generate_experiment_summary.py)
+3. Master cross-seed ranking & summary compilation (generate_experiment_summary.py)
 """
 
 import sys
@@ -74,14 +73,7 @@ def main():
             "--step", str(args.step)
         ])
 
-        # 3. Free Node Residual Analysis
-        run_command([
-            "python3", "plots/plot_free_node_residuals.py",
-            "--model_path", str(fem_val_dir),
-            "--step", str(args.step)
-        ])
-
-    # 4. Master Cross-Seed Summary & Ranking
+    # 3. Master Cross-Seed Summary & Ranking
     print(f"\n============================================================")
     print(f"=== Compiling Master Summary Across Seeds ===")
     print(f"============================================================")

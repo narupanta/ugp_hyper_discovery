@@ -5,7 +5,7 @@ terms disabled for the run (--<component>_params_disabled, and the GMR log term 
 terms pruned by the sensitivity analysis are shown as pruned (fixed at 0). Mean (red dashed) and true value (green
 dotted) when known.
 
-Used by distillation/distill_uqmodeldisc.py; for an existing run:
+Used by pipeline/distill.py; for an existing run:
   python3 plots/plot_param_distributions.py --distilled_dir <run>/distilled [--component dev]
 (the true values are read from the nearest config.yaml above the run with material_params)
 """

@@ -79,10 +79,10 @@ def parse_args():
 
 def distill_cmd(cfg, extract_dir, out_dir, component, seed, n_iter, checkpoints):
     get = lambda k, d: cfg.get(k, d)
-    cmd = [sys.executable, "distillation/distill_uqmodeldisc.py", "--saved_model_dir", extract_dir,
+    cmd = [sys.executable, "pipeline/distill.py", "--saved_model_dir", extract_dir,
            "--material_model", str(get("distilled_material_model", "gmr")), "--n_iterations", str(n_iter),
            "--distill_target", str(get("distill_target", "sef_split")), "--component", component,
-           "--override_out_dir", out_dir, "--sample_mode", str(get("sample_mode", "standard")),
+           "--override_out_dir", out_dir, "--sample_mode", str(get("sample_mode", "dataset_f")),
            "--sampling_mode", str(get("distillation_sampling_mode", "cached_L")),
            "--num_points", str(get("num_points", 100)), "--num_func_samples", str(get("num_func_samples", 512)),
            "--max_gamma", str(get("max_gamma", 1.0)), "--sobol_threshold", str(get("sobol_threshold", 1e-4)),
@@ -98,20 +98,18 @@ def distill_cmd(cfg, extract_dir, out_dir, component, seed, n_iter, checkpoints)
 
 
 def export_cmd(cfg, extract_dir):
-    """The GP export that distill_uqmodeldisc.py would create on demand (same subfolder naming)."""
-    mode, n_pts = str(cfg.get("sample_mode", "standard")), str(cfg.get("num_points", 100))
+    """The GP export that pipeline/distill.py would create on demand (same subfolder naming)."""
+    mode, n_pts = str(cfg.get("sample_mode", "dataset_f")), str(cfg.get("num_points", 100))
     gamma, target = str(cfg.get("max_gamma", 1.0)), str(cfg.get("distill_target", "sef_split"))
     if mode == "dataset_all":
         sub = "pytorch_export_dataset_all"
     elif mode.startswith("dataset_f"):
         sub = f"pytorch_export_{mode}_n{n_pts}"
-    elif mode in ("standard_interp", "inducing_points"):
-        sub = f"pytorch_export_{mode}"
-    else:
-        sub = f"pytorch_export_standard_g{gamma}"
+    else:   # standard_interp
+        sub = "pytorch_export_standard_interp"
     if target in ("sef_stress", "sef_cauchy"):
         sub += f"_{target}"
-    return [sys.executable, "distillation/export_gp_to_pytorch.py", "--saved_model_dir", extract_dir,
+    return [sys.executable, "pipeline/export_gp.py", "--saved_model_dir", extract_dir,
             "--sample_mode", mode, "--num_points", n_pts, "--max_gamma", gamma, "--distill_target", target,
             "--export_subfolder", sub], os.path.join(extract_dir, sub)
 

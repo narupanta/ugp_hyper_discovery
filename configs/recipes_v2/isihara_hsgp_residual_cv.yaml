@@ -55,18 +55,18 @@ val_load_steps_indices:
 - 14
 - 16
 - 18
-- 20
 seeds:
 - 1
 
 # --- Extraction (HSGP) -------------------------------------------------------
 hsgp_likelihood: residual_exact
 hsgp_force_noise_rel: 0.0       # 0: s chosen by cross-validation
+hsgp_cv_holdout: folds 
 hsgp_cv_folds: 2
 hsgp_cv_tol: 0.0
-hsgp_num_basis_dev: 8
-hsgp_num_basis_vol: 8
-hsgp_box_factor: 8.0
+hsgp_num_basis_dev: 12
+hsgp_num_basis_vol: 16
+hsgp_box_factor: 4.0
 hsgp_amplitude_prior_scale: 0.0
 hsgp_lengthscale_prior_scale: 0.0
 hsgp_sigma_cap: 10.0

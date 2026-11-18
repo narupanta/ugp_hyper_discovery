@@ -30,7 +30,7 @@ I6_bar = a1 . C_bar a1 (no parametric term). At F = I its stress is 2 (dpsi/dI4 
 which vanishes for two distinct fibres only if both slopes vanish: psi_aniso(1, 1) = 0 and both first derivatives at
 (1, 1) are imposed exactly, like the volumetric conditions.
 
-Duck-type compatible with the SparseHyperelasticityGP methods used by evaluation, plotting and the distillation export.
+Evaluation interface shared with core/exact_gp.py (used by evaluation, plotting and the distillation export).
 """
 import json
 from typing import Callable, Dict, Optional
@@ -40,7 +40,6 @@ import jax
 import jax.numpy as jnp
 
 from .dataclass import EnergyDist, StressDist
-from .features import IsotropicFeatureExtractor
 from .hsgp_basis import Box, eigenfunctions
 
 jax.config.update("jax_enable_x64", True)
@@ -178,7 +177,7 @@ class HSGPHyperelasticity:
         return self._dist(f, self.idx_vol)
 
     def aniso_psi_dist(self, f, params=None, weights=None) -> EnergyDist:
-        """Fibre energy; identically zero for an isotropic model (same interface as the SVGP teacher)."""
+        """Fibre energy; identically zero for an isotropic model (same interface as the exact GP)."""
         if self.is_anisotropic:
             return self._dist(f, self.idx_aniso)
         f = jnp.asarray(f, dtype=jnp.float64)

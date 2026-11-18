@@ -1,0 +1,10 @@
+{
+    "covariance_mode": "diag",
+    "pos_var_mean": 1,
+    "augmented_var_dist": 1,
+    "normalize_ell": 0,
+    "constraint_lengthscale": 1,
+    "vfm_mode": "linear_triangle",
+    "free_noise_mode": "nodal",
+    "seed": 42
+}

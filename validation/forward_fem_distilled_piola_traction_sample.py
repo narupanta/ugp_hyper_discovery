@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as tri
 
 import argparse
-from sklearn.metrics import r2_score
 
 plt.rcParams.update({
     "font.family": "serif",
@@ -34,90 +33,6 @@ plt.rcParams.update({
     "savefig.dpi": 600,             # Ensures saved file is high quality
     "text.usetex": False            # Set to True only if you have a full LaTeX install
 })
-
-
-def plot_fem_verification(I1_bar_true, I2_bar_true, J_true,
-                          I1_bar_pred, I2_bar_pred, J_pred,
-                          I1_bar_train, I2_bar_train, J_train,
-                          inducing_points, save_path):
-
-    fig1, axes1 = plt.subplots(1, 3, figsize=(18, 5))
-
-    # Data groups for iteration
-    data = [
-        (I1_bar_true, I1_bar_pred, r'$\bar{I}_1$', axes1[0]),
-        (I2_bar_true, I2_bar_pred, r'$\bar{I}_2$', axes1[1]),
-        (J_true, J_pred, r'$J$', axes1[2])
-    ]
-
-    for true, pred, name, ax in data:
-        # Calculate R2
-        r2 = r2_score(true.flatten(), pred.flatten())
-        
-        # Plot Scatter (Hollow circles)
-        ax.scatter(true, pred, alpha=0.5, edgecolors='b', facecolors='none', s=20)
-        
-        # Identity Line (Perfect parity)
-        all_vals = np.concatenate([true.flatten(), pred.flatten()])
-        low, high = np.min(all_vals), np.max(all_vals)
-        ax.plot([low, high], [low, high], 'k--', alpha=0.75, zorder=0)
-        
-        # Add R2 Text Box
-        ax.text(0.05, 0.92, f'$R^2 = {r2:.4f}$', transform=ax.transAxes, 
-                fontsize=14, fontweight='bold', verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-        # Formatting
-        ax.set_title(f'{name} Accuracy', fontsize = 16)
-        ax.set_xlabel('True')
-        if ax == axes1[0]:
-            ax.set_ylabel('Pred')
-        
-        ax.grid(False) # Consistent with your previous request
-        ax.set_xlim([low, high])
-        ax.set_ylim([low, high])
-    fig1.suptitle("Predicted Material Accuracy on FEM", fontsize=20)
-    fig1.tight_layout()
-    
-    # Save files
-    os.makedirs(save_path, exist_ok=True)
-    fig1.savefig(os.path.join(save_path, "fem_deployment_accuracy_r2.pdf"), dpi=600)
-    # --- FIGURE 2: Invariant Space Coverage ---
-    # Inducing points indices: 0:I1_bar, 1:I2_bar, 2:J
-    # z_i1 = inducing_points[:, 0]
-    # z_i2 = inducing_points[:, 1]
-    # z_j  = inducing_points[:, 2]
-
-    fig2, axes2 = plt.subplots(1, 3, figsize=(18, 5))
-
-    # I1_bar vs I2_bar
-    axes2[0].scatter(I1_bar_pred - 3, I2_bar_pred- 3, edgecolors='red', facecolors='none', alpha=0.3, label='Pred')
-    axes2[0].scatter(I1_bar_train- 3, I2_bar_train- 3, edgecolors='black', facecolors='none', alpha=0.5, label='Train')
-    # axes2[0].scatter(z_i1- 3, z_i2 - 3, color='blue', marker='x', s=50, label='Inducing')
-    axes2[0].set_xlabel(r'$\bar{I}_1 - 3$')
-    axes2[0].set_ylabel(r'$\bar{I}_2 - 3$')
-    axes2[0].set_title(r'$\bar{I}_1 - 3$ vs $\bar{I}_2 - 3$')
-    axes2[0].legend()
-
-    # I1_bar vs J
-    axes2[1].scatter(I1_bar_pred- 3, (J_pred-1)**2, edgecolors='red', facecolors='none', alpha=0.3)
-    axes2[1].scatter(I1_bar_train- 3, (J_train-1)**2, edgecolors='black', facecolors='none', alpha=0.5)
-    # axes2[1].scatter(z_i1- 3, (z_j-1)**2, color='blue', marker='x', s=50)
-    axes2[1].set_xlabel(r'$\bar{I}_1 - 3$')
-    axes2[1].set_ylabel(r'$(J - 1)^2$')
-    axes2[1].set_title(r'$\bar{I}_1 - 3$ vs $(J - 1)^2$')
-
-    # I2_bar vs J
-    axes2[2].scatter(I2_bar_pred- 3, (J_pred-1)**2, edgecolors='red', facecolors='none', alpha=0.3)
-    axes2[2].scatter(I2_bar_train- 3, (J_train-1)**2, edgecolors='black', facecolors='none', alpha=0.5)
-    # axes2[2].scatter(z_i2- 3, (z_j-1)**2, color='blue', marker='x', s=50)
-    axes2[2].set_xlabel(r'$\bar{I}_2 - 3$')
-    axes2[2].set_ylabel(r'$(J - 1)^2$')
-    axes2[2].set_title(r'$\bar{I}_2 - 3$ vs $(J - 1)^2$')
-    fig2.suptitle("Training and testing invariant space", fontsize=20)
-    fig2.tight_layout()
-    fig2.savefig(os.path.join(save_path, "invariant_space_coverage.pdf"), dpi=600)
-
 
 
 import matplotlib.pyplot as plt
@@ -196,7 +111,6 @@ if __name__ == "__main__" :
     n_sample = args.n_sample
     # load result 
     analysis_dir = Path("validation/coverage_test") 
-    extraction_result_dir = Path("extraction/extracted_models") 
     # case_name = f"20260410T172507_isihara_0.0_0.01_8_0.975_5_40_0_0"
     case_name = args.model_path
     dataset_params = case_name.split("_")
@@ -375,7 +289,6 @@ if __name__ == "__main__" :
 
     u_true = solve_fem(problem_true, petsc_options, loads_noisy)
     u_pred_samples = []
-
 
 
     # pred_piola_stress_funcs = []

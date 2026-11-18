@@ -5,7 +5,10 @@ the measured displacements).
 Model, per training load step t (u = measured displacements, so the residual is exactly linear in the weights):
   free DOFs:   B_free,t theta ~ N(0, sigma_free,t^2 I),   sigma_free,t = s |R_t|
   reactions:   B_R,t theta    ~ N(R_t, Sigma_R,t)         (load-cell noise, diagonal)
-B_t = internal nodal forces of each basis function at the measured state (assembled once). With the constrained GP
+B_t = internal nodal forces of each basis function at the measured state (assembled once). In the paper's notation
+this is one linear-Gaussian pseudo-observation per step, q_t = H_t theta + eps_t (pseudo_observation), and several
+steps / experiments are stacked, q = [q_1; ...; q_T] (stack_observations; the fit sums their gaussian_statistics,
+which is the same). With the constrained GP
 prior theta = M(eta) gamma, gamma ~ N(0, I), the posterior over theta and the evidence are closed form for given
 (eta, s). The kernel hyperparameters eta = (sigma_dev, l_dev, sigma_vol, l_vol) are set by MAP-II on the evidence
 (log-normal hyperpriors optional, lengthscales bounded to the range the basis resolves, amplitudes capped).
@@ -20,10 +23,10 @@ GP prior conditioned exactly on the reference constraints A theta = 0 (zero ener
 Anisotropic option (fibres a0, a1): an additive 2D GP over (I4_bar, I6_bar) with its own amplitude and lengthscales,
 conditioned on psi_aniso(1, 1) = 0 and zero slopes in I4 and I6 there (zero energy and stress at F = I).
 The two linear-elastic coefficients of HSGPHyperelasticity (theta[0], theta[1]) are kept at zero (zero-mean prior).
-The EIV likelihood and the other noise models are in archive/eiv/hsgp_inference.py.
 """
 import time
-from typing import Optional
+from dataclasses import dataclass
+from typing import NamedTuple, Optional
 
 import numpy as np
 import jax
@@ -33,7 +36,7 @@ import optax
 from .features import make_feature_extractor
 from .hsgp_basis import Box, make_box, se_spectral_density
 from .hsgp_model import HSGPHyperelasticity, DEV_REFERENCE, VOL_REFERENCE, ANISO_REFERENCE
-from .loss_function import build_eiv_indices
+from .mechanics import dof_sets
 
 jax.config.update("jax_enable_x64", True)
 
@@ -55,6 +58,100 @@ def basis_force_matrix(model: HSGPHyperelasticity, f3x3_cells, cells, n_nodes: i
     D = jax.vmap(dphi)(f3x3_cells)                                                         # (C, P, 2, 2)
     f_cell = jnp.einsum("cpij,caj->caip", D, dNdX) * dA[:, None, None, None]               # (C, 3, 2, P)
     return jnp.zeros((n_nodes, 2, model.num_params)).at[cells].add(f_cell).reshape(2 * n_nodes, -1)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Pseudo-observation model (paper notation): per load step t
+#     q_t = H_t theta + eps_t,   eps_t ~ N(0, diag(sigma_t^2)),
+#     q_t = [0 (free DOFs); R_t (loaded-edge reactions); S_t (support reactions, where measured); (0 global equil.)].
+# Several load steps / experiments: q = [q_1; ...; q_T], H = [H_1; ...; H_T] (independent noise). The posterior only
+# needs H^T W H, H^T W q, q^T W q and log det W (W = diag(sigma^-2)), which are sums over the stacked blocks, so the
+# fit stacks per-step STATISTICS (gaussian_statistics) instead of the tall matrices themselves (same result, memory
+# O(P^2) per step instead of O(n_free P)).
+# ----------------------------------------------------------------------------------------------------------------------
+class Observation(NamedTuple):
+    """One block of the pseudo-observations: q = H theta + eps, eps ~ N(0, diag(sigma^2))."""
+    H: jnp.ndarray        # (n, P)
+    q: jnp.ndarray        # (n,)
+    sigma: jnp.ndarray    # (n,)
+
+
+def pseudo_observation(B, dofs, R_t, sigma_R_t, S_t=None, sigma_S_t=None, *, global_equilibrium: float = 0.0):
+    """Pseudo-observation blocks of one load step from its basis force matrix B_t (2n, P) (basis_force_matrix).
+
+      free:        H = B_t[free],           q = 0,     sigma = |R_t|        (x s: the free-residual scale, see below)
+      reaction:    one row per boundary with a measured reaction:
+                   loaded edges (x, y): H = sum of B_t over their DOFs,  q = R_t,  sigma = sigma_R,t
+                   supports (fixed x, fixed y): H = sum over their DOFs,  q = S_t,  sigma = sigma_S,t
+                   (S_t, sigma_S_t: (2,) measured support reactions; NaN or None = not measured, no row; a direction
+                   without fixed DOFs has no row either)
+      equilibrium: (global_equilibrium = c > 0) H = sum of B_t[free] per direction, q = 0, sigma = c |R_t|
+    The free block is returned at s = 1: its noise is sigma_free,t = s |R_t| and s is chosen outside (scale_noise).
+    """
+    R_t, sigma_R_t = jnp.asarray(R_t), jnp.asarray(sigma_R_t)
+    r = jnp.sqrt(jnp.maximum(jnp.sum(R_t ** 2), 1e-30))
+    free = np.asarray(dofs["free"])
+    obs = dict(free=Observation(B[free], jnp.zeros(len(free)), jnp.full(len(free), r)))
+    H_R, q_R, s_R = [B[dofs["rx"]].sum(0), B[dofs["ry"]].sum(0)], [R_t[0], R_t[1]], [sigma_R_t[0], sigma_R_t[1]]
+    for comp, key in ((0, "fx"), (1, "fy")):
+        if S_t is not None and len(dofs[key]) and np.isfinite(float(S_t[comp])):
+            H_R.append(B[dofs[key]].sum(0))
+            q_R.append(jnp.asarray(S_t[comp]))
+            s_R.append(jnp.maximum(jnp.asarray(sigma_S_t[comp]), 1e-3))
+    obs["reaction"] = Observation(jnp.stack(H_R), jnp.stack(q_R), jnp.stack(s_R))
+    if global_equilibrium > 0:
+        H_eq = jnp.stack([B[free[free % 2 == 0]].sum(0), B[free[free % 2 == 1]].sum(0)])
+        obs["equilibrium"] = Observation(H_eq, jnp.zeros(2), jnp.full(2, float(global_equilibrium) * r))
+    return obs
+
+
+def stack_observations(blocks):
+    """[q_1; q_2; ...] = [H_1; H_2; ...] theta + eps: the joint observation of independent blocks."""
+    return Observation(*(jnp.concatenate([getattr(b, k) for b in blocks]) for k in Observation._fields))
+
+
+@dataclass(frozen=True)
+class GaussianStats:
+    """Sufficient statistics of an observation block: G = H^T W H, b = H^T W q, qWq = q^T W q, logdetW, n rows.
+    Statistics of stacked blocks are the sums of the blocks' statistics (stats(stack(a, b)) == stats(a) + stats(b))."""
+    G: jnp.ndarray
+    b: jnp.ndarray
+    qWq: jnp.ndarray
+    logdetW: jnp.ndarray
+    n: float
+
+    def __add__(self, o):
+        if isinstance(o, int) and o == 0:      # sum() starts from 0
+            return self
+        return GaussianStats(self.G + o.G, self.b + o.b, self.qWq + o.qWq, self.logdetW + o.logdetW, self.n + o.n)
+
+    __radd__ = __add__
+
+
+def gaussian_statistics(obs: Observation) -> GaussianStats:
+    w = 1.0 / obs.sigma ** 2
+    return GaussianStats(obs.H.T @ (w[:, None] * obs.H), obs.H.T @ (w * obs.q), jnp.sum(w * obs.q ** 2),
+                         jnp.sum(jnp.log(w)), float(obs.q.shape[0]))
+
+
+def scale_noise(st: GaussianStats, s: float) -> GaussianStats:
+    """Statistics of the same block with its noise sigma multiplied by s."""
+    s2 = float(s) ** 2
+    return GaussianStats(st.G / s2, st.b / s2, st.qWq / s2, st.logdetW - st.n * np.log(s2), st.n)
+
+
+def sqrt_factor(G):
+    """R with R^T R = G (symmetric eigendecomposition, PSD-safe)."""
+    d, U = jnp.linalg.eigh(0.5 * (G + G.T))
+    return jnp.sqrt(jnp.maximum(d, 0.0))[:, None] * U.T
+
+
+def log_predictive_density(obs: Observation, mean, factor):
+    """log N(q; H m, diag(sigma^2) + H S H^T) with the posterior theta ~ N(m, S), S = factor factor^T."""
+    U = obs.H @ factor
+    C = jnp.diag(obs.sigma ** 2) + U @ U.T
+    d = obs.q - obs.H @ mean
+    return float(-0.5 * (d @ jnp.linalg.solve(C, d) + jnp.linalg.slogdet(C)[1] + d.shape[0] * jnp.log(2 * jnp.pi)))
 
 
 class _Constraints:
@@ -94,8 +191,8 @@ def reaction_prediction(model: HSGPHyperelasticity, f3x3_steps, cells, node_type
     node_type, cells_np = np.asarray(node_type), np.asarray(cells)
     cells_j, dNdX, dA = jnp.asarray(cells_np), jnp.asarray(dNdX), jnp.asarray(dA)
     n_nodes = node_type.shape[0]
-    idx = build_eiv_indices(node_type, cells_np)
-    rx, ry = idx["dof_rx"], idx["dof_ry"]
+    idx = dof_sets(node_type)
+    rx, ry = idx["rx"], idx["ry"]
 
     @jax.jit
     def B_R(f_t):
@@ -114,8 +211,9 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              sigma_cap: float = 10.0, hyper_restarts: bool = True, incompressible_plane_stress: bool = False,
              sigma_f_rel: Optional[float] = None, cv_folds: int = 2, cv_grid=None, cv_tol: float = 0.0,
              cv_data: Optional[dict] = None, fibers=None, num_basis_aniso: Optional[int] = None,
-             step_labels=None, hyper_steps: int = 300, global_equilibrium: float = 0.0,
-             opposite_reactions: bool = False, verbose: bool = True, log_fn=print):
+             step_labels=None, hyper_steps: int = 300, hyper_gtol: float = 1e-6, hyper_ftol: float = 1e-12,
+             global_equilibrium: float = 0.0, support_R=None, support_sigma=None,
+             verbose: bool = True, log_fn=print):
     """
     f3x3_steps: (T, C, 3, 3) measured deformation gradients of the training steps; R_obs, sigma_R: (T, 2).
     Several experiments (specimens with their own meshes) at once: pass f3x3_steps, R_obs, sigma_R, cells, node_type,
@@ -126,7 +224,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
       cv_folds interleaved folds of the training steps; log grid cv_grid (default 1e-5..1, 11 points) refined around
       the best score; cv_tol > 0: the smallest s within cv_tol nats of the best held-out score (plateau rule).
       cv_data: a separate validation set instead of the folds, dict(f3x3 (V, C, 3, 3), R (V, 2), sigma_R (V, 2),
-      labels): each s is fitted on ALL training steps and scored on these steps' reactions only (cv_folds ignored);
+      labels, optional support_R / support_sigma (V, 2)): each s is fitted on ALL training steps and scored on these steps' reactions only (cv_folds ignored);
       they never enter the fit.
     fibers: (a0, a1) in-plane fibre vectors (a1 may be None) for the anisotropic GP over (I4_bar, I6_bar), with
     num_basis_aniso functions per fibre invariant (default num_basis_dev); None: isotropic.
@@ -135,10 +233,11 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     cell this is "support reaction = -load-cell reaction" without counting the load cell twice). The free residuals
     are otherwise independent with sigma_f = s |R_t|, whose sum is only bounded by sqrt(n_free) s |R_t|; this row is an
     extra Gaussian observation of the same rows (an approximation of a zero-sum residual model). 0: off.
-    opposite_reactions: the supports opposite the loaded edges (node types fixed-x / fixed-y, e.g. left and bottom of the
-    block, the clamped end of TTc) are used like the loaded edges: sum of their internal forces = -R_t (the same
-    measured force, opposite direction) with the same sigma_R, as two more reaction rows per step. The rows reuse the
-    load-cell reading, so they are not independent of the loaded-edge rows (the load-cell noise enters twice).
+    support_R, support_sigma: (T, 2) measured reactions of the supports (fixed-x / fixed-y boundaries) and their noise,
+    as given by the data (NaN: not measured); each measured one is one more reaction row, like the loaded edges. None
+    (e.g. experiments with one load cell): loaded-edge reactions only. Lists per experiment for several experiments.
+    hyper_steps, hyper_gtol, hyper_ftol: L-BFGS of the hyperparameters stops at |grad| < hyper_gtol or a relative change
+    of the objective < hyper_ftol, after at most hyper_steps iterations.
     amplitude_factor x energy_scale: prior centre of the amplitudes; sigma_cap: amplitudes capped at sigma_cap x that
     centre (<= 0: no cap); amplitude/lengthscale_prior_scale > 0: log-normal hyperpriors of that width (log units).
     Returns (HSGPHyperelasticity with the posterior, history: one record of the final solve).
@@ -149,15 +248,15 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA = ([x] for x in (f3x3_steps, R_obs, sigma_R, cells,
                                                                                node_type, dNdX, dA))
         step_labels = None if step_labels is None else [step_labels]
+        support_R, support_sigma = [support_R], [support_sigma]
+    if support_R is None:
+        support_R = support_sigma = [None] * len(f3x3_steps)
     if multi and cv_data is not None:
         raise ValueError("cv_data (validation-step selection of s) is not supported for several experiments; use the folds")
     meshes = []                      # per experiment: mesh arrays and the DOF index sets
     for c, nt, dn, da in zip(cells, node_type, dNdX, dA):
-        nt, c = np.asarray(nt), np.asarray(c)
-        ix = build_eiv_indices(nt, c)
-        meshes.append(dict(cells=jnp.asarray(c), n_nodes=nt.shape[0], dNdX=jnp.asarray(dn), dA=jnp.asarray(da),
-                           free=ix["dof_free"], rx=ix["dof_rx"], ry=ix["dof_ry"],
-                           fx=2 * np.where(nt[:, 1] == 1)[0], fy=2 * np.where(nt[:, 2] == 1)[0] + 1))
+        meshes.append(dict(cells=jnp.asarray(np.asarray(c)), n_nodes=np.asarray(nt).shape[0], dNdX=jnp.asarray(dn),
+                           dA=jnp.asarray(da), **dof_sets(nt)))
     step_exp, step_F, labels = [], [], []        # pooled steps: experiment index, F (C_e, 3, 3), label
     for e, Fe in enumerate(f3x3_steps):
         Fe = jnp.asarray(Fe, dtype=jnp.float64)
@@ -166,10 +265,12 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             step_exp.append(e)
             step_F.append(Fe[t])
             labels.append((lab_e[t] if isinstance(lab_e[t], str) else f"{e}:{int(lab_e[t])}") if multi else int(lab_e[t]))
+    S_obs = np.concatenate([np.full((np.asarray(R).shape[0], 2), np.nan) if S is None else np.asarray(S, float)
+                            for R, S in zip(R_obs, support_R)])
+    sigma_S = np.concatenate([np.full((np.asarray(R).shape[0], 2), np.nan) if S is None else np.asarray(S, float)
+                              for R, S in zip(R_obs, support_sigma)])
     R_obs = jnp.concatenate([jnp.asarray(r) for r in R_obs])
     sigma_R = jnp.maximum(jnp.concatenate([jnp.asarray(s) for s in sigma_R]), 1e-3)
-    # single experiment: the names used below
-    free, rx, ry, n_free = meshes[0]["free"], meshes[0]["rx"], meshes[0]["ry"], len(meshes[0]["free"])
     T = len(step_F)
     all_idx = list(range(T))
 
@@ -264,42 +365,21 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 lp += -0.5 * jnp.sum(((jnp.log(h["aniso_ls"]) - jnp.log(centre_a)) / lengthscale_prior_scale) ** 2)
         return lp
 
-    # per-step statistics at unit s (computed once): free Gram B_f^T B_f / |R_t|^2, reaction Gram and right-hand side
+    # pseudo-observations of every training step, reduced at once to their statistics (the tall H_t is not kept):
+    # step_stats[t] = (free block at s = 1, reaction [+ equilibrium] blocks); reaction blocks kept for the CV scores
     force_fns = [jax.jit(lambda f, m=m: basis_force_matrix(model, f, m["cells"], m["n_nodes"], m["dNdX"], m["dA"]))
                  for m in meshes]
-    force_fn = force_fns[0]
-    def reaction_rows(B, m):
-        """Reaction rows: loaded edges (x, y) [+ opposite supports (x, y)]."""
-        rows = [B[m["rx"]].sum(0), B[m["ry"]].sum(0)]
-        if opposite_reactions:
-            rows += [B[m["fx"]].sum(0), B[m["fy"]].sum(0)]
-        return jnp.stack(rows)
+    def step_observation(F_t, R_t, sR_t, S_t=None, sS_t=None, e=0):
+        return pseudo_observation(force_fns[e](F_t), meshes[e], R_t, sR_t, S_t, sS_t,
+                                  global_equilibrium=global_equilibrium)
 
-    def reaction_targets(R, sR):
-        """Measured reactions and their noise for the rows of reaction_rows (supports: -R, same sigma)."""
-        return (jnp.concatenate([R, -R]), jnp.concatenate([sR, sR])) if opposite_reactions else (R, sR)
-    n_R = 4 if opposite_reactions else 2
-
-    B_R_steps, RT_steps, step_stats = [], [], []
+    step_stats, reaction_obs = [], []
     for t in all_idx:
-        m = meshes[step_exp[t]]
-        B = force_fns[step_exp[t]](step_F[t])
-        Bf, BR = B[m["free"]], reaction_rows(B, m)
-        nf = len(m["free"])
-        r2 = jnp.maximum(jnp.sum(R_obs[t] ** 2), 1e-30)
-        Rt, sRt = reaction_targets(R_obs[t], sigma_R[t])
-        w = 1.0 / sRt ** 2
-        GR, logdetW_R, n_eq = BR.T @ (w[:, None] * BR), jnp.sum(jnp.log(w)), 0.0
-        if global_equilibrium > 0:     # sum of the free internal forces per direction = 0 (target 0: no rhs term)
-            fr = np.asarray(m["free"])
-            Bg = jnp.stack([B[fr[fr % 2 == 0]].sum(0), B[fr[fr % 2 == 1]].sum(0)])
-            w_eq = 1.0 / (float(global_equilibrium) ** 2 * r2)
-            GR, logdetW_R, n_eq = GR + w_eq * (Bg.T @ Bg), logdetW_R + 2 * jnp.log(w_eq), 2.0
-        step_stats.append(dict(Gf=Bf.T @ Bf / r2, logdetW_f=-nf * jnp.log(r2), GR=GR,
-                               bR=BR.T @ (w * Rt), yWy=jnp.sum(w * Rt ** 2), logdetW_R=logdetW_R,
-                               n_free=float(nf), n_eq=n_eq))
-        B_R_steps.append(BR)
-        RT_steps.append((Rt, sRt))
+        obs = step_observation(step_F[t], R_obs[t], sigma_R[t], S_obs[t], sigma_S[t], step_exp[t])
+        step_stats.append((gaussian_statistics(obs["free"]),
+                           sum(gaussian_statistics(o) for k, o in obs.items() if k != "free")))
+        reaction_obs.append(obs["reaction"])
+        del obs
     if multi:
         log_fn(f"[HSGP] {len(meshes)} experiments pooled: steps per experiment "
                f"{[step_exp.count(e) for e in range(len(meshes))]}, free DOFs {[len(m['free']) for m in meshes]}")
@@ -307,37 +387,36 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
            f"(dev {dev_box.num_basis}, vol {vol_box.num_basis}" + (f", aniso {an_box.num_basis}" if aniso_on else "")
            + f"); basis forces assembled in {time.time() - t0:.0f}s"
            + (f"; global equilibrium rows sigma = {global_equilibrium:g} |R_t|" if global_equilibrium > 0 else "")
-           + (f"; opposite supports as reactions (-R_t): {len(meshes[0]['fx'])} x / {len(meshes[0]['fy'])} y DOFs"
-              if opposite_reactions else ""))
-
-    def sqrt_factor(G):
-        d, U = jnp.linalg.eigh(0.5 * (G + G.T))
-        return jnp.sqrt(jnp.maximum(d, 0.0))[:, None] * U.T
+           + f"; reaction rows per step: {sorted(set(int(o.q.shape[0]) for o in reaction_obs))} "
+             f"(2 loaded edges + measured supports)")
 
     def stats_for(active, s):
-        """Summed statistics of the active steps at free-residual scale s, with square-root factors of the Grams."""
-        st = {k: sum(step_stats[t][k] for t in active) for k in step_stats[0]}
-        nf_tot = st.pop("n_free")                          # free DOFs summed over the active steps (per mesh)
-        n_eq = st.pop("n_eq")                              # global-equilibrium rows (0 when off)
-        st["Gf"], st["logdetW_f"] = st["Gf"] / s ** 2, st["logdetW_f"] - nf_tot * np.log(s ** 2)
-        st["Rf"], st["RR"] = sqrt_factor(st["Gf"]), sqrt_factor(st["GR"])
-        st["n_obs"] = float(nf_tot + n_R * len(active) + n_eq)
-        return st
+        """Statistics of the stacked pseudo-observations of the active steps at free-residual scale s, as arrays for
+        the jitted evidence. The free and the other blocks keep separate square-root factors (stacked in the QR below),
+        which avoids losing the reaction Gram next to the large free Gram G_f / s^2 when s is small."""
+        free = scale_noise(sum(step_stats[t][0] for t in active), s)
+        rest = sum(step_stats[t][1] for t in active)
+        tot = free + rest
+        return dict(roots=jnp.concatenate([sqrt_factor(free.G), sqrt_factor(rest.G)]), b=tot.b, qWq=tot.qWq,
+                    logdetW=tot.logdetW, n_obs=tot.n)
 
     def posterior_factors(eta, st):
+        """theta = M gamma, gamma ~ N(0, I): posterior precision of gamma A = I + M^T H^T W H M = L L^T, from the QR of
+        [I; W^1/2 H M] (no squared condition number); v = L^-1 M^T H^T W q."""
         h = unpack(eta)
         M = constrained_transform(model, cons, h, incompressible_plane_stress)
-        # A = I + M^T (G_f + G_R) M = R^T R from the QR of [I; R_f M; R_R M] (no squared condition number)
-        C = jnp.concatenate([jnp.eye(P), st["Rf"] @ M, st["RR"] @ M])
-        L = jnp.linalg.qr(C, mode="r").T
-        v = jax.scipy.linalg.solve_triangular(L, M.T @ st["bR"], lower=True)   # free targets are zero
+        L = jnp.linalg.qr(jnp.concatenate([jnp.eye(P), st["roots"] @ M]), mode="r").T
+        v = jax.scipy.linalg.solve_triangular(L, M.T @ st["b"], lower=True)
         return h, M, L, v
 
     def neg_log_post(eta, st):
+        """log Z = log N(q; 0, H M M^T H^T + W^-1) (evidence of the stacked pseudo-observations) + hyperprior."""
         h, M, L, v = posterior_factors(eta, st)
-        log_z = (-0.5 * st["yWy"] + 0.5 * v @ v - jnp.sum(jnp.log(jnp.abs(jnp.diag(L))))
-                 + 0.5 * st["logdetW_f"] + 0.5 * st["logdetW_R"] - 0.5 * st["n_obs"] * jnp.log(2 * jnp.pi))
+        log_z = (-0.5 * st["qWq"] + 0.5 * v @ v - jnp.sum(jnp.log(jnp.abs(jnp.diag(L))))
+                 + 0.5 * st["logdetW"] - 0.5 * st["n_obs"] * jnp.log(2 * jnp.pi))
         return -(log_z + log_hyperprior(h)), log_z
+
+    opt_log = []    # (iterations, converged) of every hyperparameter optimisation (all starts, all CV fits)
 
     @jax.jit
     def optimise(eta0, st):
@@ -345,12 +424,23 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         opt = optax.lbfgs()
         vg = optax.value_and_grad_from_state(fun)
 
-        def body(_, carry):
-            e, s = carry
+        # L-BFGS until converged: |grad| < hyper_gtol or a relative objective change < hyper_ftol, at most hyper_steps.
+        # Without the stop, iterating past convergence lets a lengthscale at its bound walk its raw (sigmoid)
+        # parameter outwards with a vanishing gradient, the inverse-Hessian estimate blows up and one huge step can
+        # throw the hyperparameters past the amplitude cap (zero gradient there: stuck at a much worse evidence).
+        def cond(carry):
+            return (carry[2] < hyper_steps) & ~carry[4]
+
+        def body(carry):
+            e, s, i, v_prev, _ = carry
             val, g = vg(e, state=s)
-            u, s = opt.update(g, s, e, value=val, grad=g, value_fn=fun)
-            return optax.apply_updates(e, u), s
-        return jax.lax.fori_loop(0, hyper_steps, body, (eta0, opt.init(eta0)))[0]
+            conv = ((optax.tree_utils.tree_l2_norm(g) < hyper_gtol)
+                    | (jnp.abs(v_prev - val) <= hyper_ftol * jnp.maximum(1.0, jnp.abs(val))))
+            u, s_new = opt.update(g, s, e, value=val, grad=g, value_fn=fun)
+            e_new = jax.tree_util.tree_map(lambda a, b: jnp.where(conv, a, b), e, optax.apply_updates(e, u))
+            return e_new, s_new, i + 1, val, conv
+        e, _, n_it, _, conv = jax.lax.while_loop(cond, body, (eta0, opt.init(eta0), 0, jnp.inf, False))
+        return e, n_it, conv
 
     def posterior(eta, st):
         _, M, L, v = posterior_factors(eta, st)
@@ -363,23 +453,15 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         st = {k: v for k, v in stats_for(active, s).items()}
         best = None
         for e0 in starts:
-            cand = optimise(e0, st)
+            cand, n_it, conv = optimise(e0, st)
             val, lz = neg_log_post(cand, st)
+            opt_log.append((int(n_it), bool(conv)))
             if np.isfinite(float(val)) and (best is None or float(val) < best[0]):
-                best = (float(val), float(lz), cand)
+                best = (float(val), float(lz), cand, int(n_it), bool(conv))
         if best is None:
             return None
         m, Fc = posterior(best[2], st)
-        return dict(eta=best[2], log_z=best[1], mean=m, factor=Fc)
-
-    def heldout_score(m, Fc, t, BR=None, R=None, sR=None):
-        """log N(R_t; B_R m, Sigma_R,t + B_R S B_R^T), S = Fc Fc^T (held-out reactions only); BR/R/sR: a step
-        outside the training set."""
-        BR, (R, sR) = (B_R_steps[t], RT_steps[t]) if BR is None else (BR, reaction_targets(R, sR))
-        UR = BR @ Fc
-        C = jnp.diag(sR ** 2) + UR @ UR.T
-        d = R - BR @ m
-        return float(-0.5 * (d @ jnp.linalg.solve(C, d) + jnp.linalg.slogdet(C)[1] + 2 * jnp.log(2 * jnp.pi)))
+        return dict(eta=best[2], log_z=best[1], mean=m, factor=Fc, n_iter=best[3], converged=best[4])
 
     cv = None
     if sigma_f_rel is None:
@@ -392,26 +474,22 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
             v_lab = [int(x) for x in cv_data.get("labels", range(v_F.shape[0]))]
             if v_F.shape[0] == 0:
                 raise ValueError("cv_data has no validation steps")
-            v_BR = []
-            for v in range(v_F.shape[0]):
-                B = force_fn(v_F[v])
-                v_BR.append(reaction_rows(B, meshes[0]))
+            v_S, v_sS = cv_data.get("support_R"), cv_data.get("support_sigma")
+            v_obs = [step_observation(v_F[v], v_R[v], v_sR[v], None if v_S is None else v_S[v],
+                                      None if v_sS is None else v_sS[v])["reaction"] for v in range(v_F.shape[0])]
             folds = []
             log_fn(f"[HSGP] cross-validation: fit on training steps {labels}, score validation steps {v_lab}")
 
         def cv_score(s):
-            if cv_data is not None:
-                res = solve(all_idx, s)
-                if res is None:
-                    return -np.inf
-                return sum(heldout_score(res["mean"], res["factor"], None, v_BR[v], v_R[v], v_sR[v])
-                           for v in range(len(v_BR)))
+            """Held-out reactions only: sum of log N(q_R; H_R m, Sigma_R + H_R S H_R^T) over the held-out steps."""
+            splits = ([(all_idx, v_obs)] if cv_data is not None else
+                      [([t for t in all_idx if t not in hold], [reaction_obs[t] for t in hold]) for hold in folds])
             total = 0.0
-            for hold in folds:
-                res = solve([t for t in all_idx if t not in hold], s)
+            for train, held_out in splits:
+                res = solve(train, s)
                 if res is None:
                     return -np.inf
-                total += sum(heldout_score(res["mean"], res["factor"], t) for t in hold)
+                total += sum(log_predictive_density(o, res["mean"], res["factor"]) for o in held_out)
             return total
 
         grid = sorted(float(g) for g in (cv_grid if cv_grid is not None else np.logspace(-5, 0, 11)))
@@ -438,6 +516,11 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     res = solve(all_idx, float(sigma_f_rel))
     if res is None:
         raise RuntimeError("HSGP residual fit: no finite evidence for any hyperparameter start")
+    n_unconv = sum(not c for _, c in opt_log)
+    log_fn(f"[HSGP] hyperparameter L-BFGS: final fit {res['n_iter']} iterations "
+           f"({'converged' if res['converged'] else f'NOT converged in {hyper_steps}'}); "
+           f"all {len(opt_log)} optimisations: median {int(np.median([n for n, _ in opt_log]))} iterations, "
+           f"{n_unconv} not converged")
     h = unpack(res["eta"])
     hyper = {k: np.asarray(v) for k, v in h.items()}
     hyper["s"] = np.asarray(float(sigma_f_rel))
@@ -454,8 +537,9 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                f"vol {np.round(rec['vol_ls'], 3)}"
                + (f" | aniso sig {rec['aniso_sig']:.3g} l {np.round(rec['aniso_ls'], 3)}" if aniso_on else "")
                + f" ({rec['time']:.0f}s)")
-    info = dict(likelihood="residual_exact", sigma_f_rel=float(sigma_f_rel), force_noise_cv=cv, converged=True,
-                global_equilibrium=float(global_equilibrium), opposite_reactions=bool(opposite_reactions),
+    info = dict(likelihood="residual_exact", sigma_f_rel=float(sigma_f_rel), force_noise_cv=cv, converged=bool(res["converged"]),
+                hyper_iterations=int(res["n_iter"]), hyper_unconverged=int(n_unconv), hyper_optimisations=len(opt_log),
+                global_equilibrium=float(global_equilibrium), support_reaction_rows=int(reaction_obs[0].q.shape[0]) - 2,
                 outer_iterations=1, log_evidence=res["log_z"], valid_load_steps=labels, truncated=False,
                 sigma_cap=sigma_cap, hyper_restarts=hyper_restarts, box_factor=box_factor,
                 num_basis_dev=num_basis_dev, num_basis_vol=num_basis_vol,

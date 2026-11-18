@@ -43,7 +43,6 @@ for S in $SEEDS; do
         echo -n "energy/free-node skipped (no FEM bundle) | "
     else
         run energy_metrics python3 plots/plot_distilled_r2_energy.py "${COMMON[@]}" --val_load_steps $VAL_STEPS $BUNDLE
-        run free_node python3 plots/plot_free_node_residual_eiv.py --seed_dir "$SD" $BUNDLE
     fi
     if [ -d "$SD/fem_validation" ]; then
         run fem_2x2 python3 plots/plot_fem_validation_2x2.py --seed_dir "$SD"
