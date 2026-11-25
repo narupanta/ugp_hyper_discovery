@@ -98,10 +98,16 @@ def true_geometry_window(mesh_path, xq, dcells, u_obs, bcx):
     return dict(X=Xs, cells=Cs, ends=ends, u_bc=ub, A=A, X_dic=Xs @ A + M[2])
 
 
-def plot_fields_with_ends(X, cells, u_obs, results, models, ends, k, vs, steps, out_base, title):
-    """Rows: models; columns: displacement magnitude on the deformed DIC mesh (measured outline dotted), nodal error
-    |u_FEM - u_DIC|, parity (validation steps). The two prescribed end cuts are highlighted. Metrics of all models are
-    stacked in one table under the figure."""
+REL_EPS = 1e-8      # relative error |u_FEM - u_DIC| / (|u_DIC| + REL_EPS): all nodes, REL_EPS only avoids 0 / 0
+
+
+def plot_fields_with_ends(X, cells, u_obs, results, models, ends, k, vs, steps, out_base, title=None,
+                          figsize=(210 / 25.4, None), max_maps=1):
+    """Compact one-row figure (default: A4 width, height fitted to the panels): |u| of the first model (ours) on the
+    deformed DIC mesh (measured deformed mesh on top), the nodal relative error eps_rel = 100 |u_FEM - u_DIC| / |u_DIC|
+    of every model on the undeformed mesh (shared colour bar: where each model misses), and one parity plot of all
+    models (validation steps, u_x and u_y). The two prescribed end cuts are highlighted; the metrics of all models in
+    a table under the panels."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -110,81 +116,154 @@ def plot_fields_with_ends(X, cells, u_obs, results, models, ends, k, vs, steps, 
     from plots.theme import apply_style, save_figure
     apply_style()
     nm = len(models)
-    fig, axes = plt.subplots(nm, 3, figsize=(13.0, 3.9 * nm + 1.1), squeeze=False,
-                             gridspec_kw=dict(width_ratios=[1, 1, 0.9]))
     end_col = {"end1": "#1565c0", "end2": "#e65100"}
-    mags = [np.linalg.norm(results[q]["u"][k], axis=1) for q in models]
-    errs = [np.linalg.norm(results[q]["u"][k] - u_obs[k], axis=1) for q in models]
-    vmax, emax = max(m.max() for m in mags + [np.linalg.norm(u_obs[k], axis=1)]), max(e.max() for e in errs)
+    model_col = ["#009E73", "#757575", "#8e24aa", "#f9a825"]        # parity colours: ours first, then references
+    # nodal relative error at the plotted step, all nodes
+    mag_obs_k = np.linalg.norm(u_obs[k], axis=1)
+    keep = np.ones_like(mag_obs_k, dtype=bool)
+    errs = [100 * np.linalg.norm(results[q]["u"][k] - u_obs[k], axis=1) / (mag_obs_k + REL_EPS) for q in models]
+    emax = max(np.nanmax(e) for e in errs)
+    tri_ref = mtri.Triangulation(X[:, 0], X[:, 1], cells, mask=~np.all(keep[cells], axis=1))
+    tri_all = mtri.Triangulation(X[:, 0], X[:, 1], cells)
     obs_def = X + u_obs[k]
-    rows = []
+    stp = "final step" if k == len(steps) - 1 else f"step {int(steps[k])}"     # name of the plotted load step
 
-    def short(lab):
-        return ("Distilled (mean)" if lab.startswith("Distilled model (mean") else
-                lab.replace("Distilled model", "Distilled").replace(" (reference)", ""))
+    def short(lab):     # every model is identified on the same data (UT + TTf): no data suffix in the labels
+        return ("UGP + Distillation" if lab.startswith("Distilled model (mean") else
+                lab.replace("Distilled model", "Distilled").replace(" (reference)", "").replace(" (UT+TTf)", ""))
+    names = [short(results[q]["label"]) for q in models]
+    n_maps = min(nm, max_maps)          # error maps / parity: the first n_maps models; the table: all models
     lim = [min(u_obs[vs].min(), min(results[q]["u"][vs].min() for q in models)),
            max(u_obs[vs].max(), max(results[q]["u"][vs].max() for q in models))]
+    w_ref = max(np.ptp(X[:, 0]) / np.ptp(X[:, 1]), 0.35)
+    P0 = X + results[models[0]]["u"][k]
+    w_def = np.ptp(P0[:, 0]) / np.ptp(P0[:, 1])
+    # explicit layout in inches: [|u| ours][cbar+label][error map(s)][cbar+label][parity ylabel][parity], the panel
+    # height chosen so the row fills the width; colour bars sit right next to their panel
+    W = figsize[0]
+    m_l, m_r, m_t, m_b = 0.08, 0.06, 0.42, 0.36           # margins (legend + titles on top, parity x label below)
+    cb_w, cb_lab, gap, y_lab = 0.09, 0.50, 0.10, 0.45      # colour bar, its ticks + label, panel gap, parity y label
+    w_panels = w_def + n_maps * w_ref + 1.0                # widths in units of the panel height
+    fixed = m_l + m_r + 2 * (gap + cb_w + cb_lab) + (n_maps - 1) * gap + y_lab
+    h = (W - fixed) / w_panels
+    H = figsize[1] if figsize[1] is not None else h + m_t + m_b
+    fig = plt.figure(figsize=(W, H))
+    y0, hh = m_b / H, h / H
+
+    def put(x, w):
+        return fig.add_axes([x / W, y0, w / W, hh]), x + w
+    x = m_l
+    a0, x = put(x, h * w_def)
+    cax_u, x = put(x + gap, cb_w)
+    x += cb_lab
+    err_axes = []
+    for _ in range(n_maps):
+        a_e, x = put(x, h * w_ref)
+        err_axes.append(a_e)
+        x += gap
+    cax_e, x = put(x, cb_w)
+    x += cb_lab + y_lab
+    a2, x = put(x, h)
+    fs, fs_t = 7.0, 7.3
+
+    def field_axes(ax, Q):
+        for e, n in ends.items():
+            ax.plot(Q[n, 0], Q[n, 1], "o", ms=1.0, color=end_col[e], zorder=5)
+        ax.set_aspect("equal")
+        ax.set_anchor("C")
+        ax.axis("off")
+
+    def cbar(cax, mappable, lab):
+        cb = fig.colorbar(mappable, cax=cax)
+        cb.set_label(lab, fontsize=fs, labelpad=2)
+        cb.ax.tick_params(labelsize=6, length=2, pad=1)
+        cb.outline.set_linewidth(0.5)
+    # |u| of ours on the deformed mesh
+    tp = a0.tripcolor(mtri.Triangulation(P0[:, 0], P0[:, 1], cells), np.linalg.norm(results[models[0]]["u"][k], axis=1),
+                      cmap="Blues", vmin=0, vmax=max(mag_obs_k.max(), np.linalg.norm(results[models[0]]["u"][k], axis=1).max()),
+                      shading="gouraud", rasterized=True)
+    a0.triplot(mtri.Triangulation(obs_def[:, 0], obs_def[:, 1], cells), color="k", lw=0.06, alpha=0.35)
+    field_axes(a0, P0)
+    a0.set_title((f"{names[0]}: " if n_maps > 1 else "") + rf"$|\mathbf{{u}}|$, deformed ({stp})", fontsize=fs_t, pad=3)
+    cbar(cax_u, tp, r"$|\mathbf{u}|$ (mm)")
+    # relative error of every model on the undeformed mesh
+    for i, q in enumerate(models[:n_maps]):
+        a = err_axes[i]
+        a.tripcolor(tri_all, np.zeros(len(X)), cmap="Greys", vmin=0, vmax=4, shading="flat", zorder=0, rasterized=True)
+        te = a.tripcolor(tri_ref, np.nan_to_num(errs[i]), cmap="Oranges", vmin=0, vmax=emax, shading="gouraud",
+                         rasterized=True)
+        field_axes(a, X)
+        a.set_title((f"{names[i]}:\n" if n_maps > 1 else "") + r"$\epsilon_{\mathrm{rel}}$, undeformed", fontsize=fs_t, pad=3)
+    cbar(cax_e, te, r"$\epsilon_{\mathrm{rel}}$ (%)")
+    # parity of all models (references underneath, ours on top)
+    o = u_obs[vs].reshape(-1)
+    if n_maps == 1:        # one model: colour by component instead of by model
+        ov, fv = u_obs[vs].reshape(-1, 2), results[models[0]]["u"][vs].reshape(-1, 2)
+        a2.scatter(ov[:, 0], fv[:, 0], s=0.6, color="#1565c0", alpha=0.25, lw=0, rasterized=True)
+        a2.scatter(ov[:, 1], fv[:, 1], s=0.6, color="#c62828", alpha=0.35, lw=0, rasterized=True)
+        a2.legend(handles=[Line2D([], [], marker="o", ls="", ms=3, color="#1565c0", label="$u_x$"),
+                           Line2D([], [], marker="o", ls="", ms=3, color="#c62828", label="$u_y$")], fontsize=6,
+                  loc="upper left", frameon=False, handletextpad=0.2, borderaxespad=0.3)
+    for i in (list(range(1, n_maps)) + [0] if n_maps > 1 else []):
+        f_ = results[models[i]]["u"][vs].reshape(-1)
+        a2.scatter(o, f_, s=2.2 if i else 0.5, color=model_col[i % len(model_col)], alpha=0.35 if i else 0.3, lw=0,
+                   rasterized=True)                       # references larger underneath: their spread shows as a rim
+    a2.plot(lim, lim, "k--", lw=0.6)
+    a2.set_xlim(lim)
+    a2.set_ylim(lim)
+    a2.set_box_aspect(1)
+    a2.grid(False)
+    a2.tick_params(labelsize=6, length=2, pad=1.5)
+    a2.set_xlabel(r"$u_{\mathrm{DIC}}$ (mm)", fontsize=fs, labelpad=1)
+    a2.set_ylabel(r"$u_{\mathrm{FEM}}$ (mm)", fontsize=fs, labelpad=1)
+    a2.set_title("parity ($u_x$, $u_y$; " + ("all load steps)" if len(vs) == len(steps) else "selected steps)"),
+                 fontsize=fs_t, pad=3)
+    if n_maps > 1:
+        a2.legend(handles=[Line2D([], [], marker="o", ls="", ms=3, color=model_col[i % len(model_col)], label=names[i])
+                           for i in range(n_maps)], fontsize=5.8, loc="upper left", frameon=False, handletextpad=0.2,
+                  borderaxespad=0.3)
+    # metrics of all models -> LaTeX table (booktabs) next to the figure; best value per column in bold
+    rows = []
     for i, q in enumerate(models):
-        u = results[q]["u"]
-        P = X + u[k]
-        tri = mtri.Triangulation(P[:, 0], P[:, 1], cells)
-        a0, a1, a2 = axes[i]
-        tp = a0.tripcolor(tri, mags[i], cmap="Blues", vmin=0, vmax=vmax, shading="gouraud")
-        a0.triplot(mtri.Triangulation(obs_def[:, 0], obs_def[:, 1], cells), color="k", lw=0.15, alpha=0.35)
-        te = a1.tripcolor(tri, errs[i], cmap="Oranges", vmin=0, vmax=emax, shading="gouraud")
-        for ax in (a0, a1):
-            for e, n in ends.items():
-                ax.plot(P[n, 0], P[n, 1], "o", ms=2.6, color=end_col[e], zorder=5)
-            ax.set_aspect("equal")
-            ax.set_xticks([])
-            ax.set_yticks([])
-            for sp in ax.spines.values():
-                sp.set_visible(False)
-        nm_q = short(results[q]["label"])
-        a0.set_title(f"{nm_q}: |u| (step {int(steps[k])})", fontsize=10)
-        a1.set_title(f"{nm_q}: error (step {int(steps[k])})", fontsize=10)
-        fig.colorbar(tp, ax=a0, fraction=0.04, pad=0.01).set_label("mm")
-        fig.colorbar(te, ax=a1, fraction=0.04, pad=0.01).set_label("mm")
-        o, f_ = u_obs[vs].reshape(-1, 2), u[vs].reshape(-1, 2)
-        a2.scatter(o[:, 0], f_[:, 0], s=2, color="#1565c0", alpha=0.25, lw=0, rasterized=True)
-        a2.scatter(o[:, 1], f_[:, 1], s=2, color="#c62828", alpha=0.35, lw=0, rasterized=True)
-        a2.plot(lim, lim, "k--", lw=0.9)
-        a2.set_xlim(lim)
-        a2.set_ylim(lim)
-        a2.set_aspect("equal")
-        if i == nm - 1:
-            a2.set_xlabel("$u_{\\mathrm{DIC}}$ (mm)")
-        else:
-            a2.tick_params(labelbottom=False)
-        a2.set_ylabel("$u_{\\mathrm{FEM}}$ (mm)")
-        a2.set_title(f"{nm_q}: parity ({'all load steps' if len(vs) == len(steps) else 'selected steps'})", fontsize=10)
-        a2.legend(handles=[Line2D([], [], marker="o", ls="", color="#1565c0", label="$u_x$"),
-                           Line2D([], [], marker="o", ls="", color="#c62828", label="$u_y$")], fontsize=8, loc="upper left")
-        a2.grid(alpha=0.25)
-        r2 = [1 - np.sum((o[:, c] - f_[:, c]) ** 2) / np.sum((o[:, c] - o[:, c].mean()) ** 2) for c in (0, 1)]
-        rm = np.sqrt(np.mean((o - f_) ** 2, axis=0))
-        rows.append([nm_q,f"{r2[0]:.4f}", f"{r2[1]:.4f}", f"{rm[0]:.3f}", f"{rm[1]:.3f}",
-                     f"{errs[i].mean():.2f}", f"{errs[i].max():.2f}"])
-    tab = fig.add_axes([0.08, 0.005, 0.84, 0.035 * (nm + 1)])
-    tab.axis("off")
-    t = tab.table(cellText=rows, colLabels=["model", "$R^2_x$", "$R^2_y$", "RMSE$_x$ (mm)", "RMSE$_y$ (mm)",
-                                            f"mean err, step {int(steps[k])}", f"max err, step {int(steps[k])}"],
-                  loc="center", cellLoc="center", colWidths=[0.2] + [0.8 / 6] * 6)
-    t.auto_set_font_size(False)
-    t.set_fontsize(8.5)
-    t.scale(1, 1.25)
-    fig.legend(handles=[Line2D([], [], marker="o", ls="", color=end_col["end1"], label="end 1 (prescribed)"),
-                        Line2D([], [], marker="o", ls="", color=end_col["end2"], label="end 2 (prescribed)"),
+        ov, fv = u_obs[vs].reshape(-1, 2), results[q]["u"][vs].reshape(-1, 2)
+        mo, mf = np.linalg.norm(ov, axis=1), np.linalg.norm(fv, axis=1)          # displacement magnitudes
+        r2_mag = 1 - np.sum((mo - mf) ** 2) / np.sum((mo - mo.mean()) ** 2)
+        # relative error of the displacement vector over all nodes and load steps (|u_DIC| > 0 everywhere, unlike
+        # the components: u_y changes sign across the specimen)
+        rel_all = 100 * np.mean(np.linalg.norm(fv - ov, axis=1) / (np.linalg.norm(ov, axis=1) + REL_EPS))
+        rows.append([r2_mag, float(np.nanmean(errs[i]))])
+    rows = np.array(rows)
+    best = [rows[:, 0].argmax(), rows[:, 1].argmin()]
+    fmt = ["{:.4f}", "{:.2f}"]
+
+    def cell(r, c):
+        v = fmt[c].format(rows[r, c])
+        return rf"\textbf{{{v}}}" if best[c] == r else v
+    body = [f"{names[r]} & " + " & ".join(cell(r, c) for c in range(2)) + r" \\" for r in range(nm)]
+    tex = "\n".join([
+        r"\begin{table}[t]", r"\centering", r"\small",
+        r"\begin{tabular}{lcc}", r"\toprule",
+        r"Model & $R^2_{\|\mathbf{u}\|}$ & $\bar{\epsilon}_{\mathrm{rel}}$ (\%) \\", r"\midrule", *body, r"\bottomrule", r"\end{tabular}",
+        r"\caption{Displacement prediction on the TTf specimen with the measured DIC displacements prescribed on the "
+        r"two end cuts. $R^2_{\|\mathbf{u}\|}$: coefficient of determination of the displacement magnitude over all "
+        r"nodes and load steps; $\bar{\epsilon}_{\mathrm{rel}}$: mean over the nodes of the relative error of the "
+        r"displacement vector $|\mathbf{u}_{\mathrm{FEM}} - \mathbf{u}_{\mathrm{DIC}}|\,/\,(|\mathbf{u}_{\mathrm{DIC}}| "
+        r"+ \delta)$, $\delta = 10^{-8}$, at the " + stp + r". Best value in bold.}",
+        r"\label{tab:dic_bc_metrics}", r"\end{table}"])
+    with open(out_base.replace("displacement_analysis", "displacement_metrics") + ".tex", "w") as f:
+        f.write(tex + "\n")
+    print(tex)
+    fig.legend(handles=[Line2D([], [], marker="o", ls="", ms=3, color=end_col["end1"], label="end 1 (prescribed)"),
+                        Line2D([], [], marker="o", ls="", ms=3, color=end_col["end2"], label="end 2 (prescribed)"),
                         Line2D([], [], color="k", lw=0.6, alpha=0.5, label="measured deformed mesh")],
-               loc="upper center", ncol=3, fontsize=9, frameon=False, bbox_to_anchor=(0.5, 0.965))
-    fig.suptitle(title, y=0.995, fontsize=11)
-    fig.tight_layout(rect=[0, 0.035 * (nm + 1) + 0.01, 1, 0.94])
+               loc="upper center", ncol=3, fontsize=6.3, frameon=False, bbox_to_anchor=(0.5, 1.0),
+               handletextpad=0.3, columnspacing=1.5)
+    if title:
+        print(f"[plot] {title}")
     save_figure(fig, out_base + ".pdf")
-    fig.set_dpi(170)
+    fig.set_dpi(250)
     fig.canvas.print_png(out_base + ".png")
     plt.close(fig)
-    print(f"saved {out_base}.pdf/.png")
-
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

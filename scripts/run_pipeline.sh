@@ -218,6 +218,8 @@ MAX_GAMMA=$(get_cfg_default "max_gamma" "1.0")
 DO_SENSITIVITY=$(get_cfg_default "do_sensitivity" "False")
 SOBOL_THRESHOLD=$(get_cfg_default "sobol_threshold" "0.0001")
 SOBOL_FACTOR=$(get_cfg_default "sobol_samples_factor" "2")
+# Ogden libraries: 1 = coefficients at fixed exponents first, Sobol selection, then mu and alpha jointly; 0 = jointly
+OGDEN_FIXED_ALPHA_STAGE=$(python3 -c "import yaml; d=yaml.safe_load(open('$CONFIG_YAML')); print(int(d.get('ogden_fixed_alpha_stage', 1)))" 2>/dev/null || echo "1")
 DISTILL_SAMPLING_MODE=$(get_cfg_default "distillation_sampling_mode" "cached_L")
 SENSITIVITY_FLAG=""
 if [ "$DO_SENSITIVITY" == "0" ] || [ "$DO_SENSITIVITY" == "False" ] || [ "$DO_SENSITIVITY" == "false" ]; then
@@ -436,6 +438,7 @@ for SEED in $SEEDS_LIST; do
             --max_gamma "$MAX_GAMMA" \
             --sobol_threshold "$SOBOL_THRESHOLD" \
             --sobol_samples_factor "$SOBOL_FACTOR" \
+            --ogden_fixed_alpha_stage "$OGDEN_FIXED_ALPHA_STAGE" \
             --seed "$SEED" \
             $DEV_PARAMS_DISABLED_ARG \
             $SENSITIVITY_FLAG &
@@ -461,6 +464,7 @@ for SEED in $SEEDS_LIST; do
             --max_gamma "$MAX_GAMMA" \
             --sobol_threshold "$SOBOL_THRESHOLD" \
             --sobol_samples_factor "$SOBOL_FACTOR" \
+            --ogden_fixed_alpha_stage "$OGDEN_FIXED_ALPHA_STAGE" \
             --seed "$SEED" \
             $VOL_PARAMS_DISABLED_ARG \
             $SENSITIVITY_FLAG &
@@ -487,6 +491,7 @@ for SEED in $SEEDS_LIST; do
                 --max_gamma "$MAX_GAMMA" \
                 --sobol_threshold "$SOBOL_THRESHOLD" \
                 --sobol_samples_factor "$SOBOL_FACTOR" \
+            --ogden_fixed_alpha_stage "$OGDEN_FIXED_ALPHA_STAGE" \
                 --seed "$SEED" \
                 $ANISO_PARAMS_DISABLED_ARG \
                 $SENSITIVITY_FLAG &

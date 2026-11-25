@@ -13,6 +13,10 @@ HSGP settings are read from the recipe (keys below) and can be overridden on the
     hsgp_cv_holdout: "folds"        # "val": fit on the training steps, choose s by the reactions of the validation
                                     # steps (val_load_steps_indices; hsgp_cv_folds ignored); "folds" = interleaved folds
     hsgp_cv_tol: 0.0                # > 0: smallest s within this many nats of the best held-out score (plateau rule)
+    hsgp_reaction_noise_cv: []      # candidates of reaction_noise_rel (e.g. [0.005, 0.01, 0.02, 0.05]): cross-validated
+                                    # together with s (best held-out reaction score over the (r, s) grid; needs
+                                    # reaction_noise_rel in the recipe, whose floor is kept); [] = reaction_noise_rel as given
+    hsgp_cv_holdout: "experiments"  # several experiments: leave one experiment out (instead of interleaved folds)
     hsgp_global_equilibrium: 0.0    # > 0: per step and direction, sum of the free internal forces = 0 with sigma
                                     # = this x |R_t| (global equilibrium of the free residuals); 0 = off
     hsgp_num_basis_dev: 24          # eigenfunctions per deviatoric dimension
@@ -41,6 +45,7 @@ Recipe keys for the reactions (not hsgp_*): reaction_components, reaction_noise_
 reaction_zero_components (components known to vanish, e.g. R_y of a tensile test, fitted to 0).
 """
 import argparse
+import re
 import json
 import os
 import sys
@@ -68,7 +73,7 @@ from plots.theme import apply_style, save_figure
 HSGP_DEFAULTS = dict(hsgp_force_noise_rel=0.0, hsgp_cv_folds=2, hsgp_cv_holdout="folds", hsgp_cv_tol=0.0,
                      hsgp_num_basis_dev=24, hsgp_num_basis_vol=32, hsgp_num_basis_aniso=0, hsgp_box_factor=8.0, hsgp_sigma_cap=10.0,
                      hsgp_amplitude_prior_scale=0.0, hsgp_lengthscale_prior_scale=0.0, hsgp_hyper_restarts=1,
-                     hsgp_global_equilibrium=0.0)
+                     hsgp_global_equilibrium=0.0, hsgp_reaction_noise_cv="")
 
 
 def parse_args():
@@ -230,23 +235,32 @@ def main():
                 prep = dict(prep)
                 prep["support_reactions"] = np.array(prep["support_reactions"], dtype=float)
                 prep["support_reactions"][:, unmeasured] = np.nan
-        if rec.get("reaction_noise_rel") is not None:      # load-cell noise relative to the reading (+ optional floor)
-            R_abs = np.abs(np.asarray(prep["reaction_forces"], dtype=float))
-            rel = np.maximum(float(rec["reaction_noise_rel"]) * R_abs, floor)
-            meas = [int(c) for c in rec.get("reaction_components", range(sigma_R_steps.shape[1]))]
-            sigma_R_steps[:, meas] = rel[:, meas]
+        R_abs = np.abs(np.asarray(prep["reaction_forces"], dtype=float))
         zero_comps = [int(c) for c in rec.get("reaction_zero_components", [])]
-        if zero_comps:     # components known to vanish (e.g. R_y of a tensile test): observed 0, noise from the measured force
+        base_sigma = sigma_R_steps.copy()
+
+        def sigma_fn(rel_value):
+            """Reaction noise of all steps (n_steps, 2) for a relative load-cell noise rel_value (+ the floor)."""
+            sig = base_sigma.copy()
+            if rel_value is not None:      # load-cell noise relative to the reading (+ optional floor)
+                rel = np.maximum(float(rel_value) * R_abs, floor)
+                meas = [int(c) for c in rec.get("reaction_components", range(sig.shape[1]))]
+                sig[:, meas] = rel[:, meas]
+            if zero_comps:     # components known to vanish (e.g. R_y of a tensile test): noise from the measured force
+                meas = [int(c) for c in rec.get("reaction_components", range(sig.shape[1])) if int(c) not in zero_comps]
+                scale = np.linalg.norm(R_abs[:, meas], axis=1)
+                rel_z = float(rel_value if rel_value is not None else 0.01)
+                sig[:, zero_comps] = np.maximum(rel_z * scale, floor)[:, None]
+            return sig
+        sigma_R_steps = sigma_fn(rec.get("reaction_noise_rel"))
+        if zero_comps:     # observed 0
             rf = np.array(prep["reaction_forces"], dtype=float)
             rf[:, zero_comps] = 0.0
             prep["reaction_forces"] = rf
-            meas = [int(c) for c in rec.get("reaction_components", range(rf.shape[1])) if int(c) not in zero_comps]
-            scale = np.linalg.norm(rf[:, meas], axis=1)
-            rel_z = float(rec.get("reaction_noise_rel", 0.01))
-            sigma_R_steps[:, zero_comps] = np.maximum(rel_z * scale, floor)[:, None]
-            print(f"[HSGP] reaction components {zero_comps} fitted to 0 with sigma = {rel_z:g} x |measured force| "
+            print(f"[HSGP] reaction components {zero_comps} fitted to 0 with sigma = "
+                  f"{float(rec.get('reaction_noise_rel', 0.01)):g} x |measured force| "
                   f"(floor {float(rec.get('reaction_noise_floor', 0.0)):g})", flush=True)
-        return prep, F_all, sigma_R_steps, mat, has_truth, incompressible_ps
+        return prep, F_all, sigma_R_steps, mat, has_truth, incompressible_ps, sigma_fn
 
     def supports(prep, steps):
         """Measured support reactions and their noise at the given steps (None if the data has none)."""
@@ -260,7 +274,7 @@ def main():
     exps = []
     for k, e in enumerate(experiments):
         name = e.get("name") or (f"exp{k}" if len(experiments) > 1 else None)
-        exps.append(dict(zip(("prep", "F_all", "sigma_R", "mat", "has_truth", "incompressible_ps"),
+        exps.append(dict(zip(("prep", "F_all", "sigma_R", "mat", "has_truth", "incompressible_ps", "sigma_fn"),
                              prepare(e["dataset_path"], e.get("thickness", 1.0))), name=name, dataset_path=e["dataset_path"]))
     multi = len(exps) > 1
     if multi and len({x["incompressible_ps"] for x in exps}) > 1:
@@ -282,8 +296,27 @@ def main():
     print(f"[HSGP] seed {args.seed} | steps {train_steps} | energy scale {energy_scale:.4g} | options {opt}", flush=True)
 
     cv_mode = str(opt["hsgp_cv_holdout"] or "folds").lower()
-    if cv_mode not in ("folds", "val"):
-        raise ValueError(f"hsgp_cv_holdout must be 'folds' or 'val' (got {cv_mode!r})")
+    if cv_mode not in ("folds", "val", "experiments"):
+        raise ValueError(f"hsgp_cv_holdout must be 'folds', 'val' or 'experiments' (got {cv_mode!r})")
+    if cv_mode == "experiments" and not multi:
+        raise ValueError("hsgp_cv_holdout: experiments needs several experiments")
+    r_grid = [float(x) for x in re.findall(r"[0-9.eE+-]+", str(opt["hsgp_reaction_noise_cv"] or ""))
+              if re.fullmatch(r"[0-9.]+([eE][+-]?[0-9]+)?", x)]
+    if r_grid and rec.get("reaction_noise_rel") is None:
+        raise ValueError("hsgp_reaction_noise_cv needs reaction_noise_rel in the recipe")
+    if r_grid and gp_method == "exact":
+        raise ValueError("hsgp_reaction_noise_cv is implemented for the HSGP only")
+    if r_grid:
+        print(f"[HSGP] reaction noise cross-validated over reaction_noise_rel in {r_grid}", flush=True)
+
+    def apply_reaction_noise(model_):
+        """The reaction noise chosen by the cross-validation (if any) for the plots and the saved configuration."""
+        r_sel = (model_.info.get("force_noise_cv") or {}).get("reaction_noise_rel")
+        if r_sel is not None:
+            for x in exps:
+                x["sigma_R"] = x["sigma_fn"](r_sel)
+            print(f"[HSGP] reaction noise from the cross-validation: reaction_noise_rel = {r_sel:g}", flush=True)
+        return r_sel
     cv_data = None
     if cv_mode == "val" and multi:
         raise ValueError("hsgp_cv_holdout: val is not supported for several experiments; use folds")
@@ -315,6 +348,12 @@ def main():
             sup_R, sup_s = sup_R[0], sup_s[0]
         fit_fn = fit_exact_gp if gp_method == "exact" else fit_hsgp
         extra = dict(hyper_steps=int(rec.get("exact_gp_hyper_steps", 200))) if gp_method == "exact" else {}
+        if gp_method != "exact":
+            extra.update(cv_by_experiment=cv_mode == "experiments")
+            if r_grid:
+                extra.update(reaction_noise_grid=r_grid,
+                             reaction_sigma_fn=(lambda r: [x["sigma_fn"](r)[train_steps] for x in exps]) if multi
+                             else (lambda r: exps[0]["sigma_fn"](r)[train_steps]))
         model, hist = fit_fn(
             *data_args, **extra,
             energy_scale=energy_scale, num_basis_dev=opt["hsgp_num_basis_dev"], num_basis_vol=opt["hsgp_num_basis_vol"],
@@ -327,6 +366,7 @@ def main():
             num_basis_aniso=int(opt["hsgp_num_basis_aniso"]) or None)
         fit_time = time.time() - t0
         model.save(post_path)
+        r_sel = apply_reaction_noise(model)
         F_train_states = jnp.concatenate([x["F_all"][tr].reshape(-1, 3, 3) for x in exps])
         feats = jax.vmap(model.feature_extractor.extract)(F_train_states)
         I_obs = np.concatenate([np.asarray(x) for x in feats], axis=-1)   # dev (2), vol (1)[, aniso (3)]
@@ -337,6 +377,8 @@ def main():
                        experiments=[dict(name=x["name"], dataset_path=x["dataset_path"]) for x in exps] if multi else None,
                        train_load_steps_indices=train_steps, val_load_steps_indices=val_steps,
                        test_load_steps_indices=test_steps, data_energy_scale=energy_scale, hsgp_options=opt,
+                       **({"reaction_noise_rel": r_sel, "reaction_noise_rel_recipe": rec.get("reaction_noise_rel")}
+                          if r_sel is not None else {}),
                        hsgp=dict(model.info, hyper={k: np.asarray(v).tolist() for k, v in model.hyper.items()}))
         json.dump(cfg_out, open(os.path.join(save_path, "config.json"), "w"), indent=4, default=float)
         json.dump(hist, open(os.path.join(save_path, "hsgp_history.json"), "w"), indent=2)
@@ -347,6 +389,9 @@ def main():
         model = load_energy_gp(post_path)
         I_obs = np.load(os.path.join(save_path, "I_obs_all.npy"))
         fit_time = model.info.get("fit_time", float("nan"))
+        apply_reaction_noise(model)
+    if not multi:
+        sigma_R_steps = exps[0]["sigma_R"]
 
     t0 = time.time()
     plot_force_noise_cv(model, save_path)

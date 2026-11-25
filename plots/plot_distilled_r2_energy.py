@@ -471,6 +471,10 @@ def main():
             "r2_gp": r2_gp, "rmse_gp": rmse_gp, "coverage_gp": coverage_gp
         }
 
+        # per-state parity arrays (true, distilled mean / 95 % bounds, GP mean / sd) for other figures
+        np.savez(os.path.join(distilled_dir, f"energy_parity_{comp}.npz"), true=all_true, dist_mean=all_dist_mean,
+                 dist_q025=all_dist_q025, dist_q975=all_dist_q975, gp_mean=all_gp_mean, gp_std=all_gp_std,
+                 val_steps=np.asarray(val_steps))
         print(f"\n--- Validation Parity Metrics: [{comp.upper()}] (Steps: {val_steps}) ---", flush=True)
         print(f"Distilled Model: R² = {r2_dist:.4f}, RMSE = {rmse_dist:.4f}, EC(95% CI) = {coverage_dist:.1f}%", flush=True)
         print(f"GP Baseline:     R² = {r2_gp:.4f}, RMSE = {rmse_gp:.4f}, EC(95% CI) = {coverage_gp:.1f}%", flush=True)

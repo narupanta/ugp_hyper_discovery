@@ -213,6 +213,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
              cv_data: Optional[dict] = None, fibers=None, num_basis_aniso: Optional[int] = None,
              step_labels=None, hyper_steps: int = 300, hyper_gtol: float = 1e-6, hyper_ftol: float = 1e-12,
              global_equilibrium: float = 0.0, support_R=None, support_sigma=None,
+             reaction_noise_grid=None, reaction_sigma_fn=None, cv_by_experiment: bool = False,
              verbose: bool = True, log_fn=print):
     """
     f3x3_steps: (T, C, 3, 3) measured deformation gradients of the training steps; R_obs, sigma_R: (T, 2).
@@ -236,6 +237,14 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
     support_R, support_sigma: (T, 2) measured reactions of the supports (fixed-x / fixed-y boundaries) and their noise,
     as given by the data (NaN: not measured); each measured one is one more reaction row, like the loaded edges. None
     (e.g. experiments with one load cell): loaded-edge reactions only. Lists per experiment for several experiments.
+    reaction_noise_grid, reaction_sigma_fn: cross-validation of the reaction noise as well: for each candidate r of
+      the grid, the loaded-edge reaction rows get sigma_R = reaction_sigma_fn(r) ((T, 2), or a list per experiment, of
+      the training steps; e.g. max(r |R_t|, floor)), s is cross-validated as above, and the pair (r, s) with the best
+      held-out reaction score is taken (the plateau rule cv_tol applies to s at that r). The held-out score uses the
+      same r for its own noise, so a larger r is only preferred where the misfit of the held-out reactions needs it.
+      With sigma_f_rel given, only r is cross-validated (at that s). Not with cv_data.
+    cv_by_experiment: several experiments: one fold per experiment (leave one experiment out) instead of the
+      interleaved steps; held-out reactions of a whole specimen measure the error that is shared by its steps.
     hyper_steps, hyper_gtol, hyper_ftol: L-BFGS of the hyperparameters stops at |grad| < hyper_gtol or a relative change
     of the objective < hyper_ftol, after at most hyper_steps iterations.
     amplitude_factor x energy_scale: prior centre of the amplitudes; sigma_cap: amplitudes capped at sigma_cap x that
@@ -373,13 +382,22 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         return pseudo_observation(force_fns[e](F_t), meshes[e], R_t, sR_t, S_t, sS_t,
                                   global_equilibrium=global_equilibrium)
 
-    step_stats, reaction_obs = [], []
+    step_stats, reaction_obs, reaction_stats = [], [], []
     for t in all_idx:
         obs = step_observation(step_F[t], R_obs[t], sigma_R[t], S_obs[t], sigma_S[t], step_exp[t])
         step_stats.append((gaussian_statistics(obs["free"]),
-                           sum(gaussian_statistics(o) for k, o in obs.items() if k != "free")))
+                           sum(gaussian_statistics(o) for k, o in obs.items() if k not in ("free", "reaction"))))
         reaction_obs.append(obs["reaction"])
+        reaction_stats.append(gaussian_statistics(obs["reaction"]))
         del obs
+
+    def set_reaction_sigma(sig):
+        """New noise of the loaded-edge reaction rows (T, 2) of every training step (support rows unchanged)."""
+        sig = jnp.maximum(jnp.asarray(sig, dtype=jnp.float64), 1e-3)
+        for t in all_idx:
+            o = reaction_obs[t]
+            reaction_obs[t] = Observation(o.H, o.q, jnp.concatenate([sig[t], o.sigma[2:]]))
+            reaction_stats[t] = gaussian_statistics(reaction_obs[t])
     if multi:
         log_fn(f"[HSGP] {len(meshes)} experiments pooled: steps per experiment "
                f"{[step_exp.count(e) for e in range(len(meshes))]}, free DOFs {[len(m['free']) for m in meshes]}")
@@ -395,7 +413,7 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         the jitted evidence. The free and the other blocks keep separate square-root factors (stacked in the QR below),
         which avoids losing the reaction Gram next to the large free Gram G_f / s^2 when s is small."""
         free = scale_noise(sum(step_stats[t][0] for t in active), s)
-        rest = sum(step_stats[t][1] for t in active)
+        rest = sum(step_stats[t][1] + reaction_stats[t] for t in active)
         tot = free + rest
         return dict(roots=jnp.concatenate([sqrt_factor(free.G), sqrt_factor(rest.G)]), b=tot.b, qWq=tot.qWq,
                     logdetW=tot.logdetW, n_obs=tot.n)
@@ -464,9 +482,22 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
         return dict(eta=best[2], log_z=best[1], mean=m, factor=Fc, n_iter=best[3], converged=best[4])
 
     cv = None
-    if sigma_f_rel is None:
+    r_grid = [float(r) for r in (reaction_noise_grid or [])]
+    if r_grid and reaction_sigma_fn is None:
+        raise ValueError("reaction_noise_grid needs reaction_sigma_fn")
+    if r_grid and cv_data is not None:
+        raise ValueError("reaction_noise_grid is not supported with cv_data; use the folds")
+
+    def sigma_for(r):
+        sig = reaction_sigma_fn(r)
+        return np.concatenate([np.asarray(x, float) for x in sig]) if isinstance(sig, (list, tuple)) else np.asarray(sig, float)
+    s_fixed = sigma_f_rel
+    if sigma_f_rel is None or r_grid:
         K = max(2, int(cv_folds))
         folds = [all_idx[k::K] for k in range(K)]
+        if cv_by_experiment and multi:
+            folds = [[t for t in all_idx if step_exp[t] == e] for e in range(len(meshes))]
+            log_fn(f"[HSGP] cross-validation: leave one experiment out ({len(folds)} folds)")
         if cv_data is not None:      # separate validation steps: fit on all training steps, score these reactions
             v_F = jnp.asarray(cv_data["f3x3"], dtype=jnp.float64)
             v_R = jnp.asarray(cv_data["R"])
@@ -492,23 +523,51 @@ def fit_hsgp(f3x3_steps, R_obs, sigma_R, cells, node_type, dNdX, dA, *, energy_s
                 total += sum(log_predictive_density(o, res["mean"], res["factor"]) for o in held_out)
             return total
 
-        grid = sorted(float(g) for g in (cv_grid if cv_grid is not None else np.logspace(-5, 0, 11)))
-        scores = {}
-        for g in grid:
-            scores[g] = cv_score(g)
-            log_fn(f"[HSGP] cross-validation: s = {g:.3g} (sigma_free,t = s |R_t|): held-out reaction score {scores[g]:.2f}")
+        def s_scan(tag=""):
+            """Held-out scores over the s grid (refined around its optimum); a fixed s: that s only."""
+            if s_fixed is not None:
+                sc = {float(s_fixed): cv_score(float(s_fixed))}
+                log_fn(f"[HSGP] cross-validation{tag}: s = {float(s_fixed):.3g} (fixed): held-out reaction score "
+                       f"{sc[float(s_fixed)]:.2f}")
+                return sc
+            grid = sorted(float(g) for g in (cv_grid if cv_grid is not None else np.logspace(-5, 0, 11)))
+            sc = {}
+            for g in grid:
+                sc[g] = cv_score(g)
+                log_fn(f"[HSGP] cross-validation{tag}: s = {g:.3g} (sigma_free,t = s |R_t|): held-out reaction score {sc[g]:.2f}")
+            gb = max(sc, key=sc.get)
+            for fct in (10 ** -0.25, 10 ** 0.25, 10 ** -0.125, 10 ** 0.125):     # refine around the grid optimum
+                g = gb * fct
+                sc[g] = cv_score(g)
+                log_fn(f"[HSGP] cross-validation{tag}: s = {g:.3g}: held-out reaction score {sc[g]:.2f}")
+                gb = max(sc, key=sc.get)
+            return sc
+
+        r_curve, r_best = None, None
+        if r_grid:
+            r_scores = {}
+            for r in r_grid:
+                set_reaction_sigma(sigma_for(r))
+                r_scores[r] = s_scan(f" [reaction noise r = {r:g}]")
+                b = max(r_scores[r], key=r_scores[r].get)
+                log_fn(f"[HSGP] cross-validation: reaction noise r = {r:g}: best s = {b:.3g}, held-out reaction score "
+                       f"{r_scores[r][b]:.2f}")
+            r_best = max(r_grid, key=lambda r: max(r_scores[r].values()))
+            set_reaction_sigma(sigma_for(r_best))
+            scores = r_scores[r_best]
+            r_curve = {f"{r:g}": {f"{k:.6g}": v for k, v in sorted(r_scores[r].items())} for r in r_grid}
+            log_fn(f"[HSGP] cross-validation: selected reaction noise r = {r_best:g}")
+        else:
+            scores = s_scan()
         g_best = max(scores, key=scores.get)
-        for fct in (10 ** -0.25, 10 ** 0.25, 10 ** -0.125, 10 ** 0.125):     # refine around the grid optimum
-            g = g_best * fct
-            scores[g] = cv_score(g)
-            log_fn(f"[HSGP] cross-validation: s = {g:.3g}: held-out reaction score {scores[g]:.2f}")
-            g_best = max(scores, key=scores.get)
         s_best_score = g_best
         if cv_tol > 0:   # plateau rule: the smallest s within cv_tol nats of the best held-out score
             g_best = min(g for g, v in scores.items() if v >= scores[s_best_score] - cv_tol)
             log_fn(f"[HSGP] cross-validation: best s = {s_best_score:.3g}; smallest s within {cv_tol:g} nats: {g_best:.3g}")
         sigma_f_rel = g_best
-        cv = dict(method="cross-validation", holdout="validation" if cv_data is not None else "folds",
+        cv = dict(method="cross-validation",
+                  holdout="validation" if cv_data is not None else ("experiments" if cv_by_experiment and multi else "folds"),
+                  reaction_noise_rel=r_best, reaction_noise_curve=r_curve, s_fixed=s_fixed is not None,
                   validation_steps=v_lab if cv_data is not None else None, s=g_best, s_best_score=s_best_score, tol=float(cv_tol),
                   folds=[[labels[t] for t in f] for f in folds], curve={f"{k:.6g}": v for k, v in sorted(scores.items())})
         log_fn(f"[HSGP] cross-validation: selected s = {g_best:.3g}")

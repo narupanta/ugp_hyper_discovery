@@ -86,7 +86,8 @@ def distill_cmd(cfg, extract_dir, out_dir, component, seed, n_iter, checkpoints)
            "--sampling_mode", str(get("distillation_sampling_mode", "cached_L")),
            "--num_points", str(get("num_points", 100)), "--num_func_samples", str(get("num_func_samples", 512)),
            "--max_gamma", str(get("max_gamma", 1.0)), "--sobol_threshold", str(get("sobol_threshold", 1e-4)),
-           "--sobol_samples_factor", str(get("sobol_samples_factor", 2)), "--seed", str(seed)]
+           "--sobol_samples_factor", str(get("sobol_samples_factor", 2)), "--seed", str(seed),
+           "--ogden_fixed_alpha_stage", str(int(get("ogden_fixed_alpha_stage", 1)))]
     if str(get("do_sensitivity", "False")) in ("0", "False", "false"):
         cmd.append("--no_sensitivity")
     disabled = get(f"{component}_params_disabled", [])

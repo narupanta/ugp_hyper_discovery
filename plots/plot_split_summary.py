@@ -175,6 +175,8 @@ def main():
     parser.add_argument("--material_model", type=str, default=None)
     parser.add_argument("--distill_target", type=str, default="sef_split")
     parser.add_argument("--sobol_threshold", type=float, default=0.0001)
+    parser.add_argument("--max_gamma", type=float, default=1.0,
+                        help="largest stretch increment of the standard modes (lambda = 1 + gamma; simple shear: gamma)")
     parser.add_argument("--stress_mode", type=str, default=None, choices=["plane_strain", "plane_stress"],
                         help="Stress mode assumption for standard validation curves ('plane_strain' or 'plane_stress'). If None, loaded from metadata/config.")
     args = parser.parse_args()
@@ -251,7 +253,7 @@ def main():
     if getattr(learned_gp, "incompressible_plane_stress", False):
         stress_mode = "plane_stress_incompressible"   # modes at J = 1, as the GP and a deviatoric-only distillation
     F_all, gamma = generate_standard_modes(
-        num_points=100, max_gamma=1.0,
+        num_points=100, max_gamma=args.max_gamma,
         stress_mode=stress_mode,
         material_model=true_model
     )
@@ -573,6 +575,15 @@ def main():
             'always_out': len(limits_vol) == 0 and not inside_vol[0]
         }
 
+    # energy curves of the standard modes for other figures (plots/plot_discovery_summary.py)
+    np.savez(os.path.join(distilled_dir, f"mode_energy_g{args.max_gamma:g}.npz"), gamma=np.asarray(gamma),
+             F=np.asarray(F_all), mode_names=np.array(mode_names), inside=np.asarray(regime_inside),
+             psi_true=np.asarray(psi_true) if psi_true is not None else np.zeros(0),
+             gp_mean=np.stack([np.asarray(m) for m in psi_dist_mean]),
+             gp_std=np.sqrt(np.maximum(np.stack([np.asarray(v) for v in psi_dist_var]), 0.0)),
+             dist_mean=np.stack([np.asarray(x).mean(0) for x in dist_psi_samples]),
+             dist_q025=np.stack([np.percentile(np.asarray(x), 2.5, axis=0) for x in dist_psi_samples]),
+             dist_q975=np.stack([np.percentile(np.asarray(x), 97.5, axis=0) for x in dist_psi_samples]))
     # 1. Energy Plot (2 rows x 3 columns, square subplots, sized for 50% A4 width ~4.6 in)
     fig_w_energy = 4.6
     fig_h_energy = 3.65
@@ -924,8 +935,11 @@ def main():
     fig_leg_piola.savefig(os.path.join(distilled_dir, "shared_legend_piola.pdf"), dpi=300, bbox_inches='tight')
     fig_leg_piola.savefig(os.path.join(distilled_dir, "shared_legend_piola.png"), dpi=300, bbox_inches='tight')
     plt.close(fig_leg_piola)
-    # Save SEF metrics across modes to validation_metrics.json
+    # Save SEF metrics across modes to validation_metrics.json (default range only: a longer --max_gamma is for
+    # extrapolation plots and must not replace the metrics of plots/plot_distilled_r2_energy.py)
     try:
+        if args.max_gamma != 1.0:
+            raise StopIteration
         val_json_path = os.path.join(distilled_dir, "validation_metrics.json")
         vdata = {}
         if os.path.exists(val_json_path):
@@ -980,6 +994,8 @@ def main():
             if os.path.exists(os.path.dirname(sync_p)):
                 with open(sync_p, "w") as f:
                     json.dump(vdata, f, indent=4)
+    except StopIteration:
+        print(f"[PLOT SUMMARY] --max_gamma {args.max_gamma:g}: validation_metrics.json left unchanged")
     except Exception as e:
         print(f"Warning: Failed saving SEF metrics to validation_metrics.json: {e}")
 
