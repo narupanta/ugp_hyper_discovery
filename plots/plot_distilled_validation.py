@@ -193,23 +193,23 @@ def main():
         def _ogden_split(theta_dev, F_chunk):
             """Energy and Piola stress of the Ogden block (dev columns 10..15)."""
             from core.ogden import ogden_dev_energy_jax
-            og = jnp.asarray(theta_dev)[10:]
+            og = jnp.asarray(theta_dev)[10:26]             # dev16: Ogden block; GMR terms of order > 3 from 26
             e = lambda f: ogden_dev_energy_jax(f, og[0::2], og[1::2])
             return jax.vmap(e)(F_chunk), jax.vmap(jax.grad(e))(F_chunk)
 
         def get_distilled_energy_stress_split(theta_dev, theta_vol, F_chunk):
-            dev_theta = list(theta_dev) + [0.0] * max(0, 10 - len(theta_dev))
+            dev_theta = list(theta_dev[:10]) + [0.0] * max(0, 10 - len(theta_dev)) + list(theta_dev[26:])   # GMR, any order
             vol_theta = list(theta_vol) + [0.0] * max(0, 3 - len(theta_vol))
-            mat_dev = get_material("gmr", dev_params=dev_theta[:10], vol_params=[0.0, 0.0, 0.0], jit_P=False)
+            mat_dev = get_material("gmr", dev_params=dev_theta, vol_params=[0.0, 0.0, 0.0], jit_P=False)
             mat_vol = get_material("gmr", dev_params=[0.0]*10, vol_params=vol_theta[:3], jit_P=False)
             og_psi, og_p = _ogden_split(theta_dev, F_chunk)
             return (jax.vmap(mat_dev.psi)(F_chunk) + og_psi, jax.vmap(mat_vol.psi)(F_chunk),
                     jax.vmap(mat_dev.P)(F_chunk) + jax.vmap(mat_vol.P)(F_chunk) + og_p)
 
         def get_distilled_energy_stress_split_3(theta_dev, theta_vol, theta_aniso, F_chunk):
-            dev_theta = list(theta_dev) + [0.0] * max(0, 10 - len(theta_dev))
+            dev_theta = list(theta_dev[:10]) + [0.0] * max(0, 10 - len(theta_dev)) + list(theta_dev[26:])   # GMR, any order
             vol_theta = list(theta_vol) + [0.0] * max(0, 3 - len(theta_vol))
-            mat_dev = get_material("gmr", dev_params=dev_theta[:10], vol_params=[0.0, 0.0, 0.0], jit_P=False)
+            mat_dev = get_material("gmr", dev_params=dev_theta, vol_params=[0.0, 0.0, 0.0], jit_P=False)
             mat_vol = get_material("gmr", dev_params=[0.0]*10, vol_params=vol_theta[:3], jit_P=False)
             
             p_aniso_single = jax.grad(lambda f: psi_aniso_single(theta_aniso, f))

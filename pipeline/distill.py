@@ -91,6 +91,10 @@ def main():
     parser.add_argument("--do_sensitivity", action="store_true", default=True, help="Perform Sobol sensitivity analysis and re-distill with sensitive parameters")
     parser.add_argument("--no_sensitivity", dest="do_sensitivity", action="store_false", help="Skip sensitivity analysis")
     parser.add_argument("--sobol_threshold", type=float, default=1e-4, help="Total Sobol index threshold for selecting sensitive parameters")
+    parser.add_argument("--gmr_order", type=int, default=3,
+                        help="GMR library: polynomial terms C_ij (I1_bar-3)^i (I2_bar-3)^j with 1 <= i + j <= gmr_order; "
+                             "terms of order > 3 follow E in the parameter vector (C40, C31, C22, ...), so the indices of "
+                             "--dev_params_disabled up to 9 are unchanged (core/material_library.py)")
     parser.add_argument("--ogden_fixed_alpha_stage", type=int, default=1,
                         help="Ogden libraries: 1 (default) = stage 1 fits the coefficients at the fixed exponents "
                              "alpha0 = -4..4, the Sobol analysis selects the terms, then the kept terms are re-distilled "
@@ -335,7 +339,8 @@ def main():
         raise ValueError(f"--material_model {args.material_model} requires --distill_target sef_split")
     if args.material_model in ["gmr_aniso", "aniso_gmr"] or args.component == "aniso":
         if args.component == "dev":
-            model = PyTorchGMRDevModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log)
+            model = PyTorchGMRDevModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log,
+                                       gmr_order=args.gmr_order)
         elif args.component == "vol":
             model = PyTorchGMRVolModel(num_points, device=device, distill_target=args.distill_target)
         elif args.component == "aniso":
@@ -345,10 +350,13 @@ def main():
     else:
         if args.component == "dev":
             model = PyTorchGMRDevModel(num_points, device=device, distill_target=args.distill_target,
-                                       include_log_terms=include_log, library=dev_library)
+                                       include_log_terms=include_log, library=dev_library, gmr_order=args.gmr_order)
         elif args.component == "vol":
             model = PyTorchGMRVolModel(num_points, device=device, distill_target=args.distill_target)
         else:
+            if args.gmr_order != 3:
+                raise NotImplementedError("--gmr_order != 3 needs --distill_target sef_split (the combined dev + vol "
+                                          "model has the third-order library only)")
             model = PyTorchGMRModel(num_points, device=device, distill_target=args.distill_target, include_log_terms=include_log)
     
     global_disabled = set()
@@ -418,7 +426,10 @@ def main():
         out_dir = os.path.abspath(args.load_distilled_dir)
         log_mode = "a"
     else:
-        dev_names = ["$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$", "$E$"]
+        from core.material_library import gmr_names, gmr_order_from_length
+        n_true = len(getattr(true_model, "dev_params", None) or [])
+        dev_names = [("$E$" if n == "E" else f"$C_{{{n[1:]}}}$")
+                     for n in gmr_names(max(args.gmr_order, gmr_order_from_length(n_true) if n_true else 3))]
         vol_names = ["$D_{1}$", "$D_{2}$", "$D_{3}$"]
         aniso_names = ["$C_{42}$", "$C_{43}$", "$C_{44}$", "$C_{62}$", "$C_{63}$", "$C_{64}$"]
         

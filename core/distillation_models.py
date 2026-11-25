@@ -245,8 +245,14 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
     0) gives alpha_k = alpha0_k exactly, which is how stage 1 fits the mu_k at the fixed exponents. Saved samples hold
     the physical (mu_k, alpha_k) (physical_samples).
     """
-    def __init__(self, num_points, device, include_log_terms=False, distill_target="sef", library="gmr"):
+    def __init__(self, num_points, device, include_log_terms=False, distill_target="sef", library="gmr", gmr_order=3):
         super().__init__()
+        from core.material_library import gmr_high_terms
+        self.gmr_order = int(gmr_order)
+        # terms of order > 3 follow the log column E (layout of core/material_library.py), so E is kept as a column
+        # whenever there are such terms (it is disabled unless the log term is asked for)
+        self._high_terms = gmr_high_terms(self.gmr_order)
+        include_log_terms = include_log_terms or bool(self._high_terms)
         self.include_log_terms = include_log_terms
         self.distill_target = distill_target
         self.library = library
@@ -259,6 +265,7 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
         poly_names = ("$C_{10}$", "$C_{01}$", "$C_{20}$", "$C_{11}$", "$C_{02}$", "$C_{30}$", "$C_{21}$", "$C_{12}$", "$C_{03}$")
         if self.include_log_terms:
             poly_names = poly_names + ("$E$",)
+        poly_names = poly_names + tuple(f"$C_{{{i}{j}}}$" for i, j in self._high_terms)
         names = (poly_names if self.use_poly else ()) + (OGDEN_PARAM_NAMES if self.use_ogden else ())
         self._num_poly = len(poly_names) if self.use_poly else 0
         self._num_parameters = len(names)
@@ -318,16 +325,19 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
         I1_bar, I2_bar = J**(-2/3) * I1, J**(-4/3) * I2
         I1_m3, I2_m3 = I1_bar - 3.0, I2_bar - 3.0
 
+        high = full_parameters[(10 if self.include_log_terms else 9):]          # terms of order > 3
         if self.include_log_terms:
-            C10, C01, C20, C11, C02, C30, C21, C12, C03, E = full_parameters
+            C10, C01, C20, C11, C02, C30, C21, C12, C03, E = full_parameters[:10]
             log2 = torch.log(torch.clamp(I2_bar / 3.0, min=1e-8))
             W_log = E * log2
         else:
-            C10, C01, C20, C11, C02, C30, C21, C12, C03 = full_parameters
+            C10, C01, C20, C11, C02, C30, C21, C12, C03 = full_parameters[:9]
             W_log = 0.0
 
         W_dev = (C10 * I1_m3 + C01 * I2_m3 + C20 * I1_m3**2 + C11 * I1_m3 * I2_m3 + C02 * I2_m3**2 +
                  C30 * I1_m3**3 + C21 * (I1_m3**2) * I2_m3 + C12 * I1_m3 * (I2_m3**2) + C03 * I2_m3**3 + W_log)
+        for c, (i, j) in zip(high, self._high_terms):
+            W_dev = W_dev + c * I1_m3**i * I2_m3**j
         energy = W_dev + W_ogden
 
         if self.distill_target in ["sef_stress", "sef_cauchy"]:
@@ -340,6 +350,11 @@ class PyTorchGMRDevModel(BasePyTorchMaterialModel):
             dW_dI2 = C01 + C11 * I1_m3 + 2.0 * C02 * I2_m3 + C21 * (I1_m3**2) + 2.0 * C12 * I1_m3 * I2_m3 + 3.0 * C03 * (I2_m3**2)
             if self.include_log_terms:
                 dW_dI2 += E / torch.clamp(I2_bar, min=1e-8)
+            for c, (i, j) in zip(high, self._high_terms):
+                if i > 0:
+                    dW_dI1 = dW_dI1 + i * c * I1_m3**(i - 1) * I2_m3**j
+                if j > 0:
+                    dW_dI2 = dW_dI2 + j * c * I1_m3**i * I2_m3**(j - 1)
                 
             P = dW_dI1.view(-1, 1, 1) * dI1bar_dF + dW_dI2.view(-1, 1, 1) * dI2bar_dF
             

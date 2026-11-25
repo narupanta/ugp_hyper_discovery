@@ -56,9 +56,10 @@ class FullVectorMaterial:
         from core.material_models import get_material
         p = np.asarray(p, float)
         self.p = p
-        self._gmr = get_material("gmr", dev_params=list(map(float, p[:10])), vol_params=list(map(float, p[10:13])),
-                                 jit_P=False)
-        og = p[19:] if p.shape[0] > 19 else np.zeros(0)
+        from core.material_library import gmr_params_from_full, HIGH_START
+        self._gmr = get_material("gmr", dev_params=list(map(float, gmr_params_from_full(p))),
+                                 vol_params=list(map(float, p[10:13])), jit_P=False)
+        og = p[19:HIGH_START] if p.shape[0] > 19 else np.zeros(0)
         self._mus, self._alphas = jnp.asarray(og[0::2]), jnp.asarray(og[1::2])
         self._has_ogden = bool(np.any(og[0::2] != 0.0))
 
@@ -71,8 +72,8 @@ class FullVectorMaterial:
 
 
 def describe(p):
-    from core.material_library import FULL_NAMES
-    return ", ".join(f"{n} {v:.4g}" for n, v in zip(FULL_NAMES, p) if abs(v) > 1e-12)
+    from core.material_library import full_names
+    return ", ".join(f"{n} {v:.4g}" for n, v in zip(full_names(len(p)), p) if abs(v) > 1e-12)
 
 
 def clamp_line_nodes(X, cells, y_c):

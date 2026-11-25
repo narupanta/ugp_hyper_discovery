@@ -87,7 +87,8 @@ def distill_cmd(cfg, extract_dir, out_dir, component, seed, n_iter, checkpoints)
            "--num_points", str(get("num_points", 100)), "--num_func_samples", str(get("num_func_samples", 512)),
            "--max_gamma", str(get("max_gamma", 1.0)), "--sobol_threshold", str(get("sobol_threshold", 1e-4)),
            "--sobol_samples_factor", str(get("sobol_samples_factor", 2)), "--seed", str(seed),
-           "--ogden_fixed_alpha_stage", str(int(get("ogden_fixed_alpha_stage", 1)))]
+           "--ogden_fixed_alpha_stage", str(int(get("ogden_fixed_alpha_stage", 1))),
+           "--gmr_order", str(int(get("gmr_order", 3)))]
     if str(get("do_sensitivity", "False")) in ("0", "False", "false"):
         cmd.append("--no_sensitivity")
     disabled = get(f"{component}_params_disabled", [])
@@ -155,7 +156,7 @@ def evaluate(run_dir, k, final_iter, library, dev_only, truth, level, true_modul
         if full.shape[1] < 19:
             full = np.concatenate([full, np.zeros((n, 19 - full.shape[1]))], axis=1)
         full[:, 13:13 + min(6, aniso.shape[1])] = aniso[:n, :6]
-    t = truth[:full.shape[1]]
+    t = np.pad(truth, (0, max(0, full.shape[1] - len(truth))))[:full.shape[1]]    # GMR order > 3: longer vectors
     a = 0.5 * (1.0 - level)
     lo, hi = np.quantile(full, a, axis=0), np.quantile(full, 1.0 - a, axis=0)
     tol = 1e-12                                                    # pruned parameters are exactly 0
@@ -261,7 +262,14 @@ def main():
     # too (component aniso, aniso_distillation_n_iterations) and evaluated in columns 13..18
     aniso_on = bool((cfg.get("material_params") or {}).get("angles")) and str(cfg.get("model_mode", "anisotropic")) != "isotropic"
     n_iter_aniso = (args.n_iterations or int(cfg.get("aniso_distillation_n_iterations", n_iter))) if aniso_on else None
-    names = (FULL_NAMES[:19] if aniso_on else FULL_NAMES[:13]) if library == "gmr" else FULL_NAMES
+    from core.material_library import full_names, n_gmr, N_FULL
+    gmr_order = int(cfg.get("gmr_order", 3))
+    n_high = max(0, n_gmr(gmr_order) - 10) if library != "ogden" else 0         # GMR terms of order > 3
+    if library == "gmr" and not n_high:
+        names = FULL_NAMES[:19] if aniso_on else FULL_NAMES[:13]
+    else:
+        names = full_names(N_FULL + n_high)
+    truth = np.pad(truth, (0, max(0, len(names) - len(truth))))
     if aniso_on and true_moduli is not None:
         # the distilled moduli (effective_moduli) leave the fibre terms out, the true ones (simple shear) include them
         print("effective moduli not compared for an anisotropic material (fibre contribution)", flush=True)
@@ -407,7 +415,13 @@ def main():
             return 13 + i
         if library == "ogden":
             return OGDEN_START + i
-        return i if (library == "gmr" or i < 10) else OGDEN_START + i - 10
+        from core.material_library import HIGH_START
+        ng = n_gmr(gmr_order)                       # dev columns: [C10 .. E | C40 ... (order > 3) | Ogden]
+        if i < 10:
+            return i
+        if i < ng:
+            return HIGH_START + i - 10
+        return OGDEN_START + i - ng
     disabled = {full_index(c, int(i)) for c in ("dev", "vol", "aniso")
                 for i in np.atleast_1d(cfg.get(f"{c}_params_disabled") or [])}
     absent = [n for i, n in enumerate(names) if n in used_names and i not in disabled and truth[i] == 0.0]

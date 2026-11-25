@@ -108,8 +108,8 @@ def main():
     model = str(cfg.get("material_model", "gmr"))
     samples = np.load(os.path.join(d, f"{args.component}_flow_samples.npy"))
     if args.component == "dev":
-        from core.material_library import distilled_library, dev_names
-        names = dev_names(distilled_library(d))[:samples.shape[1]]
+        from core.material_library import distilled_library, dev_names, distilled_gmr_order
+        names = dev_names(distilled_library(d), distilled_gmr_order(d))[:samples.shape[1]]
         disabled = {names[i] for i in cfg.get("dev_params_disabled", []) if i < len(names)}
         if "E" in names and not (int(cfg.get("include_log_term", 0)) or "_log" in model):
             disabled.add("E")

@@ -94,8 +94,9 @@ def distilled_energy_fn(distilled_dir):
     nd = dev.shape[1]
 
     def psi(t, F):
-        mat = get_material("gmr", dev_params=t[:10], vol_params=t[nd:nd + 3], jit_P=False)
-        og = t[10:nd]
+        # dev16 row [C10..E | Ogden (16) | GMR terms of order > 3] followed by the volumetric parameters
+        mat = get_material("gmr", dev_params=jnp.concatenate([t[:10], t[26:nd]]), vol_params=t[nd:nd + 3], jit_P=False)
+        og = t[10:26]
         return mat.psi(F) + ogden_dev_energy_jax(F, og[0::2], og[1::2])
     return psi, theta
 

@@ -47,8 +47,11 @@ def load_case(d):
         if comp == "dev":
             lib = distilled_library(d)
             smp = dev16(np.load(os.path.join(d, "dev_flow_samples.npy")), lib)
-            idx = [dev_names(lib).index(plain(p)) for p in disc]
-            tv = [true_dev[i] if i < 10 else 0.0 for i in idx]
+            from core.material_library import dev16_names, distilled_gmr_order
+            idx = [dev16_names(distilled_gmr_order(d)).index(plain(p)) for p in disc]
+            # dev16 index -> true dev_params index: 0..9 as is, 26 + k (GMR order > 3) -> 10 + k, Ogden: no GMR truth
+            tv = [true_dev[i] if i < 10 else (true_dev[i - 16] if i >= 26 and i - 16 < len(true_dev) else 0.0)
+                  for i in idx]
         else:
             smp = np.load(os.path.join(d, "aniso_flow_samples.npy"))
             idx = [ANISO_NAMES.index(plain(p)) for p in disc]

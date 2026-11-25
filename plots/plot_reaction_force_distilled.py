@@ -34,12 +34,10 @@ def eval_psi_3d(F_3d, p, a0=None, a1=None):
     dev_p = p[:10]
     vol_p = p[10:13]
 
-    w_dev = (
-        dev_p[0] * i1_m3 + dev_p[1] * i2_m3 + dev_p[2] * i1_m3**2 +
-        dev_p[3] * i1_m3 * i2_m3 + dev_p[4] * i2_m3**2 + dev_p[5] * i1_m3**3 +
-        dev_p[6] * (i1_m3**2) * i2_m3 + dev_p[7] * i1_m3 * (i2_m3**2) +
-        dev_p[8] * i2_m3**3 + dev_p[9] * jnp.log(jnp.maximum(i2_dev / 3.0, 1e-8))
-    )
+    from core.material_library import gmr_dev_energy, HIGH_START
+    # full vector: GMR [C10 .. E] at 0..9, terms of order > 3 from HIGH_START (core/material_library.py)
+    gmr_p = jnp.concatenate([p[:10], p[HIGH_START:]]) if p.shape[-1] > HIGH_START else dev_p
+    w_dev = gmr_dev_energy(gmr_p, i1_m3, i2_m3, i2_dev, jnp)
     w_vol = vol_p[0] * J_m1**2 + vol_p[1] * J_m1**4 + vol_p[2] * J_m1**6
 
     w_aniso = 0.0
@@ -57,7 +55,7 @@ def eval_psi_3d(F_3d, p, a0=None, a1=None):
     w_ogden = 0.0
     if p.shape[-1] > 19:           # Ogden block of the full vector (core/material_library.py)
         from core.ogden import ogden_dev_energy_jax
-        w_ogden = ogden_dev_energy_jax(F_3d, p[19:][0::2], p[19:][1::2])
+        w_ogden = ogden_dev_energy_jax(F_3d, p[19:35][0::2], p[19:35][1::2])
 
     return w_dev + w_vol + w_aniso + w_ogden
 

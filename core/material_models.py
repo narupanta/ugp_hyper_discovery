@@ -231,8 +231,8 @@ class HyperelasticModel(BaseMaterialModel):
                 "HyperelasticModel requires 'dev_params' to be explicitly provided (e.g. from recipe configuration). "
                 "Default parameter fallbacks have been removed to prevent silent bugs."
             )
-        if len(dev_params) != 10:
-            raise ValueError(f"dev_params must have length exactly 10, but got length {len(dev_params)}: {dev_params}")
+        from core.material_library import gmr_order_from_length
+        gmr_order_from_length(len(dev_params))      # 10 (order 3), or 15, 21, ... with the GMR terms of order > 3
         self.dev_params = list(dev_params)
 
         if vol_params is None:
@@ -299,19 +299,9 @@ class HyperelasticModel(BaseMaterialModel):
         i1_dev_minus_3 = i1_dev - 3.0
         i2_dev_minus_3 = i2_dev - 3.0
 
-        p = self.dev_params
-        return (
-            p[0] * i1_dev_minus_3 +
-            p[1] * i2_dev_minus_3 +
-            p[2] * i1_dev_minus_3**2 +
-            p[3] * i1_dev_minus_3 * i2_dev_minus_3 +
-            p[4] * i2_dev_minus_3**2 +
-            p[5] * i1_dev_minus_3**3 +
-            p[6] * (i1_dev_minus_3**2) * i2_dev_minus_3 +
-            p[7] * i1_dev_minus_3 * (i2_dev_minus_3**2) +
-            p[8] * i2_dev_minus_3**3 +
-            p[9] * jnp.log(jnp.maximum(i2_dev / 3.0, 1e-8))
-        )
+        from core.material_library import gmr_dev_energy
+        # [C10 .. C03, E, C40, C31, ...]: GMR terms up to the order given by the length (core/material_library.py)
+        return gmr_dev_energy(self.dev_params, i1_dev_minus_3, i2_dev_minus_3, i2_dev, jnp)
 
     def psi_vol(self, F: jnp.ndarray) -> jnp.ndarray:
         _, _, _, _, J = self._eval_invariants(F)

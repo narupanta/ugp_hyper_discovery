@@ -249,7 +249,7 @@ def main():
             if p.shape[-1] <= 10:
                 return 0.0
             from core.ogden import ogden_dev_energy_jax
-            return ogden_dev_energy_jax(F_3d, p[10:][0::2], p[10:][1::2])
+            return ogden_dev_energy_jax(F_3d, p[10:26][0::2], p[10:26][1::2])     # dev16 Ogden block
 
         def psi_dev_formula(p, F_3d):
             C = C_func(F_3d)
@@ -261,18 +261,9 @@ def main():
             i2_dev = I3_safe ** (-2 / 3) * I2
             i1_m3 = i1_dev - 3.0
             i2_m3 = i2_dev - 3.0
-            return (
-                p[0] * i1_m3 +
-                p[1] * i2_m3 +
-                p[2] * i1_m3**2 +
-                p[3] * i1_m3 * i2_m3 +
-                p[4] * i2_m3**2 +
-                p[5] * i1_m3**3 +
-                p[6] * (i1_m3**2) * i2_m3 +
-                p[7] * i1_m3 * (i2_m3**2) +
-                p[8] * i2_m3**3 +
-                p[9] * jnp.log(jnp.maximum(i2_dev / 3.0, 1e-8))
-            ) + _ogden(p, F_3d)
+            from core.material_library import gmr_dev_energy
+            gmr_p = jnp.concatenate([p[:10], p[26:]]) if p.shape[-1] > 26 else p[:10]   # GMR, any order (dev16)
+            return gmr_dev_energy(gmr_p, i1_m3, i2_m3, i2_dev, jnp) + _ogden(p, F_3d)
 
         def psi_vol_formula(p, F_3d):
             C = C_func(F_3d)

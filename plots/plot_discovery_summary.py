@@ -95,7 +95,8 @@ def main():
         if comp == "dev":
             lib = distilled_library(d)
             smp = dev16(np.load(os.path.join(d, "dev_flow_samples.npy")), lib)
-            names = dev_names("gmr_ogden")                  # dev16 layout: [C10..E | mu1, alpha1, ...] for every library
+            from core.material_library import dev16_names, distilled_gmr_order
+            names = dev16_names(distilled_gmr_order(d))     # dev16 layout: [C10..E | mu1, alpha1, ... | C40 ...]
             idx = [names.index(plain(p)) for p in disc]
             # an Ogden term mu_k is shown with its exponent alpha_k when alpha_k was fitted (it varies over the samples)
             st_src, d2, i2 = {}, [], []
@@ -105,7 +106,9 @@ def main():
                     k = names[i][2:]
                     d2.append(rf"$\alpha_{{{k}}}$"); i2.append(i + 1); st_src[d2[-1]] = p
             disc, idx = d2, i2
-            tv = [true_dev[i] if i < 10 else 0.0 for i in idx]
+            # dev16 index -> true dev_params index: 0..9 as is, 26 + k (GMR order > 3) -> 10 + k, Ogden: no GMR truth
+            tv = [true_dev[i] if i < 10 else (true_dev[i - 16] if i >= 26 and i - 16 < len(true_dev) else 0.0)
+                  for i in idx]
         else:
             smp = np.load(os.path.join(d, "aniso_flow_samples.npy"))
             idx = [ANISO_NAMES.index(plain(p)) for p in disc]
